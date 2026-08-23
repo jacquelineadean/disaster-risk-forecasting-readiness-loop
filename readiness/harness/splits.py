@@ -1,0 +1,216 @@
+"""Locked splits, the training channel, and the test-touch budget.
+
+Report §4:
+
+    the agent may propose any model it likes, but it cannot touch the harness,
+    the holdout years, or the threshold.
+
+`TrainingView` is the only way a model receives data. It carries training-year
+units *and* their labels (fitting needs them) and refuses to hand over anything
+from validate or test. `PredictionRequest` carries units with no labels at all.
+
+The touch budget is persisted to disk, not held in memory, precisely so that
+re-running the process does not reset it.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+from dataclasses import dataclass
+from typing import Sequence
+
+from readiness.config import CONTRACT
+from readiness.harness.labels import Panel, Unit
+
+
+class SplitViolation(RuntimeError):
+    """Raised when something reaches for data it is not entitled to see."""
+
+
+@dataclass(frozen=True)
+class Split:
+    name: str
+    years: tuple[int, ...]
+    purpose: str
+
+    def __contains__(self, year: int) -> bool:
+        return year in self.years
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.years[0]}-{self.years[-1]})"
+
+
+TRAIN = Split(
+    "train", CONTRACT.train_years, "fit models; the 20-year climatology window"
+)
+VALIDATE = Split(
+    "validate", CONTRACT.validate_years, "iterate freely; scores may be read often"
+)
+TEST = Split(
+    "test", CONTRACT.test_years, "touched once per model version, then never again"
+)
+
+SPLITS: dict[str, Split] = {s.name: s for s in (TRAIN, VALIDATE, TEST)}
+
+
+def get_split(name: str) -> Split:
+    try:
+        return SPLITS[name]
+    except KeyError:
+        raise SplitViolation(
+            f"unknown split {name!r}; known: {sorted(SPLITS)}"
+        ) from None
+
+
+def assert_disjoint() -> None:
+    """Guard against an edit to `config` that quietly overlaps the splits."""
+    seen: dict[int, str] = {}
+    for split in (TRAIN, VALIDATE, TEST):
+        for year in split.years:
+            if year in seen:
+                raise SplitViolation(
+                    f"year {year} appears in both {seen[year]!r} and {split.name!r}; "
+                    "splits must be disjoint or every score is contaminated"
+                )
+            seen[year] = split.name
+
+
+class TrainingView:
+    """The only channel through which a model sees data.
+
+    Exposes training-year units and labels. Any attempt to read a year outside
+    the training split raises. Records a digest of exactly what was exposed, so
+    the canary can later verify the model was fitted on what it claims.
+    """
+
+    def __init__(self, panel: Panel, split: Split = TRAIN) -> None:
+        leaked = sorted(set(panel.years) - set(split.years))
+        if leaked:
+            raise SplitViolation(
+                f"TrainingView built over {split.name!r} but panel contains "
+                f"out-of-split years {leaked}; refusing to expose holdout data"
+            )
+        self._panel = panel
+        self._split = split
+        self._digest = panel.digest()
+        self.accessed = False
+
+    @property
+    def split(self) -> Split:
+        return self._split
+
+    @property
+    def digest(self) -> str:
+        """Fingerprint of the data this view exposed. Checked by the canary."""
+        return self._digest
+
+    @property
+    def base_rate(self) -> float:
+        self.accessed = True
+        return self._panel.base_rate
+
+    def rows(self) -> list[tuple[Unit, int]]:
+        self.accessed = True
+        return list(zip(self._panel.units, self._panel.labels))
+
+    def units(self) -> list[Unit]:
+        self.accessed = True
+        return list(self._panel.units)
+
+    def __len__(self) -> int:
+        return len(self._panel)
+
+    def __repr__(self) -> str:
+        return (
+            f"<TrainingView {self._split.name} n={len(self._panel):,} "
+            f"sha256:{self._digest}>"
+        )
+
+
+@dataclass(frozen=True)
+class PredictionRequest:
+    """Units to forecast, with labels deliberately absent."""
+
+    units: tuple[Unit, ...]
+    split_name: str
+
+    @classmethod
+    def from_panel(cls, panel: Panel, split: Split) -> "PredictionRequest":
+        return cls(units=panel.units, split_name=split.name)
+
+    def __len__(self) -> int:
+        return len(self.units)
+
+    def __iter__(self):
+        return iter(self.units)
+
+
+class TouchBudget:
+    """Persistent count of how often each model version has been scored on TEST.
+
+    Report §4: "final test 2021-2025, touched once". A budget that lives in
+    memory is not a budget; this one lives in the repo next to the ledger and is
+    meant to be committed.
+    """
+
+    def __init__(self, path: pathlib.Path) -> None:
+        self.path = path
+        self._counts: dict[str, int] = {}
+        if path.exists():
+            self._counts = json.loads(path.read_text())
+
+    def _key(self, model: str, version: str) -> str:
+        return f"{model}@{version}"
+
+    def count(self, model: str, version: str) -> int:
+        return self._counts.get(self._key(model, version), 0)
+
+    def check(self, model: str, version: str) -> None:
+        """Raise if this model version has already spent its test budget."""
+        used = self.count(model, version)
+        if used >= CONTRACT.test_touch_budget:
+            raise SplitViolation(
+                f"{model}@{version} has already been scored against the test "
+                f"split {used} time(s); budget is {CONTRACT.test_touch_budget}. "
+                "Bump the model version and justify it on an experiment card, "
+                "or accept the result you already have."
+            )
+
+    def spend(self, model: str, version: str) -> int:
+        self.check(model, version)
+        key = self._key(model, version)
+        self._counts[key] = self._counts.get(key, 0) + 1
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self._counts, indent=2, sort_keys=True) + "\n")
+        return self._counts[key]
+
+    def as_dict(self) -> dict[str, int]:
+        return dict(self._counts)
+
+
+def split_panel(panel: Panel, split: Split) -> Panel:
+    """Slice a full panel down to one split's years."""
+    sliced = panel.filter_years(split.years)
+    if not len(sliced):
+        raise SplitViolation(
+            f"split {split.name!r} ({split.years[0]}-{split.years[-1]}) is empty "
+            f"in this panel, which covers {panel.years[0]}-{panel.years[-1]}"
+        )
+    return sliced
+
+
+def coverage_report(panel: Panel) -> str:
+    """Human-readable check that the panel actually spans all three splits."""
+    lines = []
+    have = set(panel.years)
+    for split in (TRAIN, VALIDATE, TEST):
+        missing = sorted(set(split.years) - have)
+        sliced = panel.filter_years(split.years)
+        status = "ok" if not missing else f"MISSING {missing}"
+        lines.append(
+            f"  {split.name:<9} {split.years[0]}-{split.years[-1]}  "
+            f"n={len(sliced):>7,}  positives={sum(sliced.labels):>5,}  "
+            f"base={sliced.base_rate if len(sliced) else 0:.4f}  {status}"
+        )
+    return "\n".join(lines)
