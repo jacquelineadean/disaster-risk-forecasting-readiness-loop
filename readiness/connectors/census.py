@@ -1,0 +1,81 @@
+"""County universe, from the Census national county file.
+
+Without an authoritative county list the panel is built from whatever counties
+happen to appear in the event table, which silently drops every county that
+never had a recorded event — deflating the denominator and inflating the base
+rate. This connector supplies the denominator.
+"""
+
+from __future__ import annotations
+
+import pathlib
+from dataclasses import dataclass
+
+from readiness.connectors.base import Manifest, SourceRecord, fetch, sha256_bytes, utc_now
+
+COUNTY_URL = (
+    "https://www2.census.gov/geo/docs/reference/codes2020/national_county2020.txt"
+)
+LICENSE = "US Government work — public domain (17 U.S.C. §105)"
+
+
+@dataclass(frozen=True)
+class County:
+    fips: str          # 5-digit state+county
+    state: str         # 2-letter postal
+    name: str
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.fips})"
+
+
+def load(
+    snapshot_dir: pathlib.Path, manifest: Manifest, *, refresh: bool = False
+) -> list[County]:
+    """Fetch (or reuse) the county file and return every US county."""
+    cache = snapshot_dir / "national_county2020.txt"
+    # A cached file with no manifest record is unpinned — see the same guard in
+    # storm_events.snapshot. Re-fetch rather than use data of unknown provenance.
+    key = "census/national_county2020"
+    if refresh or not cache.exists() or key not in manifest.records:
+        data = fetch(COUNTY_URL)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(data)
+        manifest.add(
+            key,
+            SourceRecord(
+                source="US Census Bureau",
+                url=COUNTY_URL,
+                sha256=sha256_bytes(data),
+                bytes=len(data),
+                fetched_at=utc_now(),
+                license=LICENSE,
+            ),
+        )
+    else:
+        data = cache.read_bytes()
+
+    counties: list[County] = []
+    for i, line in enumerate(data.decode("utf-8", "replace").splitlines()):
+        if i == 0 or not line.strip():
+            continue  # header
+        parts = line.split("|")
+        if len(parts) < 5:
+            continue
+        state, statefp, countyfp, _ns, name = parts[:5]
+        counties.append(
+            County(fips=f"{statefp}{countyfp}", state=state, name=name)
+        )
+    if not counties:
+        raise ValueError("census county file parsed to zero rows")
+    return counties
+
+
+def for_state(counties: list[County], state: str) -> list[County]:
+    """Filter to one state, sorted by FIPS for deterministic panels."""
+    subset = sorted(
+        (c for c in counties if c.state == state.upper()), key=lambda c: c.fips
+    )
+    if not subset:
+        raise KeyError(f"no counties found for state {state!r}")
+    return subset

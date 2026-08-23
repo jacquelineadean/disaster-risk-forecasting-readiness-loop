@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+
+# Raw and derived data pulls. The manifest (snapshots/manifest.json) is the
+# artefact that gets committed: it pins every source file by sha256, so a clone
+# can reproduce the exact data version without carrying 300 MB of NOAA CSVs.
+snapshots/*
+!snapshots/manifest.json
+!snapshots/.gitkeep

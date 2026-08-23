@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "readiness-loop"
+version = "0.1.0"
+description = "An open-source agentic loop that forecasts disaster risk from public data and validates its own probabilities against history."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["disaster-risk", "forecasting", "calibration", "emergency-management", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering :: Atmospheric Science",
+  "Programming Language :: Python :: 3",
+]
+
+# No runtime dependencies, deliberately. The eval plane must produce identical
+# numbers from a clean clone on any machine; a dependency whose version can move
+# under it defeats the Phase 0 reproducibility criterion.
+dependencies = []
+
+[project.optional-dependencies]
+agent = ["claude-agent-sdk>=0.1.0"]
+
+[project.scripts]
+readiness = "readiness.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["readiness*"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
