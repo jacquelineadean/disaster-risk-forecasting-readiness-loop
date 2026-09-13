@@ -79,6 +79,25 @@ class TestCanaryClearsHonestModels(unittest.TestCase):
         _card, report = scoring.screen(ClimatologySeasonal(), self.panel, self.c, "validate")
         self.assertFalse(report.rejected, report.format())
 
+    def test_an_honest_climatology_on_a_rare_hazard_is_not_punished(self):
+        # Regression: with a base rate well under 1%, an honest seasonal
+        # climatology forecasts <= 0.01 for most units, and those forecasts
+        # agree with the (mostly zero) outcomes almost always. A pooled
+        # near-binary agreement check rejected it as a leak.
+        c = make_contract(hazard="tropical_cyclone", period="month")
+        panel = make_panel(contract=c, n_regions=40, rare=True)
+        self.assertLess(panel.base_rate, 0.01)
+        card, report = scoring.screen(ClimatologySeasonal(), panel, c, "validate")
+        agreement = next(f for f in report.findings if f.check == "outcome agreement")
+        self.assertFalse(agreement.tripped, agreement.detail)
+        self.assertFalse(report.rejected, report.format())
+        # ... and the oracle is still caught on the same rare panel.
+        _card, leaked = scoring.screen(LeakyOracle(panel), panel, c, "validate")
+        self.assertTrue(leaked.rejected)
+        self.assertTrue(
+            next(f for f in leaked.findings if f.check == "outcome agreement").tripped
+        )
+
     def test_a_genuinely_skilful_model_is_not_punished(self):
         # The seasonal climatology should beat the pooled climatology on a
         # panel built with real spatial and seasonal structure — and clearing
@@ -113,6 +132,18 @@ class TestCanaryChecks(unittest.TestCase):
         )
         agreement = next(f for f in report.findings if f.check == "outcome agreement")
         self.assertTrue(agreement.tripped)
+
+    def test_near_zero_forecasts_on_a_rare_outcome_do_not_trip(self):
+        # 995 non-occurrences forecast at 0.005 and 5 occurrences forecast at
+        # 0.3: honest, unsharp, and not a leak.
+        probs = [0.005] * 995 + [0.3] * 5
+        outcomes = [0] * 995 + [1] * 5
+        report = canary.run(
+            probs=probs, outcomes=outcomes, brier_skill_score=0.05, auc=0.8
+        )
+        agreement = next(f for f in report.findings if f.check == "outcome agreement")
+        self.assertFalse(agreement.tripped, agreement.detail)
+        self.assertIn("0.0% of occurrences", agreement.detail)
 
 
 if __name__ == "__main__":

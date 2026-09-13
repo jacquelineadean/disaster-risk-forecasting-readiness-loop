@@ -99,14 +99,18 @@ def discover_files(years: Iterable[int]) -> dict[int, str]:
     return {y: INDEX_URL + name for y, (_, name) in sorted(found.items())}
 
 
-def parse_year(data: bytes, states: Iterable[str] | None) -> dict[str, list[dict]]:
+def parse_year(
+    data: bytes, states: Iterable[str] | None, stats: dict | None = None
+) -> dict[str, list[dict]]:
     """Decompress one national year file and group rows by 2-digit state FIPS.
 
     `states` limits the output to those states; `None` keeps every row. Rows
-    are returned under their zero-padded state FIPS.
+    are returned under their zero-padded state FIPS. Every row is read either
+    way, so the national total is recorded in `stats["n_total"]` for free.
     """
     wanted = None if states is None else {int(s) for s in states}
     rows: dict[str, list[dict]] = defaultdict(list)
+    n_total = 0
     with gzip.open(io.BytesIO(data), "rt", encoding="utf-8", errors="replace") as fh:
         reader = csv.DictReader(fh)
         missing = [f for f in _FIELDS if f not in (reader.fieldnames or [])]
@@ -122,10 +126,13 @@ def parse_year(data: bytes, states: Iterable[str] | None) -> dict[str, list[dict
             # so compare numerically rather than as strings.
             if not raw.isdigit():
                 continue
+            n_total += 1
             fips = int(raw)
             if wanted is not None and fips not in wanted:
                 continue
             rows[f"{fips:02d}"].append({k: (row.get(k) or "").strip() for k in _FIELDS})
+    if stats is not None:
+        stats["n_total"] = n_total
     return dict(rows)
 
 
@@ -214,7 +221,8 @@ def snapshot(
                     if part not in parts_to_write:
                         parts_to_write.append(part)
             wanted = None if NATIONAL in parts_to_write else parts_to_write
-            grouped = parse_year(data, wanted)
+            stats: dict = {}
+            grouped = parse_year(data, wanted, stats)
             counts: dict[str, int] = {}
             for part in parts_to_write:
                 if part == NATIONAL:
@@ -227,7 +235,6 @@ def snapshot(
                 (raw_dir / f"{year}.csv.gz").write_bytes(data)
             record = None
             if url is not None:
-                total = sum(len(v) for v in grouped.values()) if states is None else None
                 record = SourceRecord(
                     source="NOAA NCEI Storm Events Database",
                     url=url,
@@ -235,7 +242,7 @@ def snapshot(
                     bytes=len(data),
                     fetched_at=utc_now(),
                     license=LICENSE,
-                    notes=f"{total:,} events nationally" if total is not None else "",
+                    notes=f"{stats['n_total']:,} events nationally",
                 )
             return year, record, counts
 

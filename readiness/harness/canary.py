@@ -105,16 +105,29 @@ def run(
 
     # 3. Near-binary forecasts that agree with the truth. A model that has read
     #    the label column tends to emit values pinned near 0 and 1 that match.
-    confident = [
-        (p, y) for p, y in zip(probs, outcomes) if p <= 0.01 or p >= 0.99
-    ]
-    if confident:
-        agree = sum(1 for p, y in confident if round(p) == y) / len(confident)
-        share = len(confident) / len(probs)
-        agree_trip = agree > CANARY_MAX_AGREEMENT and share > 0.5
+    #
+    #    Judged per outcome class, deliberately. On a rare hazard an honest
+    #    climatology forecasts well under 1% for most units, and those
+    #    near-zero forecasts "agree" with the mostly-zero outcomes almost every
+    #    time — a pooled agreement rate would flag it. What leakage actually
+    #    looks like is near-one forecasts capturing the occurrences *and*
+    #    near-zero forecasts capturing the non-occurrences. Honest rare-event
+    #    forecasts have no near-one group at all.
+    n_pos = sum(outcomes)
+    n_neg = len(outcomes) - n_pos
+    hits = sum(1 for p, y in zip(probs, outcomes) if p >= 0.99 and y == 1)
+    misses = sum(1 for p, y in zip(probs, outcomes) if p <= 0.01 and y == 0)
+    any_confident = any(p <= 0.01 or p >= 0.99 for p in probs)
+    if any_confident:
+        hit_share = hits / n_pos if n_pos else 0.0
+        miss_share = misses / n_neg if n_neg else 0.0
+        agree_trip = (
+            hit_share > CANARY_MAX_AGREEMENT and miss_share > CANARY_MAX_AGREEMENT
+        )
         detail = (
-            f"{share:.1%} of forecasts are near-binary and {agree:.3%} of those "
-            f"match the outcome (ceiling {CANARY_MAX_AGREEMENT:.1%})"
+            f"{hit_share:.1%} of occurrences forecast >= 0.99 and {miss_share:.1%} "
+            f"of non-occurrences forecast <= 0.01 (ceiling {CANARY_MAX_AGREEMENT:.1%} "
+            "on both)"
         )
     else:
         agree_trip = False
