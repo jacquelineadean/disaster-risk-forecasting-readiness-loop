@@ -56,6 +56,10 @@ class Manifest:
 
     path: pathlib.Path
     records: dict[str, SourceRecord] = field(default_factory=dict)
+    #: Set by `add`; cleared by `save`. A manifest that has not changed is not
+    #: rewritten, so a read-only command leaves the committed file untouched
+    #: instead of bumping its timestamp.
+    dirty: bool = False
 
     @classmethod
     def load(cls, path: pathlib.Path) -> "Manifest":
@@ -67,13 +71,21 @@ class Manifest:
             records={k: SourceRecord(**v) for k, v in raw.get("records", {}).items()},
         )
 
-    def save(self) -> None:
+    def save(self, *, force: bool = False) -> bool:
+        """Write the manifest if anything was pinned since it was loaded.
+
+        Returns whether it wrote.
+        """
+        if not (self.dirty or force):
+            return False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         blob = {
             "generated_at": utc_now(),
             "records": {k: v.to_dict() for k, v in sorted(self.records.items())},
         }
         self.path.write_text(json.dumps(blob, indent=2, sort_keys=True) + "\n")
+        self.dirty = False
+        return True
 
     def add(self, key: str, record: SourceRecord) -> None:
         prior = self.records.get(key)
@@ -83,6 +95,7 @@ class Manifest:
                 "prior experiments were run against the old bytes"
             ).strip()
         self.records[key] = record
+        self.dirty = True
 
     #: Returned instead of a hash when nothing is pinned. Must not look like a
     #: digest: an empty manifest previously hashed to sha256("") — a perfectly
