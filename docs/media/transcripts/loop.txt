@@ -1,0 +1,40 @@
+$ readiness loop -c tornado-ok --quiet
+
+experimental loop  (tornado-ok, local backend, split=validate)
+--------------------------------------------------------------
+gather context
+  contract: tornado-ok (sha256:827313e1273a5e76)
+  census: resolving region universe
+  census: 77 counties in US, OK (FIPS 40)
+  storm events: 1996-2025
+  storm events: 62,023 events loaded for US, OK
+  panel: 9,240 units  |  628 positive  |  base rate 0.0680  |  1996-2025  |  sha256:4242839fe13251df
+  data version: sha256:0cf045d0069cdef2
+take action  [climatology-pooled]
+  fit climatology-pooled@1.0.0 on train (1996-2015)
+verify work
+  BSS +0.0000   AUC 0.5000   brier 0.075222
+  -> failed the contract on: brier skill score, auc
+take action  [climatology-seasonal]
+  fit climatology-seasonal@1.0.0 on train (1996-2015)
+verify work
+  BSS +0.1201   AUC 0.8175   brier 0.066190
+  -> failed the contract on: reliability
+take action  [persistence-last-year]
+  fit persistence-last-year@1.0.0 on train (1996-2015)
+verify work
+  BSS +0.0114   AUC 0.5401   brier 0.074364
+  -> failed the contract on: auc
+take action  [leaky-oracle]
+  fit leaky-oracle@1.0.0 on train (1996-2015)
+verify work
+  BSS +1.0000   AUC 1.0000   brier 0.000001
+  -> REJECTED by leakage canary; contract verdict not honoured
+repeat  (queue exhausted)
+
+ran 4 experiment(s) against tornado-ok
+  passed contract   -
+  failed contract   ['climatology-pooled', 'climatology-seasonal', 'persistence-last-year']
+  rejected (canary) ['leaky-oracle']
+
+ledger: docs/.demo/experiments/tornado-ok/ledger.jsonl

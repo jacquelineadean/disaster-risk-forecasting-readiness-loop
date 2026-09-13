@@ -1,0 +1,24 @@
+$ readiness hazards
+
+hazard catalogue  (name, Storm Events coding, event types)
+------------------------------------------------------------
+  inland_flood      mixed   Flood, Flash Flood
+  tornado           county  Tornado
+  hail              county  Hail
+  severe_wind       mixed   Thunderstorm Wind, High Wind, Strong Wind
+  lightning         county  Lightning
+  tropical_cyclone  zone    Hurricane, Hurricane (Typhoon), Tropical Storm, Tropical Depression
+  storm_surge       zone    Storm Surge/Tide
+  coastal_flood     zone    Coastal Flood
+  heat              zone    Heat, Excessive Heat
+  extreme_cold      zone    Cold/Wind Chill, Extreme Cold/Wind Chill, Frost/Freeze
+  winter_storm      zone    Winter Storm, Blizzard, Ice Storm, Heavy Snow, Lake-Effect Snow, Sleet
+  drought           zone    Drought
+  wildfire          zone    Wildfire
+  debris_flow       county  Debris Flow
+  tsunami           zone    Tsunami
+  avalanche         zone    Avalanche
+  dust_storm        zone    Dust Storm
+
+A contract may also name a hazard outside the catalogue by listing its
+event types explicitly (`readiness register ... --event-type ...`).

@@ -1,0 +1,10 @@
+$ readiness verify -c tornado-ok --quiet
+
+Phase 0 exit criteria  (tornado-ok)
+------------------------------------------------------------
+[ok]   contract tornado-ok validates (sha256:827313e1273a5e76); splits are disjoint
+[ok]   climatology baselines reproduce bit-for-bit
+[ok]   leakage canary rejected leaky-oracle (tripped: implausible skill, implausible auc, outcome agreement, train provenance)
+[ok]   ledger chain intact: 4 card(s)
+
+Phase 0 exit criteria met for tornado-ok.
