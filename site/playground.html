@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Readiness Loop · sandbox</title>
+<meta name="description" content="Run the real readiness package in your browser: the command line, contract registration, a calibration playground, ledger tampering, bit-for-bit fingerprints and the dashboard renderer, all on the pinned data.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body data-page="playground">
+
+<div class="mast"><div class="bar">
+  <a class="brand" href="index.html">The Readiness Loop<span>Sandbox</span></a>
+  <nav class="site">
+    <a data-page="index" href="index.html">Overview</a>
+    <a data-page="design" href="design.html">System design</a>
+    <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+    <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+    <a data-page="playground" href="playground.html">Sandbox</a>
+    <a data-report href="generated/report/index.html">Research briefing</a>
+    <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+  </nav>
+</div></div>
+
+<header class="hero">
+  <div class="meta"><span class="k">Live sandbox</span><span>the real code, in your browser</span></div>
+  <h1>Run it here.</h1>
+  <p class="lede">This page loads the <code>readiness</code> package into a Python runtime in your browser, with the registered contracts, the committed ledgers, the blessed fingerprints and the pinned Storm Events extracts for the example contracts. Every button below calls the same functions the command line calls. Nothing leaves your machine.</p>
+  <div class="card mt24">
+    <div class="status"><span class="dot" id="status-dot"></span><strong id="status-text">starting…</strong></div>
+    <div class="progress" id="progress"><i class="indet"></i></div>
+    <p class="small mb0" id="status-sub"></p>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="playground">
+    <div>
+      <div class="eyebrow-row"><span class="eyebrow">Guided demos</span><span class="line"></span></div>
+
+      <details class="demo" id="demo-walk" open>
+        <summary><span><span class="k">01</span>The walkthrough, command by command</span></summary>
+        <div class="inner">
+          <p class="small mt8">The commands from the <a href="walkthrough.html">walkthrough</a>, run here. Pick a contract; the output lands in the terminal.</p>
+          <div class="field"><label for="walk-contract">contract</label><select id="walk-contract"></select></div>
+          <p class="small" id="walk-note"></p>
+          <div class="btn-row">
+            <button class="btn small secondary" data-needs-sandbox data-cmd="contracts">contracts</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="contract -c {c}">contract</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="hazards">hazards</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="models">models</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="panel -c {c} --quiet">panel</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="score climatology-seasonal -c {c} --quiet">score</button>
+            <button class="btn small" data-needs-sandbox data-cmd="loop -c {c} --quiet">loop</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="ledger -c {c}">ledger</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="verify -c {c} --quiet">verify</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="canary -c {c} --quiet">canary</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="score climatology-seasonal -c {c} --split test --quiet">score on test (refused)</button>
+          </div>
+          <p class="small mb0">The loop writes into a fresh experiments tree, so the ledger starts empty like a new clone's; switch to the committed tree in the terminal's toolbar to append to a copy of the real ledgers instead. Scoring against <code>test</code> without <code>--spend-test-touch</code> is refused, as it should be.</p>
+        </div>
+      </details>
+
+      <details class="demo" id="demo-register">
+        <summary><span><span class="k">02</span>Register a contract</span></summary>
+        <div class="inner">
+          <p class="small mt8">Compose <code>readiness register</code> from options. Validation runs before anything is written: try overlapping splits, a start year before 1996, or a zero damage threshold with casualties not counted, and read the refusal.</p>
+          <div class="chips" id="reg-presets">
+            <button class="chip" type="button" data-preset='{"name":"hail-ok","hazard":"hail","states":"OK","period":"quarter","zone":"drop","train":"1996-2015","validate":"2016-2020","test":"2021-2025","desc":"Damaging hail, Oklahoma counties, quarterly."}'>hail-ok</button>
+            <button class="chip" type="button" data-preset='{"name":"heat-la","hazard":"heat","states":"LA","period":"month","zone":"expand","train":"1996-2015","validate":"2016-2020","test":"2021-2025","desc":"Damaging heat, Louisiana parishes, monthly, zones expanded."}'>heat-la (zone-coded)</button>
+            <button class="chip" type="button" data-preset='{"name":"wind-la","hazard":"severe_wind","states":"LA","period":"quarter","zone":"expand","train":"1996-2015","validate":"2016-2020","test":"2021-2025","desc":"Damaging wind, Louisiana parishes, quarterly."}'>wind-la</button>
+            <button class="chip" type="button" data-preset='{"name":"hail-ks","hazard":"hail","states":"KS","period":"quarter","zone":"drop","train":"1996-2015","validate":"2016-2020","test":"2021-2025","desc":"Damaging hail, Kansas counties, quarterly."}'>hail-ks (no data on board)</button>
+            <button class="chip" type="button" data-preset='{"name":"bad-splits","hazard":"tornado","states":"OK","period":"quarter","zone":"drop","train":"1996-2016","validate":"2016-2020","test":"2021-2025","desc":""}'>overlapping splits</button>
+            <button class="chip" type="button" data-preset='{"name":"too-early","hazard":"tornado","states":"OK","period":"quarter","zone":"drop","train":"1990-2015","validate":"2016-2020","test":"2021-2025","desc":""}'>starts before 1996</button>
+          </div>
+          <form id="register-form">
+            <div class="field"><label for="reg-name">name</label><input type="text" id="reg-name" value="hail-ok" pattern="[a-z0-9][a-z0-9-]{0,63}"></div>
+            <div class="field"><label for="reg-hazard">hazard</label><select id="reg-hazard"></select></div>
+            <div class="field"><label for="reg-states">states</label><input type="text" id="reg-states" value="OK" placeholder="two-letter codes, comma-separated; empty = the whole country"></div>
+            <div class="field"><label for="reg-period">period</label><select id="reg-period"><option>month</option><option selected>quarter</option><option>year</option></select></div>
+            <div class="field"><label for="reg-usd">damage ≥ $</label><input type="number" id="reg-usd" value="10000" min="0" step="1000"></div>
+            <div class="field"><label></label><span class="check"><input type="checkbox" id="reg-nocas"><label for="reg-nocas" style="color:inherit">do not count injuries or deaths as damaging</label></span></div>
+            <div class="field"><label for="reg-zone">zone policy</label><select id="reg-zone"><option selected>drop</option><option>expand</option></select></div>
+            <div class="field"><label for="reg-train">train</label><input type="text" id="reg-train" value="1996-2015" pattern="\d{4}-\d{4}"></div>
+            <div class="field"><label for="reg-validate">validate</label><input type="text" id="reg-validate" value="2016-2020" pattern="\d{4}-\d{4}"></div>
+            <div class="field"><label for="reg-test">test</label><input type="text" id="reg-test" value="2021-2025" pattern="\d{4}-\d{4}"></div>
+            <fieldset><legend>thresholds (blank = default)</legend>
+              <div class="field"><label for="reg-bss">min BSS</label><input type="number" id="reg-bss" placeholder="0.0" step="0.01"></div>
+              <div class="field"><label for="reg-tol">tolerance</label><input type="number" id="reg-tol" placeholder="0.05" step="0.01" min="0" max="1"></div>
+              <div class="field"><label for="reg-minbin">min bin count</label><input type="number" id="reg-minbin" placeholder="30" step="1" min="1"></div>
+              <div class="field"><label for="reg-auc">min AUC</label><input type="number" id="reg-auc" placeholder="0.70" step="0.01" min="0.5" max="1"></div>
+              <div class="field"><label for="reg-bins">bins</label><input type="number" id="reg-bins" placeholder="10" step="1" min="2"></div>
+            </fieldset>
+            <div class="field"><label for="reg-desc">description</label><input type="text" id="reg-desc" value="Damaging hail, Oklahoma counties, quarterly."></div>
+            <div class="field"><label></label><span class="check"><input type="checkbox" id="reg-dry"><label for="reg-dry" style="color:inherit">dry run (print the JSON, write nothing)</label>&nbsp;&nbsp;<input type="checkbox" id="reg-force"><label for="reg-force" style="color:inherit">force (overwrite)</label></span></div>
+            <p class="small" id="reg-hint"></p>
+            <pre class="code" id="reg-preview" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            <div class="btn-row"><button class="btn small" type="submit" data-needs-sandbox>Register</button></div>
+          </form>
+          <div id="reg-follow"></div>
+        </div>
+      </details>
+
+      <details class="demo" id="demo-calibrate">
+        <summary><span><span class="k">03</span>Calibration playground</span></summary>
+        <div class="inner">
+          <p class="small mt8">Fit a proposable model on the training years, pass its forecasts through a monotone recalibration — <code>q = σ(scale · logit(p) + shift)</code> — and re-score with the real harness: scorecard, contract verdict, canary. The seasonal climatology on <code>tornado-ok</code> fails one clause; see whether you can make it pass, and what the canary says when you pick the oracle.</p>
+          <div class="field"><label for="cal-contract">contract</label><select id="cal-contract"></select></div>
+          <div class="field"><label for="cal-model">model</label><select id="cal-model"></select></div>
+          <div id="cal-params"></div>
+          <div class="field range"><label for="cal-scale">scale (sharpen &gt; 1)</label><input type="range" id="cal-scale" min="0.25" max="4" step="0.05" value="1"><span class="val" id="cal-scale-val">1.00</span></div>
+          <div class="field range"><label for="cal-shift">shift (logit)</label><input type="range" id="cal-shift" min="-2" max="2" step="0.05" value="0"><span class="val" id="cal-shift-val">0.00</span></div>
+          <div class="btn-row"><button class="btn small" id="cal-run" data-needs-sandbox>Score with the harness</button><button class="btn small ghost" id="cal-reset">Reset sliders</button></div>
+          <div class="result" id="cal-result"></div>
+        </div>
+      </details>
+
+      <details class="demo" id="demo-tamper">
+        <summary><span><span class="k">04</span>Tamper with a ledger</span></summary>
+        <div class="inner">
+          <p class="small mt8">Break the ledger in the sandbox's file system the way an attacker would, then run <code>readiness ledger</code> and read where the chain breaks. In the fresh tree, run the loop first; in the committed tree, the real ledgers are on board.</p>
+          <div class="field"><label for="tam-contract">contract</label><select id="tam-contract"></select></div>
+          <p class="small" id="tam-state"></p>
+          <div class="btn-row">
+            <button class="btn small secondary" data-needs-sandbox data-tamper="edit">edit exp-0002's skill score</button>
+            <button class="btn small secondary" data-needs-sandbox data-tamper="swap">swap exp-0002 and exp-0003</button>
+            <button class="btn small secondary" data-needs-sandbox data-tamper="delete-middle">delete exp-0003</button>
+            <button class="btn small secondary" data-needs-sandbox data-tamper="truncate">delete the last card</button>
+            <button class="btn small secondary" data-needs-sandbox data-tamper="no-anchor">delete the anchor</button>
+            <button class="btn small secondary" data-needs-sandbox data-tamper="forge">truncate and forge the anchor</button>
+            <button class="btn small ghost" data-needs-sandbox id="tam-restore">Restore</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="demo" id="demo-verify">
+        <summary><span><span class="k">05</span>Bit-for-bit</span></summary>
+        <div class="inner">
+          <p class="small mt8">The Phase 0 reproducibility criterion, checked here: build the panel, score both climatology baselines on the validate split, and compare every fingerprint field with the file blessed from a clean clone. Different machine, different Python, WebAssembly instead of native — the numbers must not move.</p>
+          <div class="field"><label for="ver-contract">contract</label><select id="ver-contract"></select></div>
+          <div class="btn-row"><button class="btn small" id="ver-run" data-needs-sandbox>Recompute and compare</button><button class="btn small secondary" id="ver-cli" data-needs-sandbox>readiness verify</button></div>
+          <div class="result" id="ver-result"></div>
+        </div>
+      </details>
+
+      <details class="demo" id="demo-dashboard">
+        <summary><span><span class="k">06</span>Render the dashboard</span></summary>
+        <div class="inner">
+          <p class="small mt8"><code>readiness dashboard</code> renders a contract's ledger as a self-contained page with no JavaScript. Here the same renderer runs in the sandbox and the page it produces is shown in the frame below the demos.</p>
+          <div class="field"><label for="dash-contract">contract</label><select id="dash-contract"></select></div>
+          <div class="btn-row"><button class="btn small" id="dash-run" data-needs-sandbox>Render</button></div>
+        </div>
+      </details>
+
+      <iframe class="dash mt16" id="dash-frame" title="rendered dashboard" hidden></iframe>
+    </div>
+
+    <div class="sticky">
+      <div class="eyebrow-row"><span class="eyebrow">Terminal</span><span class="line"></span><span class="n" id="term-busy" hidden>running…</span></div>
+      <div class="term live" id="term">
+        <div class="tbar"><i></i><i></i><i></i><span class="t">readiness — in-browser sandbox</span><span class="act"><button id="term-clear" type="button">clear</button><button id="term-reset" type="button">reset sandbox</button></span></div>
+        <pre></pre>
+      </div>
+      <div class="cmdline"><span class="prefix">$ readiness</span><input type="text" id="cmd-input" placeholder="contracts" autocomplete="off" spellcheck="false"><button class="btn small" id="cmd-run" data-needs-sandbox>Run</button></div>
+      <div class="chips" id="chips">
+        <span class="chip" data-chip="contracts">contracts</span>
+        <span class="chip" data-chip="contract -c tornado-ok --json">contract --json</span>
+        <span class="chip" data-chip="hazards">hazards</span>
+        <span class="chip" data-chip="models">models</span>
+        <span class="chip" data-chip="panel -c inland-flood-la --quiet">panel</span>
+        <span class="chip" data-chip="score persistence-last-year -c tornado-ok --quiet">score persistence</span>
+        <span class="chip" data-chip="loop -c inland-flood-la --quiet">loop</span>
+        <span class="chip" data-chip="ledger -c tornado-ok --show --id exp-0002">ledger --show</span>
+        <span class="chip" data-chip="canary -c tropical-cyclone-gulf --quiet">canary (Gulf)</span>
+        <span class="chip" data-chip="register --help">register --help</span>
+      </div>
+      <div class="field" style="margin-top:6px"><label>experiments tree</label><span class="check">
+        <input type="radio" name="tree" id="tree-fresh" value="fresh" checked><label for="tree-fresh" style="color:inherit">fresh (empty, like a new clone)</label>
+        <input type="radio" name="tree" id="tree-committed" value="committed"><label for="tree-committed" style="color:inherit">committed ledgers</label></span></div>
+      <div class="mt16">
+        <div class="eyebrow-row"><span class="eyebrow">What is on board</span><span class="line"></span></div>
+        <div id="coverage"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer class="site">
+  <p>The sandbox runs <a href="https://pyodide.org">Pyodide</a>, CPython compiled to WebAssembly, loaded from cdn.jsdelivr.net. The package itself has no dependencies, which is why it fits. Commands that need the network (<code>snapshot</code>) or a process (<code>mcp</code>, <code>report</code>) are not available here.</p>
+  <p><span data-built>…</span></p>
+</footer>
+
+<script src="assets/site.js"></script>
+<script src="assets/playground.js"></script>
+</body>
+</html>

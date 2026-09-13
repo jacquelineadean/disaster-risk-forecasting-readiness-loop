@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Readiness Loop · system design</title>
+<meta name="description" content="How the Readiness Loop is built: four planes and one contract; the two invariants; contracts as hashed data; the pinned data plane; the harness, its metrics and verdict; the leakage canary; the hash-chained ledger; the agent plane.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body data-page="design">
+
+<div class="mast"><div class="bar">
+  <a class="brand" href="index.html">The Readiness Loop<span>System design</span></a>
+  <nav class="site">
+    <a data-page="index" href="index.html">Overview</a>
+    <a data-page="design" href="design.html">System design</a>
+    <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+    <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+    <a data-page="playground" href="playground.html">Sandbox</a>
+    <a data-report href="generated/report/index.html">Research briefing</a>
+    <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+  </nav>
+</div></div>
+
+<header class="hero">
+  <div class="meta"><span class="k">System design</span><span>report §5 · four planes, one contract</span></div>
+  <h1>The agent proposes; the harness disposes.</h1>
+  <p class="lede">Four planes, one contract per experiment series. Two invariants hold everywhere, and most of the design follows from them.</p>
+</header>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">01 · Planes</span><span class="line"></span></div>
+  <h2>Who may write what.</h2>
+  <div class="diagram">
+    <svg viewBox="0 0 1040 430" width="1040" height="430" role="img" aria-label="four planes and the contract">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1c1a16"/></marker>
+        <marker id="arr-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#2b5aa8"/></marker>
+        <marker id="arr-no" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b03a2e"/></marker>
+      </defs>
+      <!-- contract -->
+      <rect class="box accent" x="30" y="30" width="320" height="76"/>
+      <text class="label" x="48" y="54">the contract</text>
+      <text class="mono" x="48" y="72">readiness/contracts.py · contracts/&lt;name&gt;.json</text>
+      <text class="sub" x="48" y="92">pre-registered criteria, as data; hashed before any model is fitted</text>
+      <!-- data plane -->
+      <rect class="box" x="30" y="150" width="320" height="76"/>
+      <text class="label" x="48" y="174">data plane</text>
+      <text class="mono" x="48" y="192">readiness/connectors/</text>
+      <text class="sub" x="48" y="212">fetch, checksum and pin public sources; build the labelled panel</text>
+      <!-- agent plane -->
+      <rect class="box" x="30" y="300" width="320" height="96"/>
+      <text class="label" x="48" y="324">agent plane</text>
+      <text class="mono" x="48" y="342">readiness/agent/</text>
+      <text class="sub" x="48" y="362">orchestrator + subagents; reads scores, writes cards</text>
+      <text class="sub" x="48" y="380">local backend: deterministic, no LLM · claude backend: Agent SDK</text>
+      <!-- engine -->
+      <rect class="box" x="420" y="300" width="250" height="96"/>
+      <text class="label" x="438" y="324">the models</text>
+      <text class="mono" x="438" y="342">readiness/engine/</text>
+      <text class="sub" x="438" y="362">everything the agent may propose;</text>
+      <text class="sub" x="438" y="380">hazard- and place-agnostic by construction</text>
+      <!-- harness -->
+      <rect class="box harness" x="730" y="110" width="290" height="180"/>
+      <text class="label" x="748" y="136">eval plane — the harness</text>
+      <text class="mono" x="748" y="154">readiness/harness/</text>
+      <text class="sub" x="748" y="176">splits · labels · scoring · metrics</text>
+      <text class="sub" x="748" y="192">contract verdict · leakage canary · ledger</text>
+      <text class="label" x="748" y="224" style="fill:#b03a2e">No LLM. No agent writes.</text>
+      <text class="sub" x="748" y="244">a diff here from an automated run</text>
+      <text class="sub" x="748" y="260">is a security bug, not a contribution</text>
+      <!-- ledger -->
+      <rect class="box" x="730" y="330" width="290" height="66"/>
+      <text class="label" x="748" y="354">the ledger</text>
+      <text class="mono" x="748" y="372">experiments/&lt;name&gt;/ledger.jsonl (+ anchor)</text>
+      <text class="sub" x="748" y="388">append-only by hash chaining; committed</text>
+      <!-- arrows -->
+      <path class="arrow accent" d="M350 68 C 560 68, 600 150, 728 150"/>
+      <text class="sub" x="540" y="86">criteria + sha256, stamped on every card</text>
+      <path class="arrow" d="M350 188 H 728"/>
+      <text class="sub" x="470" y="182">pinned panel, data version</text>
+      <path class="arrow" d="M350 348 H 418"/>
+      <text class="sub" x="356" y="338">proposes</text>
+      <path class="arrow" d="M670 330 C 700 290, 700 270, 728 250"/>
+      <text class="sub" x="560" y="270">fit through TrainingView,</text>
+      <text class="sub" x="560" y="286">predict on bare units</text>
+      <path class="arrow" d="M875 290 V 328"/>
+      <text class="sub" x="884" y="314">sealed card</text>
+      <path class="arrow dashed" d="M728 372 C 600 372, 500 420, 350 384"/>
+      <text class="sub" x="470" y="414">reads the ledger and the score reports</text>
+    </svg>
+  </div>
+  <div class="cols">
+    <div class="main">
+      <p>Report §5 asks for a deterministic scoring harness with zero LLM involvement: locked holdouts, Brier / BSS / reliability / AUC, an append-only experiment ledger — with the agent granted read access and no write access. The package layout is that sentence made into directories. The engine is the only place the agent's proposals land; the harness reads the contract and scores whatever it is handed; the ledger is the only thing the loop writes.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>directory</th><th>plane</th><th>role</th></tr></thead>
+        <tbody>
+          <tr><td><code>readiness/contracts.py</code></td><td>the contract</td><td>schema, validation, digest and registry. Not edited while iterating.</td></tr>
+          <tr><td><code>readiness/config.py</code></td><td>harness policy</td><td>the hazard catalogue, the record start year, the canary ceilings — the few things that apply to every contract.</td></tr>
+          <tr><td><code>readiness/connectors/</code></td><td>data plane</td><td>base (pinning, HTTP), Census counties, Storm Events, NWS zones, the read-only MCP server.</td></tr>
+          <tr><td><code>readiness/engine/</code></td><td>the models</td><td>climatologies, persistence, and the leaky oracle the canary exists to reject.</td></tr>
+          <tr><td><code>readiness/agent/</code></td><td>agent plane</td><td>the orchestrator (both backends) and the subagent definitions.</td></tr>
+          <tr><td><code>readiness/harness/</code></td><td>eval plane</td><td>metrics, splits, labels, scoring, contract verdict, canary, ledger. No LLM. No agent writes.</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <aside class="note"><strong>Import discipline</strong><br>The engine may not import the contract module, the verdict or the canary: a model that can read its own acceptance criteria is a model that can be written to satisfy them. The harness does not import the engine or the agent: it must not depend on what it is judging.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">02 · Invariants</span><span class="line"></span></div>
+  <h2>Two rules, readable in one sitting each.</h2>
+  <div class="grid-2 mt16">
+    <div class="card">
+      <h3>No model ever receives a holdout label.</h3>
+      <p><code>TrainingView</code> is the only channel a model gets data through, and it raises if handed a panel containing a validate or test year. <code>predict()</code> receives bare units. Labels are fetched in <code>scoring.score()</code> <em>after</em> <code>predict()</code> has returned — one function, in one file, which is the point.</p>
+<pre class="code"><code># readiness/harness/scoring.py
+view = TrainingView(train_panel, train_split)
+model.fit(view)
+
+request = PredictionRequest.from_panel(eval_panel, split)
+probs = list(model.predict(request))
+
+# Labels are fetched only now — after predict() has returned.
+outcomes = list(eval_panel.labels)</code></pre>
+<pre class="code mt8"><code># readiness/harness/splits.py
+leaked = sorted(set(panel.years) - set(split.years))
+if leaked:
+    raise SplitViolation(
+        f"TrainingView built over {split.name!r} but panel "
+        f"contains out-of-split years {leaked}; refusing to "
+        "expose holdout data")</code></pre>
+    </div>
+    <div class="card">
+      <h3>Nothing in the harness calls a language model.</h3>
+      <p>Verification has to be rules-based to be worth anything. If an LLM wants these numbers it reads them downstream, from the ledger. The verdict is mechanical: there is no judgement call, no "close enough", and no LLM in the path. If the numbers clear the contract's thresholds the model passes; otherwise it does not, and the failing checks say why.</p>
+      <p>The same discipline shapes the two loop backends. The <code>local</code> backend walks a fixed queue of candidates with no model calls at all — that is what CI runs and what the bit-for-bit criterion is checked against, because a loop whose control flow depends on a language model cannot have a bit-for-bit criterion. The <code>claude</code> backend runs the same loop with an Agent SDK orchestrator; every number on every card still comes from <code>readiness.harness</code>, and no subagent is granted a write tool.</p>
+      <p class="mb0">The test-touch budget is persisted to disk, not held in memory — a budget that resets when you restart the process is not a budget — and scoring against <code>test</code> additionally requires an explicit <code>--spend-test-touch</code> flag.</p>
+    </div>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">03 · The contract</span><span class="line"></span></div>
+  <h2>"Within an acceptable threshold" becomes a contract, not a feeling.</h2>
+  <div class="cols">
+    <div class="main">
+      <p>A contract is a JSON file in <code>contracts/</code>, written <em>before</em> any model is fitted. It is everything that defines one experiment series: the hazard and its Storm Events event types, the geography, the forecast period, what counts as a damaging event, what to do with zone-coded events, the locked splits, the test-touch budget, the reference model and the thresholds a model must clear.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>field</th><th>meaning</th><th>default</th></tr></thead>
+        <tbody>
+          <tr><td><code>name</code></td><td>lowercase letters, digits, hyphens; names the file and the ledger directory</td><td>required</td></tr>
+          <tr><td><code>version</code>, <code>description</code></td><td>labels for humans; <strong>not hashed</strong></td><td><code>1.0.0</code>, empty</td></tr>
+          <tr><td><code>hazard</code></td><td>a catalogue hazard or a new name</td><td>required</td></tr>
+          <tr><td><code>event_types</code></td><td>Storm Events <code>EVENT_TYPE</code> values that constitute the hazard</td><td>the catalogue's</td></tr>
+          <tr><td><code>scope.states</code></td><td>two-letter codes; empty means every county in the country</td><td><code>[]</code></td></tr>
+          <tr><td><code>period</code></td><td><code>month</code>, <code>quarter</code> or <code>year</code></td><td><code>quarter</code></td></tr>
+          <tr><td><code>damaging.property_usd_min</code></td><td>property damage at or above this is damaging</td><td><code>10000</code></td></tr>
+          <tr><td><code>damaging.count_casualties</code></td><td>any injury or death is damaging</td><td><code>true</code></td></tr>
+          <tr><td><code>zone_policy</code></td><td><code>drop</code> zone-coded events, or <code>expand</code> each to every county in its NWS zone</td><td><code>drop</code></td></tr>
+          <tr><td><code>splits</code></td><td>inclusive year ranges, contiguous, disjoint, ordered; none before 1996</td><td>1996–2015 / 2016–2020 / 2021–2025</td></tr>
+          <tr><td><code>test_touch_budget</code></td><td>how often a model version may be scored on <code>test</code>, ever</td><td><code>1</code></td></tr>
+          <tr><td><code>reference_model</code></td><td>the forecast BSS is measured against</td><td><code>climatology-pooled</code></td></tr>
+          <tr><td><code>thresholds</code></td><td>BSS strictly greater than; reliability tolerance per populated bin; minimum bin count; AUC floor; number of bins</td><td>0.0 · 0.05 · 30 · 0.7 · 10</td></tr>
+        </tbody>
+      </table></div>
+      <h3>The digest</h3>
+      <p>Every field except the three labels is a <em>criterion</em>, and the criteria are hashed: the first sixteen hex digits of SHA-256 over their canonical JSON (keys sorted, no whitespace). The digest is stamped on every scorecard and every experiment card, and the verdict's <code>contract provenance</code> check fails for any card whose digest is not the current one. That is the whole enforcement mechanism for "pre-registered": nothing stops you editing a contract file, but every experiment run before the edit becomes visibly incomparable, and the ledger cannot be rewritten to hide it. Register a new name instead.</p>
+      <div id="digest-example"></div>
+      <h3>Validation is strict on purpose</h3>
+      <p>A contract with overlapping splits, a split that starts before the record is trustworthy, a hazard nobody can look up, or a damage definition under which every event is "damaging" is refused at registration, not discovered in a ledger later. The <a href="playground.html#demo-register">sandbox</a> shows the refusals verbatim.</p>
+    </div>
+    <aside class="note"><strong>The forecast unit</strong><br>P(at least one damaging event of <em>H</em> in region <em>R</em> during period <em>T</em>). <em>H</em> is a named hazard mapped to Storm Events event types, <em>R</em> a US county in the scope, <em>T</em> a month, quarter or year.<br><br><strong>Reference</strong><br>Only <code>climatology-pooled</code> is implemented as a reference — the unsmoothed training base rate, issued everywhere. A contract must name it so the choice is explicit on the card.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">04 · Data plane</span><span class="line"></span></div>
+  <h2>Every source is fetched, checksummed and pinned before use.</h2>
+  <div class="cols">
+    <div class="main">
+      <div class="table-wrap"><table>
+        <thead><tr><th>layer</th><th>source</th><th>role</th></tr></thead>
+        <tbody>
+          <tr><td>ground truth</td><td>NOAA NCEI Storm Events, 1996–</td><td>the validation target, every hazard: event type, county or zone, injuries, deaths, property damage</td></tr>
+          <tr><td>region universe</td><td>Census national county file</td><td>the panel denominator, any state or all — without it, counties that never had an event vanish and the base rate inflates</td></tr>
+          <tr><td>zone crosswalk</td><td>NWS zone–county correlation file</td><td>maps a zone-coded event to every county in its forecast zone, under <code>zone_policy: expand</code></td></tr>
+        </tbody>
+      </table></div>
+      <p class="mt16">Each Storm Events year file is national, so one download serves every state and every hazard: it is checksummed, split into one compact extract per state, and the raw bytes are discarded unless <code>--keep-raw</code> is set. <code>snapshots/manifest.json</code> is committed; the ~300 MB of raw pulls are not, so a clone reproduces the exact data version without carrying the bytes. A cached file with no manifest record counts as <em>unpinned</em> and is re-fetched rather than used. An experiment that cannot name its data version is not an experiment.</p>
+      <p>A contract's <strong>data version</strong> is a hash over exactly the pinned files its panel was built from — the county file, its years of Storm Events, and the crosswalk if it expands zones — so pinning a source for one contract does not move another contract's fingerprints.</p>
+      <h3>Zone-coded hazards</h3>
+      <p>Storm Events codes convective hazards against counties and most broad-scale hazards — heat, tropical cyclones, winter storms, wildfire — against NWS forecast zones. A zone-coded row carries a state and a zone number, not a county, so it cannot join to a county universe on its own. Under <code>drop</code> such rows are discarded, which is exact for county-coded hazards and badly under-counts zone-coded ones; under <code>expand</code> each is mapped to every county in its zone. Either way <code>readiness panel</code> counts exactly what happened — dropped, expanded, or unmappable because the zone is not in the current crosswalk edition — so a thin panel is explained, not mistaken for a rare hazard.</p>
+      <div id="hazards"></div>
+    </div>
+    <aside class="note"><strong>Continuity</strong><br>Report §7 warns that federal series can stop: NOAA retired its Billion-Dollar Disasters product in May 2025 with no updates beyond CY2024. Hence the pinning, and hence <code>--keep-raw</code> for mirroring what licences allow.<br><br><strong>Licences</strong><br>All three sources are US Government works in the public domain; attribution per <code>DATA-LICENSES.md</code>.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">05 · Panel and splits</span><span class="line"></span></div>
+  <h2>A dense panel, three locked splits, one training channel.</h2>
+  <div class="cols">
+    <div class="main">
+      <p>The panel crosses every region in the scope with every year and period of the contract, then marks the cells that saw a damaging event. Storm Events only records events; the Census county file supplies the zeros. Every unit is labelled 0 or 1, and the panel's digest — over units <em>and</em> labels — identifies an exact dataset.</p>
+      <div class="diagram" id="splits-figure"></div>
+      <p>Which years are training years is set by the contract, never by the harness. <code>TrainingView</code> carries training-year units and their labels (fitting needs them) and refuses to expose anything else; it records a digest of exactly what it exposed, so the canary can later check a model fitted on what it claims. <code>PredictionRequest</code> carries units with no labels at all. The <code>validate</code> split may be scored as often as you like; <code>test</code> may be touched once per model version, ever, and the count lives on disk next to the ledger.</p>
+    </div>
+    <aside class="note"><strong>Base rates drift</strong><br>On the tornado contract the base rate is 5.6% in training, 8.1% in validation and 10.3% in the untouched test years. A model calibrated on 1996–2015 will be under-confident later — visible before any model exists, because the panel is dense and the splits are locked.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">06 · The models</span><span class="line"></span></div>
+  <h2>Phase 0 ships climatologies only, on purpose.</h2>
+  <div class="cols">
+    <div class="main">
+      <p>Models are hazard- and geography-agnostic by construction: they receive units of the form (region, year, period) and nothing else, so the same model can be proposed against any contract. Construction goes through a registry, so neither an agent nor a CLI user imports engine classes directly or passes a panel into a constructor — which is exactly how the leaky oracle cheats, and why building it requires naming it and handing it the panel explicitly.</p>
+      <div id="models"></div>
+      <h3>The baseline queue</h3>
+      <p>The <code>local</code> backend walks the same short queue for every contract. Each candidate carries the two fields a human writes on an experiment card — what changed and why it should help, stated so it could be wrong.</p>
+      <div id="queue"></div>
+    </div>
+    <aside class="note"><strong>Phase 1</strong><br>adds real candidate models, ERA5 features and CLIMADA integration here — the engine the agent should drive, extend and calibrate rather than reinvent. <em>Exit: BSS &gt; 0 on untouched test years with reliability within ±5 pts, published with the ledger.</em></aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">07 · The harness</span><span class="line"></span></div>
+  <h2>Score, then judge — mechanically.</h2>
+  <div class="cols">
+    <div class="main">
+      <div class="table-wrap"><table>
+        <thead><tr><th>metric</th><th>what it is</th><th>why it is there</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Brier score</strong></td><td>mean squared error between the forecast probability and the 0/1 outcome</td><td>strictly proper: an iterating agent cannot improve it by hedging. Never reported alone — raw Brier is not comparable across base rates.</td></tr>
+          <tr><td><strong>Brier skill score</strong></td><td><code>1 − BS / BS_ref</code>, against the pooled training base rate</td><td>the number the contract is written in. &gt; 0 beats climatology; 0 <em>is</em> climatology.</td></tr>
+          <tr><td><strong>Reliability diagram</strong></td><td>forecast probability on x, observed frequency on y, per bin</td><td>the contract requires every populated bin (n ≥ 30) within its tolerance of the diagonal. Thinner bins are reported, not judged.</td></tr>
+          <tr><td><strong>Murphy decomposition</strong></td><td><code>BS = reliability − resolution + uncertainty</code></td><td>says whether a failure is miscalibration (recalibrate) or no signal (needs a feature).</td></tr>
+          <tr><td><strong>Sharpness</strong></td><td>standard deviation of the forecasts</td><td>a forecast that always issues the base rate is perfectly calibrated and perfectly useless.</td></tr>
+          <tr><td><strong>AUC</strong></td><td>probability a random positive outranks a random negative; ties get half credit</td><td>so a constant forecast scores exactly 0.5. The contract sets the floor.</td></tr>
+        </tbody>
+      </table></div>
+      <h3>The verdict</h3>
+      <p>Four checks, applied in order: skill relative to climatology; calibration in every populated bin; discrimination; and provenance — the card must carry the current contract's digest. A scorecard is never produced without its canary report: every command that scores anything goes through one function, <code>scoring.screen()</code>.</p>
+      <div id="verdict-example" class="grid-2"></div>
+    </div>
+    <aside class="note"><strong>Pure standard library</strong><br>The eval plane is the one component that must produce identical numbers on any machine from a clean clone, so it takes no dependency whose version could move under it. The package has no runtime dependencies at all — which is also why the whole thing runs in your browser.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">08 · The leakage canary</span><span class="line"></span></div>
+  <h2>A smoke alarm, not a proof.</h2>
+  <div class="cols">
+    <div class="main">
+      <p>The primary defence against a model scoring itself on data it should not have is structural — the two invariants above. The canary is the tripwire for when that structure is breached: an accidental join that carries the label column, a feature computed over the full panel, an agent that read a file it should not have. It is four heuristics over a model's <em>output</em>, and every one errs toward rejection: on this task, a forecast that separates outcomes almost perfectly is far more likely to be leaking than to be brilliant, whatever the hazard.</p>
+      <div id="canary-checks"></div>
+      <p class="mt16">The ceilings are harness policy, not contract terms: no contract may raise them. A sufficiently subtle leak that produces merely-excellent rather than impossible scores will pass — documented rather than papered over. Running the canary across base rates from 8% down to 0.66% is what exposed a check that had been implicitly calibrated to one hazard: judged as a pooled rate, near-zero forecasts on a rare hazard "agree" with the outcomes almost always and looked like a leak. The check is now per outcome class.</p>
+    </div>
+    <aside class="note"><strong>The target</strong><br><code>leaky-oracle</code> is a model constructed with direct access to the outcomes it is scored on. It is registered, flagged, and cannot be built without the panel being handed over explicitly. Phase 0 does not exit until the harness rejects it.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">09 · The ledger</span><span class="line"></span></div>
+  <h2>Append-only by hash chaining, anchored against truncation.</h2>
+  <div class="diagram">
+    <svg viewBox="0 0 1040 200" width="1040" height="200" role="img" aria-label="hash-chained experiment cards with an anchor">
+      <g>
+        <rect class="box soft" x="20" y="60" width="90" height="46"/><text class="mono" x="65" y="80" text-anchor="middle">genesis</text><text class="mono" x="65" y="96" text-anchor="middle">000…000</text>
+        <path class="arrow" d="M110 83 H 148"/>
+        <rect class="box" x="150" y="40" width="180" height="86"/><text class="label" x="240" y="62" text-anchor="middle">exp-0001</text><text class="mono" x="240" y="82" text-anchor="middle">prev_hash = 000…000</text><text class="mono" x="240" y="100" text-anchor="middle">card_hash = sha256(payload)</text><text class="sub" x="240" y="118" text-anchor="middle">scorecard · verdict · canary · text</text>
+        <path class="arrow" d="M330 83 H 368"/>
+        <rect class="box" x="370" y="40" width="180" height="86"/><text class="label" x="460" y="62" text-anchor="middle">exp-0002</text><text class="mono" x="460" y="82" text-anchor="middle">prev_hash = hash(0001)</text><text class="mono" x="460" y="100" text-anchor="middle">card_hash = sha256(payload)</text><text class="sub" x="460" y="118" text-anchor="middle">…</text>
+        <path class="arrow" d="M550 83 H 588"/>
+        <rect class="box" x="590" y="40" width="180" height="86"/><text class="label" x="680" y="62" text-anchor="middle">exp-0003</text><text class="mono" x="680" y="82" text-anchor="middle">prev_hash = hash(0002)</text><text class="mono" x="680" y="100" text-anchor="middle">card_hash = sha256(payload)</text>
+        <path class="arrow" d="M770 83 H 808"/>
+        <rect class="box" x="810" y="40" width="180" height="86"/><text class="label" x="900" y="62" text-anchor="middle">exp-0004</text><text class="mono" x="900" y="82" text-anchor="middle">prev_hash = hash(0003)</text><text class="mono" x="900" y="100" text-anchor="middle">card_hash = head</text>
+        <rect class="box accent" x="700" y="150" width="290" height="40"/><text class="label" x="716" y="168">ledger.jsonl.anchor.json</text><text class="mono" x="716" y="183">{"n_cards": 4, "head": "…"}</text>
+        <path class="arrow accent dashed" d="M900 150 V 128"/>
+        <text class="sub" x="20" y="160">edit a card → its hash no longer matches</text>
+        <text class="sub" x="20" y="176">reorder or delete from the middle → a prev_hash no longer matches</text>
+        <text class="sub" x="20" y="192">delete from the end → the anchor's count and head no longer match</text>
+      </g>
+    </svg>
+  </div>
+  <div class="cols">
+    <div class="main">
+      <p>Every card carries the hash of the card before it, so edits, reorderings and mid-file deletions break the chain and <code>verify()</code> reports where. Chaining alone does <strong>not</strong> catch truncation — any prefix of a hash chain is perfectly self-consistent, and "run ten experiments, delete the nine that failed" is exactly the attack that matters here. So the head hash and card count are anchored in a committed sidecar file. Forging both is still possible for anyone with repo write access, but it is now two coordinated edits visible in git history rather than one silent <code>head -n 1</code>.</p>
+      <p>The file is JSONL, so it diffs cleanly in git and can be read without this code. Each line is a sealed card: the experiment id, a timestamp, the model and version, the split, the three fields a human writes — <em>changed</em>, <em>hypothesis</em>, <em>outcome</em> — the scorecard, the verdict, the canary report, the data snapshot, the contract digest, and the two hashes. The <a href="ledgers.html">ledgers page</a> re-verifies the committed chains in your browser, and lets you break one to see what each attack looks like.</p>
+    </div>
+    <aside class="note"><strong>Reading a card</strong><br>A ledger of only successes is a marketing document. The <code>outcome</code> field records what happened including when the hypothesis was wrong; the agent's card-writing runbook is in <code>skills/experiment-card.md</code>.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">10 · Agent plane</span><span class="line"></span></div>
+  <h2>Two backends, the same loop, the same harness.</h2>
+  <div class="grid-2 mt16">
+    <div class="card">
+      <h3>local</h3>
+      <p>Deterministic and uses no LLM: it walks the fixed baseline queue, then the canary candidate, and writes one sealed card per candidate. This is what CI runs and what the Phase 0 reproducibility criterion is checked against.</p>
+      <pre class="code"><code>readiness loop -c tornado-ok --backend local</code></pre>
+    </div>
+    <div class="card">
+      <h3>claude</h3>
+      <p>A Claude Agent SDK orchestrator runs the same loop with three subagents from report §4 — a hazard analyst for the contract's hazard, a calibration critic, a data steward. Tool grants are <code>Read</code>, <code>Grep</code>, <code>Glob</code>, <code>Bash</code>; none has <code>Write</code> or <code>Edit</code>. Needs <code>pip install 'readiness-loop[agent]'</code> and an API key.</p>
+      <pre class="code"><code>readiness loop -c tornado-ok --backend claude</code></pre>
+    </div>
+  </div>
+  <div class="cols">
+    <div class="main">
+      <p>The orchestrator's system prompt names the rules it cannot negotiate: it may propose any model in the engine; it may not modify anything under the harness, the contracts module, the config or the registry; it never sees holdout labels; the validate split is its to iterate against and the test split may be touched once per model version; and every experiment gets a card, including the ones that did not help.</p>
+      <h3>MCP</h3>
+      <p><code>readiness mcp -c NAME</code> serves the pinned data and the contract's ledger over MCP — stdio, standard-library JSON-RPC, no dependencies. Every tool is a read. <code>get_region_history</code> exposes training years only; there is no tool that returns a holdout outcome, and a test asserts it.</p>
+    </div>
+    <aside class="note"><strong>Phase 2</strong><br>"parallelise with subagents: hurricane wind, wildfire, tornado, heat" is a loop over registered contracts with one hazard analyst each, not a redesign.</aside>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">11 · Commands and map</span><span class="line"></span></div>
+  <h2>Everything runs against one registered contract.</h2>
+  <div class="grid-2 mt16">
+    <div>
+<pre class="code"><code>readiness contracts         list the registered contracts
+readiness contract          print one contract and its hash        [-c NAME]
+readiness register NAME     pre-register a new contract from options
+readiness hazards           list the hazard catalogue
+readiness models            list proposable models
+readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
+readiness panel             build the labelled panel, print coverage   [-c NAME]
+readiness score MODEL       fit and score one model  [-c NAME] [--split, --spend-test-touch]
+readiness loop              run the full experimental loop  [-c NAME] [--backend local|claude]
+readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
+readiness ledger            show and verify the experiment ledger  [-c NAME]
+readiness verify            check the Phase 0 exit criteria  [-c NAME] [--bless]
+readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
+readiness report            rebuild the static research report
+readiness mcp               run the read-only MCP data server on stdio  [-c NAME]</code></pre>
+      <p class="small mt8"><code>-c/--contract</code> takes a registered name or a path to a contract JSON. If omitted the CLI uses <code>$READINESS_CONTRACT</code>, then the sole registered contract if there is exactly one; with several registered it refuses and lists them.</p>
+    </div>
+    <div>
+<pre class="code"><code>readiness/
+  contracts.py       the contract schema, validation, digest and registry
+  config.py          harness-wide policy: hazard catalogue, record start, canary ceilings
+  connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server
+  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
+  engine/            proposable models: climatologies, persistence, the canary target
+  agent/             orchestrator + subagent definitions
+  dashboard.py       the ledger rendered as a self-contained HTML page
+  cli.py             the `readiness` command
+contracts/           registered contracts, one JSON file each; three examples ship
+experiments/         one directory per contract: ledger, anchor, test-touch budget
+harness_expected/    blessed baseline fingerprints, one file per contract
+snapshots/           pinned data; only manifest.json is committed
+docs/                how-it-works.md, contracts.md, media/
+skills/              agent runbooks: verification protocol, experiment-card format
+tools/               build_report.py, build_site.py, demo/capture.py
+plans/               scenario library — the Phase 3 seed
+site/                this website
+tests/               260+ tests, no network required</code></pre>
+    </div>
+  </div>
+</div></section>
+
+<section class="block"><div class="wrap">
+  <div class="eyebrow-row"><span class="eyebrow">12 · Roadmap</span><span class="line"></span><span class="n">report §6</span></div>
+  <h2>Five phases, each with a falsifiable exit.</h2>
+  <div class="grid-2 mt16">
+    <div class="card"><h4 class="mt0">Phase 0 — harness before model · complete</h4><p class="mb0">The eval plane, pinned data and the experiment ledger, for any hazard. <em>Exit:</em> the climatology baselines reproduce bit-for-bit from a clean clone, and the harness rejects a deliberately leaked model.</p></div>
+    <div class="card"><h4 class="mt0">Phase 1 — the loop, on one hazard</h4><p class="mb0">Real candidate models, ERA5 features, CLIMADA integration. <em>Exit:</em> BSS &gt; 0 on untouched test years with reliability within ±5 pts, published with the ledger.</p></div>
+    <div class="card"><h4 class="mt0">Phase 2 — multi-hazard, national, with exposure</h4><p class="mb0">One registered contract per peril against the same harness; join to USA Structures so outputs become human.</p></div>
+    <div class="card"><h4 class="mt0">Phase 3 — the planning thought-partner</h4><p class="mb0">Scenario stress-tests of a facility's emergency plan against the validated risk layer. Case studies become regression tests. Seeded in <code>plans/</code>.</p></div>
+    <div class="card"><h4 class="mt0">Phase 4 — global scale-out</h4><p class="mb0">Swap US layers for Open Buildings, Flood Hub, EM-DAT. The architecture does not change; the connectors do.</p></div>
+  </div>
+</div></section>
+
+<footer class="site">
+  <p>The design the implementation follows is the <a data-report href="generated/report/index.html">research briefing</a>; its fifth section is this page in prose.</p>
+  <p><span data-built>…</span></p>
+</footer>
+
+<script src="assets/site.js"></script>
+<script>
+(async function () {
+  const [contracts, hazards, models, ledgers] = await Promise.all([
+    RL.fetchJSON("contracts.json"), RL.fetchJSON("hazards.json"), RL.fetchJSON("models.json"), RL.fetchJSON("ledgers.json"),
+  ]);
+  const c = contracts.find((x) => x.name === "tornado-ok") || contracts[0];
+  if (c) {
+    document.getElementById("digest-example").innerHTML =
+      `<div class="card"><h4 class="mt0">${RL.esc(c.name)} · canonical JSON of the criteria</h4><pre class="code" style="white-space:pre-wrap;overflow-wrap:anywhere">${RL.esc(c.canonical_json)}</pre><p class="mt8 mb0"><code>sha256(…)[:16]</code> = <code>${RL.esc(c.digest)}</code> — the value <code>readiness contract -c ${RL.esc(c.name)}</code> prints and every card in <code>experiments/${RL.esc(c.name)}/ledger.jsonl</code> carries. <code>name</code>, <code>version</code> and <code>description</code> are absent: labels are not criteria.</p></div>`;
+    document.getElementById("splits-figure").innerHTML = RL.splitsSVG(c, 980) +
+      `<p class="small mb0 mt8">The locked splits of <code>${RL.esc(c.name)}</code>. Splits must be contiguous, disjoint and ordered in time — training on the future to predict the past is the classic leak — and nothing may start before ${models.record_start_year}, when many Storm Events types standardised.</p>`;
+  }
+  document.getElementById("hazards").innerHTML =
+    `<h4>The hazard catalogue</h4><div class="table-wrap"><table><thead><tr><th>hazard</th><th>coding</th><th>Storm Events event types</th></tr></thead><tbody>` +
+    Object.entries(hazards).map(([n, h]) => `<tr><td><code>${RL.esc(n)}</code></td><td><span class="tag ${h.coding === "county" ? "neutral" : h.coding === "zone" ? "warn" : "neutral"}">${RL.esc(h.coding)}</span></td><td>${RL.esc(h.event_types.join(", "))}</td></tr>`).join("") +
+    `</tbody></table></div><p class="small mt8">A contract may also name a hazard outside the catalogue by listing its event types explicitly.</p>`;
+  document.getElementById("models").innerHTML =
+    `<div class="table-wrap"><table><thead><tr><th>model</th><th>what it is</th><th></th></tr></thead><tbody>` +
+    models.registry.map((m) => `<tr><td><code>${RL.esc(m.name)}</code></td><td>${RL.esc(m.description)}</td><td>${m.is_canary_target ? '<span class="tag reject">canary target</span>' : ""}</td></tr>`).join("") +
+    `</tbody></table></div>`;
+  document.getElementById("queue").innerHTML = [...models.queue, models.canary_candidate].map((q, i) =>
+    `<div class="card mt8"><h4 class="mt0">${i + 1} · <code>${RL.esc(q.model)}</code></h4><p><strong>Changed.</strong> ${RL.esc(q.changed)}</p><p class="mb0"><strong>Hypothesis.</strong> ${RL.esc(q.hypothesis)}</p></div>`).join("");
+  const ceil = models.canary_ceilings;
+  document.getElementById("canary-checks").innerHTML =
+    `<div class="table-wrap"><table><thead><tr><th>check</th><th>trips when</th><th>ceiling</th></tr></thead><tbody>
+      <tr><td><strong>implausible skill</strong></td><td>the Brier skill score is beyond what any honest region-period forecast achieves</td><td class="num">BSS &gt; ${ceil.max_plausible_bss}</td></tr>
+      <tr><td><strong>implausible AUC</strong></td><td>discrimination is near-perfect</td><td class="num">AUC &gt; ${ceil.max_plausible_auc}</td></tr>
+      <tr><td><strong>outcome agreement</strong></td><td>near-one forecasts capture the occurrences <em>and</em> near-zero forecasts capture the non-occurrences — judged per outcome class, so an honest rare-event climatology with no near-one group cannot trip it</td><td class="num">both shares &gt; ${(100 * ceil.max_agreement).toFixed(1)}%</td></tr>
+      <tr><td><strong>train provenance</strong></td><td>the training digest the model declares does not match the one the harness exposed through its <code>TrainingView</code></td><td class="num">mismatch</td></tr>
+    </tbody></table></div>`;
+  const led = ledgers["tornado-ok"] || Object.values(ledgers)[0];
+  if (led) {
+    const seasonal = led.cards.find((k) => k.model === "climatology-seasonal") || led.cards[1];
+    const oracle = led.cards.find((k) => k.canary && k.canary.rejected);
+    const block = (card, title) => card ? `<div class="card"><h4 class="mt0">${title}</h4>${RL.reliabilitySVG(card.scorecard.reliability_bins, 0.05, 260)}<p class="small">${RL.esc(card.experiment_id)} · <code>${RL.esc(card.model)}</code> on <code>${RL.esc(led.contract)}</code> · ${RL.verdictTag(card)}</p><h4>Contract</h4>${RL.checksList(card.verdict.checks)}<h4>Leakage canary</h4>${RL.findingsList(card.canary.findings)}</div>` : "";
+    document.getElementById("verdict-example").innerHTML =
+      block(seasonal, "An honest model that fails one clause") + block(oracle, "A leaked model the contract would pass — and the canary rejects");
+  }
+})().catch((e) => console.error(e));
+</script>
+</body>
+</html>
