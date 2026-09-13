@@ -132,6 +132,18 @@ class TestManifest(unittest.TestCase):
     def test_missing_file_loads_as_empty(self):
         self.assertFalse(Manifest.load(self.path))
 
+    def test_save_is_a_no_op_until_something_is_pinned(self):
+        m = Manifest(path=self.path)
+        m.add("x", record())
+        self.assertTrue(m.save())
+        stamp = self.path.read_text()
+        reloaded = Manifest.load(self.path)
+        self.assertFalse(reloaded.save(), "nothing changed; the file must not be rewritten")
+        self.assertEqual(self.path.read_text(), stamp)
+        reloaded.add("y", record(sha="2" * 64))
+        self.assertTrue(reloaded.save())
+        self.assertTrue(reloaded.save(force=True))
+
 
 class TestParseYear(unittest.TestCase):
     def setUp(self):

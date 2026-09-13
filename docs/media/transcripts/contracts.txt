@@ -1,0 +1,8 @@
+$ readiness contracts
+
+registered contracts  (docs/.demo/contracts)
+------------------------------------------------------------
+  name                   hazard            scope              period   sha256            description
+  inland-flood-la        inland_flood      US:LA              quarter  477c493035c9c70d  Damaging inland flooding, Louisiana parishes, quarterly. The original Phase 0 series.
+  tornado-ok             tornado           US:OK              quarter  827313e1273a5e76  Damaging tornadoes, Oklahoma counties, quarterly.
+  tropical-cyclone-gulf  tropical_cyclone  US:TX+LA+MS+AL+FL  month    d01b00aa1baedc98  Damaging tropical cyclones across the Gulf coast states, monthly, zone events expanded to counties.

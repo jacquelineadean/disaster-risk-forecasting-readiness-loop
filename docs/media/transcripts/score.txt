@@ -1,0 +1,30 @@
+$ readiness score climatology-seasonal -c tornado-ok --quiet
+
+score  climatology-seasonal@1.0.0  on validate (2016-2020)  (tornado-ok)
+------------------------------------------------------------------------
+  model            climatology-seasonal@1.0.0
+  contract         tornado-ok  (sha256:827313e1273a5e76)
+  split            validate  (1,540 units, 125 positive, base rate 0.0812)
+  brier            0.066190   (reference 0.075222)
+  brier skill      +0.1201
+  auc              0.8175
+  sharpness        0.0744
+  murphy           reliability 0.001015  resolution 0.007810  uncertainty 0.074580
+  reliability diagram
+    bin                n   forecast   observed      dev
+    0.00-0.10     1,245     0.0241     0.0402  +0.0161
+    0.10-0.20       190     0.1515     0.2105  +0.0590
+    0.20-0.30        90     0.2453     0.3222  +0.0770
+    0.30-0.40        15     0.3434     0.4000  +0.0566  (thin)
+
+contract tornado-ok 1.0.0 (sha256:827313e1273a5e76) -> FAIL
+  [PASS] brier skill score        +0.1201 vs required > +0.0000 (reference: climatology-pooled)
+  [FAIL] reliability              worst populated bin [0.2,0.3) n=90 deviates 0.0770, tolerance 0.0500 (3/10 bins populated)
+  [PASS] auc                      0.8175 vs required >= 0.70
+  [PASS] contract provenance      card carries sha256:827313e1273a5e76, current contract sha256:827313e1273a5e76
+
+leakage canary -> clear
+  [  clear] implausible skill      BSS +0.1201 vs ceiling +0.99
+  [  clear] implausible auc        AUC 0.81751 vs ceiling 0.999
+  [  clear] outcome agreement      0.0% of occurrences forecast >= 0.99 and 54.1% of non-occurrences forecast <= 0.01 (ceiling 99.5% on both)
+  [  clear] train provenance       model claims sha256:91d9e8790d29e5a6, harness exposed sha256:91d9e8790d29e5a6  (match)

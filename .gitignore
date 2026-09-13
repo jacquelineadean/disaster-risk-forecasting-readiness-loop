@@ -13,3 +13,11 @@ dist/
 snapshots/*
 !snapshots/manifest.json
 !snapshots/.gitkeep
+
+# Rendered ledger dashboards: regenerated in under a second from the committed
+# ledgers by `readiness dashboard --all`.
+experiments/*/dashboard.html
+experiments/index.html
+
+# Scratch registry and ledgers used while regenerating docs/media.
+docs/.demo/

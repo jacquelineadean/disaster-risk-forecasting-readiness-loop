@@ -11,6 +11,7 @@ experiment series against one hazard in one place says nothing about another.
 
 from __future__ import annotations
 
+import os
 import pathlib
 from dataclasses import dataclass
 from typing import Callable
@@ -26,6 +27,15 @@ MANIFEST_PATH = SNAPSHOT_DIR / "manifest.json"
 EXPERIMENTS_DIR = REPO_ROOT / "experiments"
 EXPECTED_DIR = REPO_ROOT / "harness_expected"
 
+#: Point every command at another experiments tree — for CI, or for a demo
+#: that must not append to the committed ledgers.
+EXPERIMENTS_DIR_ENV = "READINESS_EXPERIMENTS_DIR"
+
+
+def experiments_root() -> pathlib.Path:
+    override = os.environ.get(EXPERIMENTS_DIR_ENV)
+    return pathlib.Path(override) if override else EXPERIMENTS_DIR
+
 
 @dataclass(frozen=True)
 class Paths:
@@ -37,19 +47,24 @@ class Paths:
     expected: pathlib.Path
 
     def relative(self, path: pathlib.Path) -> str:
-        try:
-            return str(path.relative_to(REPO_ROOT))
-        except ValueError:
-            return str(path)
+        return relative(path)
+
+
+def relative(path: pathlib.Path) -> str:
+    """A repo-relative rendering of a path, or the path itself if it lies outside."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
 
 
 def paths(
     contract: Contract,
     *,
-    experiments_dir: pathlib.Path = EXPERIMENTS_DIR,
+    experiments_dir: pathlib.Path | None = None,
     expected_dir: pathlib.Path = EXPECTED_DIR,
 ) -> Paths:
-    directory = experiments_dir / contract.name
+    directory = (experiments_dir or experiments_root()) / contract.name
     return Paths(
         directory=directory,
         ledger=directory / "ledger.jsonl",

@@ -1,0 +1,68 @@
+{
+  "demo_contract": "tornado-ok",
+  "registered_in_demo": "hail-ks",
+  "commands": {
+    "contracts": [
+      "contracts"
+    ],
+    "contract": [
+      "contract",
+      "-c",
+      "tornado-ok"
+    ],
+    "hazards": [
+      "hazards"
+    ],
+    "register": [
+      "register",
+      "hail-ks",
+      "--hazard",
+      "hail",
+      "--state",
+      "KS",
+      "--description",
+      "Damaging hail, Kansas counties, quarterly."
+    ],
+    "panel": [
+      "panel",
+      "-c",
+      "tornado-ok",
+      "--quiet"
+    ],
+    "score": [
+      "score",
+      "climatology-seasonal",
+      "-c",
+      "tornado-ok",
+      "--quiet"
+    ],
+    "loop": [
+      "loop",
+      "-c",
+      "tornado-ok",
+      "--quiet"
+    ],
+    "ledger": [
+      "ledger",
+      "-c",
+      "tornado-ok"
+    ],
+    "verify": [
+      "verify",
+      "-c",
+      "tornado-ok",
+      "--quiet"
+    ],
+    "canary": [
+      "canary",
+      "-c",
+      "tornado-ok",
+      "--quiet"
+    ]
+  },
+  "examples": [
+    "inland-flood-la",
+    "tornado-ok",
+    "tropical-cyclone-gulf"
+  ]
+}

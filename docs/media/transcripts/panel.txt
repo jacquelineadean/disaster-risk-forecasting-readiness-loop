@@ -1,0 +1,19 @@
+$ readiness panel -c tornado-ok --quiet
+
+region-quarter panel  (tornado-ok)
+------------------------------------------------------------
+
+  9,240 units  |  628 positive  |  base rate 0.0680  |  1996-2025  |  sha256:4242839fe13251df
+  regions: 77  (Adair County (40001) ... Woodward County (40153))
+
+split coverage
+  train     1996-2015  n=  6,160  positives=  344  base=0.0558  ok
+  validate  2016-2020  n=  1,540  positives=  125  base=0.0812  ok
+  test      2021-2025  n=  1,540  positives=  159  base=0.1032  ok
+
+event coverage
+  tornado: 2,434 events in the contract's years
+    county-coded         2,434
+    zone-coded               0   dropped (zone_policy: drop)
+    outside universe         0
+    damaging               971   -> 628 positive units

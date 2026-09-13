@@ -1,0 +1,34 @@
+$ readiness canary -c tornado-ok --quiet
+
+leakage canary  (target: leaky-oracle, split=validate (2016-2020), tornado-ok)
+------------------------------------------------------------------------------
+A model with direct access to the outcomes it is scored on. The Phase 0
+exit criterion is that the harness rejects it.
+
+  model            leaky-oracle@1.0.0
+  contract         tornado-ok  (sha256:827313e1273a5e76)
+  split            validate  (1,540 units, 125 positive, base rate 0.0812)
+  brier            0.000001   (reference 0.075222)
+  brier skill      +1.0000
+  auc              1.0000
+  sharpness        0.2725
+  murphy           reliability 0.000001  resolution 0.074580  uncertainty 0.074580
+  reliability diagram
+    bin                n   forecast   observed      dev
+    0.00-0.10     1,415     0.0010     0.0000  -0.0010
+    0.90-1.00       125     0.9990     1.0000  +0.0010
+
+contract, if it were honoured:
+contract tornado-ok 1.0.0 (sha256:827313e1273a5e76) -> PASS
+  [PASS] brier skill score        +1.0000 vs required > +0.0000 (reference: climatology-pooled)
+  [PASS] reliability              worst populated bin [0.0,0.1) n=1,415 deviates 0.0010, tolerance 0.0500 (2/10 bins populated)
+  [PASS] auc                      1.0000 vs required >= 0.70
+  [PASS] contract provenance      card carries sha256:827313e1273a5e76, current contract sha256:827313e1273a5e76
+
+leakage canary -> REJECTED (suspected holdout leakage)
+  [TRIPPED] implausible skill      BSS +1.0000 vs ceiling +0.99
+  [TRIPPED] implausible auc        AUC 1.00000 vs ceiling 0.999
+  [TRIPPED] outcome agreement      100.0% of occurrences forecast >= 0.99 and 100.0% of non-occurrences forecast <= 0.01 (ceiling 99.5% on both)
+  [TRIPPED] train provenance       model claims sha256:0000000000000000, harness exposed sha256:91d9e8790d29e5a6  <- mismatch
+
+PASS: the harness rejected a leaked model.

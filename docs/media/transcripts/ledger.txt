@@ -1,0 +1,11 @@
+$ readiness ledger -c tornado-ok
+
+experiment ledger  (tornado-ok: docs/.demo/experiments/tornado-ok/ledger.jsonl)
+-------------------------------------------------------------------------------
+id        model                        split           BSS     AUC  verdict
+exp-0001  climatology-pooled@1.0.0     validate    +0.0000  0.5000  FAIL
+exp-0002  climatology-seasonal@1.0.0   validate    +0.1201  0.8175  FAIL
+exp-0003  persistence-last-year@1.0.0  validate    +0.0114  0.5401  FAIL
+exp-0004  leaky-oracle@1.0.0           validate    +1.0000  1.0000  REJECTED
+
+ledger chain intact: 4 card(s)

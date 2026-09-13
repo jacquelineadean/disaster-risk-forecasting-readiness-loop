@@ -5,7 +5,9 @@ data, **validates its own probabilities against history**, and iterates until
 they can be trusted — then turns them into emergency plans.
 
 The research briefing that specifies this is in [`report/index.html`](report/index.html)
-(open it, or `make serve`). Everything below is the implementation.
+(open it, or `make serve`). Everything below is the implementation; for a
+step-by-step tour with screenshots and a recording of a real run, see
+[**docs/how-it-works.md**](docs/how-it-works.md).
 
 **Status: Phase 0 complete, for any hazard.** The eval plane is built and its
 exit criteria are met on real NOAA data. The whole loop is *contract-driven*:
@@ -38,7 +40,7 @@ make verify CONTRACT=flood-xx     # check the Phase 0 exit criteria
 ```
 
 ```bash
-make test                         # 250 tests, no network needed
+make test                         # 260 tests, no network needed
 ```
 
 Replace `XX` with a two-letter US state, or omit `--state` for the whole
@@ -307,6 +309,7 @@ readiness loop              run the full experimental loop  [-c NAME] [--backend
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
 readiness ledger            show and verify the experiment ledger  [-c NAME]
 readiness verify            check the Phase 0 exit criteria  [-c NAME] [--bless]
+readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]
 ```
@@ -351,16 +354,19 @@ readiness/
   harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
   engine/            proposable models: climatologies, persistence, the canary target
   agent/             orchestrator + subagent definitions
+  dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
 contracts/           registered contracts, one JSON file each; three examples ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
+docs/                how-it-works.md (the walkthrough), contracts.md (the reference), media/
 skills/              agent runbooks: verification protocol, experiment-card format
+tools/               build_report.py (design -> report), demo/capture.py (docs media)
 plans/               scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
-tests/               250 tests, no network required
+tests/               260 tests, no network required
 ```
 
 ---

@@ -192,7 +192,7 @@ def run_local(
     queue: Sequence[Candidate] = BASELINE_QUEUE,
     include_canary: bool = True,
     snapshot_dir: pathlib.Path = data_mod.SNAPSHOT_DIR,
-    experiments_dir: pathlib.Path = data_mod.EXPERIMENTS_DIR,
+    experiments_dir: pathlib.Path | None = None,
     dataset: data_mod.Dataset | None = None,
     progress: Progress = print,
 ) -> LoopResult:

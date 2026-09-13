@@ -18,6 +18,7 @@ refuses and lists the choices.
     readiness canary            demonstrate the harness rejecting a leaked model
     readiness ledger            show and verify the experiment ledger
     readiness verify            check the Phase 0 exit criteria
+    readiness dashboard         render a contract's ledger as a static HTML page
     readiness report            rebuild the static research report
     readiness mcp               run the read-only MCP data server on stdio
 """
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import subprocess
 import sys
 
@@ -89,7 +91,7 @@ def _dataset(args, contract: Contract) -> data_mod.Dataset:
 
 
 def cmd_contracts(args) -> int:
-    _rule(f"registered contracts  ({contracts.contracts_dir()})")
+    _rule(f"registered contracts  ({data_mod.relative(contracts.contracts_dir())})")
     _p(contracts.describe_registry())
     return 0
 
@@ -129,7 +131,7 @@ def cmd_register(args) -> int:
         _p(json.dumps(c.to_spec(), indent=2))
         return 0
     path = c.save(contracts.contracts_dir(), force=args.force)
-    _rule(f"registered  {path}")
+    _rule(f"registered  {data_mod.relative(path)}")
     _p(c.describe())
     hazard = config.HAZARDS.get(c.hazard)
     if hazard is not None and hazard.coding != "county" and c.zone_policy == "drop":
@@ -391,6 +393,20 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def cmd_dashboard(args) -> int:
+    from readiness import dashboard
+
+    if args.all:
+        written = dashboard.write_all()
+    else:
+        c = _contract(args)
+        out = pathlib.Path(args.output) if args.output else None
+        written = [dashboard.write(c, out)]
+    for path in written:
+        _p(f"wrote {data_mod.relative(path)}")
+    return 0
+
+
 def cmd_report(args) -> int:
     script = data_mod.REPO_ROOT / "tools" / "build_report.py"
     return subprocess.call([sys.executable, str(script)])
@@ -526,6 +542,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bless", action="store_true",
                     help="record current baseline scores as the reproducibility target")
     sp.set_defaults(func=cmd_verify)
+
+    sp = contract_flag(
+        sub.add_parser(
+            "dashboard", help="render a contract's ledger as a static HTML page"
+        )
+    )
+    sp.add_argument("--all", action="store_true",
+                    help="every registered contract, plus experiments/index.html")
+    sp.add_argument("-o", "--output",
+                    help="write the page here instead of the ledger's directory")
+    sp.set_defaults(func=cmd_dashboard)
 
     sub.add_parser("report", help="rebuild the static research report").set_defaults(
         func=cmd_report
