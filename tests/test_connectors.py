@@ -102,6 +102,19 @@ class TestManifest(unittest.TestCase):
         b.add("x", record(sha="1" * 64))
         self.assertEqual(a.digest(), b.digest())
 
+    def test_digest_over_a_subset_of_keys(self):
+        m = Manifest(path=self.path)
+        m.add("x", record(sha="1" * 64))
+        m.add("y", record(sha="2" * 64))
+        only_x = Manifest(path=self.path)
+        only_x.add("x", record(sha="1" * 64))
+        # A panel built from x alone has the same data version whether or not
+        # y happens to be pinned for some other contract.
+        self.assertEqual(m.digest(["x"]), only_x.digest())
+        self.assertNotEqual(m.digest(["x"]), m.digest())
+        with self.assertRaises(Exception):
+            m.digest(["x", "not-pinned"])
+
     def test_upstream_content_change_is_noted_not_hidden(self):
         m = Manifest(path=self.path)
         m.add("x", record(sha="1" * 64))
@@ -238,6 +251,23 @@ class TestSnapshotScopes(SnapshotCase):
         self.downloads.clear()
         self.snapshot(["48"], refresh=True)
         self.assertEqual(sorted(self.downloads), [2000, 2001])
+
+    def test_a_reprocessed_year_recuts_every_existing_extract(self):
+        # State 48 is pulled while NCEI serves one version of 2000; then the
+        # upstream file changes and state 56 is pulled. The manifest now pins
+        # the new bytes for 2000, so 48's extract must be re-cut from them
+        # too — otherwise it stays stale under a record that says otherwise.
+        self.snapshot(["48"])
+        self.files[2000] = year_file(
+            [row("48", 2000), row("48", 2000, cz="9"), row("56", 2000), row("22", 2000)]
+        )
+        self.files[2001] = year_file([row("48", 2001), row("56", 2001)])
+        self.snapshot(["56"])
+        events_48 = storm_events.load_events(self.dir / "storm_events" / "48_2000.jsonl")
+        self.assertEqual(len(events_48), 2, "48's extract was not re-cut from the new bytes")
+        self.assertIn(
+            "upstream content changed", self.manifest.records["noaa/storm_events/2000"].notes
+        )
 
 
 class TestUnpinnedCacheIsRefetched(unittest.TestCase):

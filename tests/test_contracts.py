@@ -28,6 +28,7 @@ class TestConstruction(unittest.TestCase):
         self.assertEqual(c.event_types, HAZARDS["tornado"].event_types)
         self.assertEqual(c.states, ())
         self.assertEqual(c.period, "quarter")
+        self.assertEqual(c.zone_policy, "drop")
         self.assertEqual(c.reference_model, "climatology-pooled")
         self.assertEqual(c.min_auc, 0.70)
 
@@ -63,8 +64,10 @@ class TestConstruction(unittest.TestCase):
 
     def test_describe_mentions_the_essentials(self):
         text = make_contract().describe()
-        for needle in ("test-hazard", "inland_flood", "US, ZZ", "region x quarter", "AUC"):
+        for needle in ("test-hazard", "inland_flood", "US, ZZ", "region x quarter", "AUC",
+                       "zone events"):
             self.assertIn(needle, text)
+        self.assertIn("crosswalk", make_contract(zone_policy="expand").describe())
 
 
 class TestValidation(unittest.TestCase):
@@ -119,6 +122,9 @@ class TestValidation(unittest.TestCase):
         self.assert_rejected("bins", thresholds={"n_reliability_bins": 1})
         self.assert_rejected("budget", test_touch_budget=0)
 
+    def test_zone_policy_must_be_known(self):
+        self.assert_rejected("zone_policy", zone_policy="guess")
+
     def test_reference_model_must_be_computable(self):
         self.assert_rejected("reference model", reference_model="oracle")
 
@@ -146,6 +152,7 @@ class TestIdentity(unittest.TestCase):
             "period": make_contract(period="month"),
             "damage": make_contract(damaging={"property_usd_min": 1.0}),
             "casualties": make_contract(damaging={"count_casualties": False}),
+            "zone_policy": make_contract(zone_policy="expand"),
             "train": make_contract(splits={"train": [1997, 2015]}),
             "validate": make_contract(splits={"validate": [2016, 2019], "test": [2020, 2025]}),
             "budget": make_contract(test_touch_budget=2),

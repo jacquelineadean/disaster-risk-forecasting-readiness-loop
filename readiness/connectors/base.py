@@ -22,6 +22,7 @@ import socket
 import threading
 import urllib.parse
 from dataclasses import asdict, dataclass, field
+from typing import Iterable
 
 USER_AGENT = (
     "readiness-loop/0.1 (open-source disaster-risk research; "
@@ -92,13 +93,29 @@ class Manifest:
     def __bool__(self) -> bool:
         return bool(self.records)
 
-    def digest(self) -> str:
-        """A single hash over every pinned file — one id for a data version."""
+    def digest(self, keys: Iterable[str] | None = None) -> str:
+        """One id for a data version: a hash over pinned files and their checksums.
+
+        With `keys`, only those records are hashed — the data version of a
+        panel is the version of the inputs it was actually built from, so a
+        source pinned for one contract (the zone crosswalk, another state's
+        extract) does not move the fingerprints of contracts that never read
+        it. A requested key that is not pinned is an error, not a silent skip.
+        """
         if not self.records:
             return self.UNPINNED
+        if keys is None:
+            chosen = sorted(self.records)
+        else:
+            chosen = sorted(set(keys))
+            missing = [k for k in chosen if k not in self.records]
+            if missing:
+                raise ConnectorError(
+                    f"data version requested over unpinned source(s) {missing}"
+                )
         h = hashlib.sha256()
-        for key, rec in sorted(self.records.items()):
-            h.update(f"{key}|{rec.sha256}\n".encode())
+        for key in chosen:
+            h.update(f"{key}|{self.records[key].sha256}\n".encode())
         return h.hexdigest()[:16]
 
     def summary(self) -> str:

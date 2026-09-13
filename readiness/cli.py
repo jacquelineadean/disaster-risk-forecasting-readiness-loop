@@ -113,6 +113,7 @@ def cmd_register(args) -> int:
         event_types=args.event_type,
         property_usd_min=args.damage_usd,
         count_casualties=not args.no_casualties,
+        zone_policy=args.zone_policy,
         train=args.train,
         validate=args.validate,
         test=args.test,
@@ -131,12 +132,14 @@ def cmd_register(args) -> int:
     _rule(f"registered  {path}")
     _p(c.describe())
     hazard = config.HAZARDS.get(c.hazard)
-    if hazard is not None and hazard.coding != "county":
+    if hazard is not None and hazard.coding != "county" and c.zone_policy == "drop":
         _p()
         _p(
-            f"note: {c.hazard} is {hazard.coding}-coded in Storm Events. Zone-coded "
-            "events do not join to counties and are dropped by the label builder; "
-            "`readiness panel` reports how many. See docs/contracts.md."
+            f"note: {c.hazard} is {hazard.coding}-coded in Storm Events and this "
+            "contract drops zone-coded events, so the panel will under-count it. "
+            "Consider registering with --zone-policy expand, which maps each zone "
+            "event to every county in its zone via the NWS crosswalk "
+            "(docs/contracts.md). `readiness panel` reports the counts either way."
         )
     _p()
     _p("next:")
@@ -460,6 +463,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="property damage at or above which an event is damaging")
     sp.add_argument("--no-casualties", action="store_true",
                     help="do not count injuries or deaths as damaging")
+    sp.add_argument("--zone-policy", default="drop",
+                    choices=list(contracts.ZONE_POLICIES),
+                    help="what to do with zone-coded events: drop them, or expand each "
+                         "to every county in its NWS zone (default: drop)")
     sp.add_argument("--train", default="1996-2015", metavar="YYYY-YYYY")
     sp.add_argument("--validate", default="2016-2020", metavar="YYYY-YYYY")
     sp.add_argument("--test", default="2021-2025", metavar="YYYY-YYYY")

@@ -22,6 +22,7 @@ Contracts are JSON files, one per file, in `contracts/`:
       "scope": {"country": "US", "states": ["XX"]},
       "period": "quarter",
       "damaging": {"property_usd_min": 10000, "count_casualties": true},
+      "zone_policy": "drop",
       "splits": {"train": [1996, 2015], "validate": [2016, 2020], "test": [2021, 2025]},
       "test_touch_budget": 1,
       "reference_model": "climatology-pooled",
@@ -40,6 +41,12 @@ The forecast unit a contract defines is:
 
 where regions come from the scope (US counties, for the Storm Events ground
 truth) and periods are months, quarters or years.
+
+`zone_policy` says what to do with events Storm Events codes against NWS
+forecast zones rather than counties: `drop` them (the default; honest for
+county-coded hazards, badly under-counting for zone-coded ones) or `expand`
+each to every county in its zone via the NWS crosswalk. It is a criterion —
+it changes the labels — so it is hashed like the rest.
 
 Nothing here imports the engine, the agent, or the harness. The harness reads
 contracts; contracts do not read the harness.
@@ -66,6 +73,7 @@ CONTRACTS_DIR_ENV = "READINESS_CONTRACTS_DIR"
 CONTRACT_ENV = "READINESS_CONTRACT"
 
 PERIODS: dict[str, int] = {"month": 12, "quarter": 4, "year": 1}
+ZONE_POLICIES: tuple[str, ...] = ("drop", "expand")
 
 #: The only reference forecast the harness implements: the unsmoothed training
 #: base rate, issued everywhere. A contract must name it so the choice is
@@ -146,6 +154,7 @@ class Contract:
     period: str               # "month" | "quarter" | "year"
     damage_property_usd_min: float
     damage_count_casualties: bool
+    zone_policy: str          # "drop" | "expand"
     train_years: tuple[int, ...]
     validate_years: tuple[int, ...]
     test_years: tuple[int, ...]
@@ -239,6 +248,7 @@ class Contract:
                 "property_usd_min": self.damage_property_usd_min,
                 "count_casualties": self.damage_count_casualties,
             },
+            "zone_policy": self.zone_policy,
             "splits": {
                 "train": [self.train_years[0], self.train_years[-1]],
                 "validate": [self.validate_years[0], self.validate_years[-1]],
@@ -294,6 +304,7 @@ class Contract:
             period=str(spec.get("period", "quarter")),
             damage_property_usd_min=float(damaging.get("property_usd_min", 10_000.0)),
             damage_count_casualties=bool(damaging.get("count_casualties", True)),
+            zone_policy=str(spec.get("zone_policy", "drop")),
             train_years=_years(splits, "train"),
             validate_years=_years(splits, "validate"),
             test_years=_years(splits, "test"),
@@ -381,6 +392,11 @@ class Contract:
                 "not counted, every recorded event is 'damaging' — that is not a "
                 "damage definition"
             )
+        if self.zone_policy not in ZONE_POLICIES:
+            raise ContractError(
+                f"contract {self.name!r}: zone_policy {self.zone_policy!r} must be one "
+                f"of {list(ZONE_POLICIES)}"
+            )
         self._validate_splits()
         if self.test_touch_budget < 1:
             raise ContractError(
@@ -455,6 +471,12 @@ class Contract:
             f"forecast unit   region x {unit}",
             f"damaging event  property >= ${c.damage_property_usd_min:,.0f}"
             + (" or any casualty" if c.damage_count_casualties else ""),
+            "zone events     "
+            + (
+                "expanded to every county in the zone (NWS crosswalk)"
+                if c.zone_policy == "expand"
+                else "dropped (do not join to counties)"
+            ),
             f"train           {c.train_years[0]}-{c.train_years[-1]}"
             f"  ({len(c.train_years)}y)",
             f"validate        {c.validate_years[0]}-{c.validate_years[-1]}"
@@ -506,6 +528,7 @@ def new(
     event_types: Sequence[str] | None = None,
     property_usd_min: float = 10_000.0,
     count_casualties: bool = True,
+    zone_policy: str = "drop",
     train: str = "1996-2015",
     validate: str = "2016-2020",
     test: str = "2021-2025",
@@ -524,6 +547,7 @@ def new(
             "property_usd_min": property_usd_min,
             "count_casualties": count_casualties,
         },
+        "zone_policy": zone_policy,
         "splits": {"train": train, "validate": validate, "test": test},
         "thresholds": {k: v for k, v in thresholds.items() if v is not None},
     }

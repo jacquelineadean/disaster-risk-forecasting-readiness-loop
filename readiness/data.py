@@ -15,7 +15,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Callable
 
-from readiness.connectors import census, storm_events
+from readiness.connectors import census, nws_zones, storm_events
 from readiness.connectors.base import Manifest
 from readiness.contracts import Contract
 from readiness.harness.labels import Diagnostics, Panel, build_panel, diagnose
@@ -130,14 +130,29 @@ def build(
     events = storm_events.load_events(extract)
     progress(f"storm events: {len(events):,} events loaded for {contract.scope_label}")
 
+    # The data version names exactly the pinned inputs this panel was built
+    # from, so pinning a source for one contract does not move another's.
+    used = ["census/national_county2020"] + [f"noaa/storm_events/{y}" for y in years]
+
+    crosswalk = None
+    if contract.zone_policy == "expand":
+        progress("nws zones: resolving zone-county crosswalk")
+        crosswalk = nws_zones.load(snapshot_dir / "nws", manifest, refresh=refresh)
+        manifest.save()
+        used.append(nws_zones.MANIFEST_KEY)
+        progress(
+            f"nws zones: {len(crosswalk):,} zones in {crosswalk.n_states} states "
+            f"(edition {crosswalk.edition})"
+        )
+
     region_ids = [c.fips for c in regions]
-    panel = build_panel(events, region_ids, years, contract)
-    diagnostics = diagnose(events, region_ids, years, contract)
+    panel = build_panel(events, region_ids, years, contract, crosswalk)
+    diagnostics = diagnose(events, region_ids, years, contract, crosswalk)
     return Dataset(
         contract=contract,
         panel=panel,
         regions=tuple(regions),
-        data_version=manifest.digest(),
+        data_version=manifest.digest(used),
         manifest=manifest,
         diagnostics=diagnostics,
     )

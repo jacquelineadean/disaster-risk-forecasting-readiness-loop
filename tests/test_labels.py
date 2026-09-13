@@ -213,3 +213,96 @@ class TestDiagnostics(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestZonePolicy(unittest.TestCase):
+    """Zone-coded events: dropped by default, expanded through the crosswalk on request."""
+
+    from readiness.connectors import nws_zones as _nws
+
+    CROSSWALK = _nws.parse(
+        b"AA|001|X|Zone One|AA001|A|99001|C|nw|0|0\n"
+        b"AA|001|X|Zone One|AA001|B|99003|C|nw|0|0\n"
+        b"AA|002|X|Zone Two|AA002|C|99005|C|nw|0|0\n",
+        edition="test",
+    )
+    REGIONS = ["99001", "99003", "99005"]
+    YEARS = [2010]
+
+    def zone_event(self, zone="1", **kw):
+        e = make_event(event_type="Heat", year=2010, month=7, county="99" + zone.zfill(3),
+                       cz_type="Z", deaths=1, **kw)
+        return e
+
+    def test_drop_policy_ignores_zone_events(self):
+        c = make_contract(hazard="heat", zone_policy="drop")
+        panel = build_panel([self.zone_event()], self.REGIONS, self.YEARS, c)
+        self.assertEqual(sum(panel.labels), 0)
+
+    def test_expand_policy_marks_every_county_in_the_zone(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        panel = build_panel([self.zone_event()], self.REGIONS, self.YEARS, c, self.CROSSWALK)
+        positives = sorted(u for u, y in panel if y == 1)
+        self.assertEqual(positives, [("99001", 2010, 3), ("99003", 2010, 3)])
+
+    def test_expand_respects_the_region_universe(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        panel = build_panel([self.zone_event()], ["99001"], self.YEARS, c, self.CROSSWALK)
+        self.assertEqual([u for u, y in panel if y == 1], [("99001", 2010, 3)])
+
+    def test_expand_without_a_crosswalk_refuses(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        with self.assertRaises(ValueError):
+            build_panel([self.zone_event()], self.REGIONS, self.YEARS, c)
+        with self.assertRaises(ValueError):
+            diagnose([self.zone_event()], self.REGIONS, self.YEARS, c)
+
+    def test_harmless_zone_events_do_not_expand(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        harmless = make_event(event_type="Heat", year=2010, month=7, county="99001",
+                              cz_type="Z", deaths=0)
+        panel = build_panel([harmless], self.REGIONS, self.YEARS, c, self.CROSSWALK)
+        self.assertEqual(sum(panel.labels), 0)
+
+    def test_unmapped_zones_are_counted_not_guessed(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        events = [self.zone_event("1"), self.zone_event("2"), self.zone_event("9")]
+        panel = build_panel(events, self.REGIONS, self.YEARS, c, self.CROSSWALK)
+        self.assertEqual(sum(panel.labels), 3)  # zone 1 -> 2 counties, zone 2 -> 1
+        d = diagnose(events, self.REGIONS, self.YEARS, c, self.CROSSWALK)
+        self.assertEqual(d.n_zone_coded, 3)
+        self.assertEqual(d.n_zone_expanded, 2)
+        self.assertEqual(d.n_zone_unmapped, 1)
+        self.assertEqual(d.n_damaging, 2)
+        self.assertEqual(d.n_positive_units, 3)
+        self.assertEqual(d.crosswalk_edition, "test")
+        self.assertIn("expanded via NWS crosswalk", d.format())
+        self.assertIn("unmapped", d.format())
+        self.assertNotIn("WARNING: 100%", d.format())
+
+    def test_mostly_unmapped_zones_warn(self):
+        c = make_contract(hazard="heat", zone_policy="expand")
+        events = [self.zone_event("7"), self.zone_event("8"), self.zone_event("1")]
+        d = diagnose(events, self.REGIONS, self.YEARS, c, self.CROSSWALK)
+        self.assertGreaterEqual(d.unmapped_share, 0.25)
+        self.assertIn("renumbered", d.format())
+
+    def test_county_coded_events_are_unaffected_by_policy(self):
+        for policy in ("drop", "expand"):
+            with self.subTest(policy=policy):
+                c = make_contract(hazard="heat", zone_policy=policy)
+                county = make_event(event_type="Heat", year=2010, month=7, county="99005",
+                                    deaths=1)
+                panel = build_panel([county], self.REGIONS, self.YEARS, c, self.CROSSWALK)
+                self.assertEqual([u for u, y in panel if y == 1], [("99005", 2010, 3)])
+
+    def test_zone_policy_changes_the_panel_digest(self):
+        drop = make_contract(hazard="heat", zone_policy="drop")
+        expand = make_contract(hazard="heat", zone_policy="expand")
+        a = build_panel([], self.REGIONS, self.YEARS, drop)
+        b = build_panel([], self.REGIONS, self.YEARS, expand, self.CROSSWALK)
+        # Same units, same (empty) labels — the digest header is per contract
+        # hazard/scope/period, so the policy shows up on the contract digest
+        # instead, which is what the card records.
+        self.assertEqual(a.units_digest(), b.units_digest())
+        self.assertNotEqual(drop.digest(), expand.digest())
