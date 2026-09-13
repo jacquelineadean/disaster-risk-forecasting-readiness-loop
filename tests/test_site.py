@@ -6,6 +6,7 @@ and must work — with a smaller archive — when there is none; the sandbox
 module is exercised against a synthetic dataset.
 """
 
+import base64
 import contextlib
 import hashlib
 import importlib.util
@@ -124,6 +125,49 @@ class TestBuildSite(unittest.TestCase):
         self.assertEqual([q["model"] for q in models["queue"]],
                          [c.model for c in orchestrator.BASELINE_QUEUE])
         self.assertEqual(models["canary_candidate"]["model"], "leaky-oracle")
+
+    def test_tapes_json_packs_each_built_panel_as_bits(self):
+        tapes = self._json("tapes.json")
+        for name, panel in self._json("panels.json").items():
+            if panel is None:
+                self.assertNotIn(name, tapes)
+                continue
+            tape = tapes[name]
+            self.assertEqual(tape["n_regions"], panel["n_regions"])
+            self.assertEqual(tape["n_regions"] * tape["n_periods"], panel["n_units"])
+            self.assertEqual(len(tape["regions"]), tape["n_regions"])
+            bits = base64.b64decode(tape["bits"])
+            self.assertEqual(len(bits), (tape["n_regions"] * tape["n_periods"] + 7) // 8)
+            lit = sum(bin(b).count("1") for b in bits)
+            self.assertEqual(lit, panel["n_positive"])
+            self.assertEqual(sum(tape["counts"]), panel["n_positive"])
+            self.assertEqual(sum(tape["freq"]), panel["n_positive"])
+            self.assertEqual(len(tape["counts"]), tape["n_periods"])
+
+    def test_pages_share_one_top_bar_and_one_typeface(self):
+        top = re.compile(r'<header class="top".*?</header>', re.S)
+        font = re.compile(r'<link href="https://fonts\.googleapis\.com/css2\?[^"]*" rel="stylesheet">')
+        bars, fonts = set(), set()
+        for page in sorted(SITE.glob("*.html")):
+            text = page.read_text(encoding="utf-8")
+            bar = top.search(text)
+            self.assertIsNotNone(bar, f"{page.name} has no top bar")
+            bars.add(bar.group(0))
+            link = font.search(text)
+            self.assertIsNotNone(link, f"{page.name} loads no typeface")
+            fonts.add(link.group(0))
+            self.assertIn(f'data-page="{page.stem}"', text)
+        self.assertEqual(len(bars), 1, "the pages' top bars differ")
+        self.assertEqual(len(fonts), 1, "the pages load different typefaces")
+
+    def test_the_look_borrows_no_assets_from_its_inspiration(self):
+        # The design is inspired by a research microsite; nothing is copied from
+        # it: no framework class names, no brand typefaces, no hosted styles.
+        borrowed = re.compile(r"glue-|Google\+Sans|Product\+Sans|gstatic\.com/glue")
+        for path in sorted(list(SITE.glob("*.html")) + list((SITE / "assets").glob("*"))):
+            if path.is_file():
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                self.assertIsNone(borrowed.search(text), path.name)
 
     def test_pages_reference_only_files_that_exist(self):
         attr = re.compile(r'\b(?:href|src)="([^"#][^"]*)"')
