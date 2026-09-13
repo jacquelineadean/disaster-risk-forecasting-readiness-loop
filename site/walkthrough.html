@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Readiness Loop · walkthrough</title>
+<meta name="description" content="How the forecaster works, end to end, on real data: the readiness command line, step by step, with the transcripts captured from a real run and a button to run each step in the browser sandbox.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body data-page="walkthrough">
+
+<div class="mast"><div class="bar">
+  <a class="brand" href="index.html">The Readiness Loop<span>Walkthrough</span></a>
+  <nav class="site">
+    <a data-page="index" href="index.html">Overview</a>
+    <a data-page="design" href="design.html">System design</a>
+    <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+    <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+    <a data-page="playground" href="playground.html">Sandbox</a>
+    <a data-report href="generated/report/index.html">Research briefing</a>
+    <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+  </nav>
+</div></div>
+
+<header class="hero">
+  <div class="meta"><span class="k">Usage</span><span>the loop, end to end, on real data</span></div>
+  <h1>How the forecaster works.</h1>
+  <p class="lede">One hazard in one place — damaging tornadoes, Oklahoma counties, quarterly — and then the same loop on two others. Every transcript below was captured from the real command line by <code>tools/demo/capture.py</code>. Nothing is mocked.</p>
+  <div class="cols">
+    <div class="main">
+<pre class="code" style="margin-top:22px;font-size:12px"><code>contract (JSON) ──► data plane ──► labelled panel ──► models ──► harness ──► ledger
+ hazard, scope,     Storm Events    region × period   propose    score,      hash-chained,
+ period, damage,    + Census        binary labels               screen,     one per contract
+ splits, thresholds + NWS zones                                  judge</code></pre>
+      <p class="mt16">Each step has a <em>Run in the sandbox</em> button. It executes the same command with the same code in a Python runtime in your browser, against the pinned data — so you can read the captured transcript and then reproduce it.</p>
+    </div>
+    <aside class="note" style="margin-top:22px"><strong>Regenerating the captures</strong><br><code>pip install -e '.[docs]'</code>, <code>playwright install chromium</code>, <code>readiness snapshot -c tornado-ok</code>, then <code>make docs-capture</code>. The script registers into a scratch copy of the registry and an empty scratch experiments tree, which is why the paths read <code>docs/.demo/…</code>.</aside>
+  </div>
+</header>
+
+<section class="block"><div class="wrap" id="steps">
+
+  <article class="step" id="step-1">
+    <div class="num">1</div>
+    <div class="body">
+      <h3>See what is registered</h3>
+      <p>A fresh clone ships three contracts. <code>readiness contracts</code> lists them with their hazard, scope, period and the hash of their criteria.</p>
+      <div data-transcript="contracts" data-title="readiness contracts"></div>
+      <p>The hash is the load-bearing detail. It is computed over every criterion in the contract — hazard, event types, scope, period, damage definition, zone policy, splits, touch budget, thresholds — and stamped on every experiment card. Change a criterion and every prior experiment becomes visibly incomparable.</p>
+      <div class="run" data-run="contracts"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-2">
+    <div class="num">2</div>
+    <div class="body">
+      <h3>Read a contract</h3>
+      <p><code>readiness contract -c tornado-ok</code> prints the contract in full: the forecast unit, what "damaging" means, the locked splits, and the three clauses a model must clear.</p>
+      <div data-transcript="contract" data-title="readiness contract -c tornado-ok"></div>
+      <p>The forecast unit is therefore: <em>the probability that at least one damaging tornado is recorded in a given Oklahoma county in a given quarter</em>. The <code>test</code> split may be scored once per model version, ever, and the budget is kept on disk, not in memory.</p>
+      <div class="run" data-run="contract -c tornado-ok"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-3">
+    <div class="num">3</div>
+    <div class="body">
+      <h3>Register a new one</h3>
+      <p>Nothing about a hazard or a place lives in code. To run the loop on Kansas hail, register a contract:</p>
+      <div data-transcript="register" data-title="readiness register hail-ks"></div>
+      <p><code>register</code> validates before it writes — splits must be disjoint, contiguous and ordered in time, nothing may start before 1996, the hazard must be in the catalogue or come with explicit Storm Events event types — and then prints the contract, its hash, and the two commands that come next. The catalogue itself:</p>
+      <div data-transcript="hazards" data-title="readiness hazards"></div>
+      <p>For a hazard that Storm Events codes against forecast zones rather than counties — heat, tropical cyclones, winter storms, wildfire — add <code>--zone-policy expand</code>; the CLI says so when you register one without it.</p>
+      <div class="run" data-run="register hail-ks --hazard hail --state KS --description &quot;Damaging hail, Kansas counties, quarterly.&quot;" data-extra="#demo-register"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-4">
+    <div class="num">4</div>
+    <div class="body">
+      <h3>Build the panel</h3>
+      <p><code>readiness panel</code> pulls and pins whatever data is missing, builds the dense region × period panel, and reports where every one of the hazard's events went.</p>
+      <div data-transcript="panel" data-title="readiness panel -c tornado-ok"></div>
+      <ul>
+        <li><strong>The panel is dense.</strong> 77 counties × 30 years × 4 quarters = 9,240 units, every one of them labelled 0 or 1. Storm Events only records events; the Census county file supplies the zeros.</li>
+        <li><strong>The splits are covered</strong>, and their base rates differ: 5.6% in training, 8.1% in validation, 10.3% in the untouched test years. A model calibrated on 1996–2015 will be under-confident later — visible now, before any model exists, because the panel is dense and the splits are locked.</li>
+        <li><strong>Event coverage.</strong> Of 2,434 tornado events in range, all are county-coded, 971 are damaging under this contract's definition, and they mark 628 distinct county-quarters. For a zone-coded hazard this block is where the under-count would show, with a warning.</li>
+      </ul>
+      <div class="run" data-run="panel -c tornado-ok --quiet"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-5">
+    <div class="num">5</div>
+    <div class="body">
+      <h3>Score one model</h3>
+      <p><code>readiness score</code> fits one model on the training years, forecasts the validate years, and produces the full scorecard, the verdict, and the leakage screen — always all three together.</p>
+      <div data-transcript="score" data-title="readiness score climatology-seasonal -c tornado-ok"></div>
+      <p>The seasonal climatology — a per-county, per-quarter frequency shrunk toward the state-wide seasonal rate — has real skill on tornadoes: BSS +0.12 against the pooled reference and AUC 0.82. It still <strong>fails</strong> the contract, on calibration: in the 0.2–0.3 bin it forecast 0.245 and 0.322 was observed, a 7.7-point miss where the contract allows 5. The reliability table is the diagram in numbers; step 8 draws it. The canary is clear on all four checks, and says why in each case.</p>
+      <div class="run" data-run="score climatology-seasonal -c tornado-ok --quiet" data-extra="#demo-calibrate"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-6">
+    <div class="num">6</div>
+    <div class="body">
+      <h3>Run the loop</h3>
+      <p><code>readiness loop</code> is <em>gather context → take action → verify work → repeat</em> over a fixed queue of candidate models, writing one sealed experiment card per candidate into the contract's own ledger. Here it is running — a replay of the captured transcript, not a mock-up:</p>
+      <figure class="media figure"><img src="generated/media/loop.gif" alt="readiness loop, replayed" loading="lazy" width="1004" height="640"><figcaption>The loop transcript, replayed frame by frame from the capture.</figcaption></figure>
+      <div data-transcript="loop" data-title="readiness loop -c tornado-ok"></div>
+      <p>Read the four cards as assertions about the harness:</p>
+      <ol>
+        <li><strong><code>climatology-pooled</code> scores exactly +0.0000 / 0.5000.</strong> It is the reference forecast scored against itself; any other number would mean the yardstick is bent. It fails the contract anyway, because <em>being</em> climatology is not <em>beating</em> it.</li>
+        <li><strong><code>climatology-seasonal</code> beats it and still fails</strong>, on the calibration clause, as in step 5.</li>
+        <li><strong><code>persistence-last-year</code></strong> — a sharp, fixed-level forecast — gains a little skill on tornadoes and fails on discrimination.</li>
+        <li><strong><code>leaky-oracle</code></strong> is a model constructed with direct access to the outcomes it is scored on. It posts a perfect score and is <strong>REJECTED</strong>. This is the Phase 0 exit criterion.</li>
+      </ol>
+      <div class="run" data-run="loop -c tornado-ok --quiet"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-7">
+    <div class="num">7</div>
+    <div class="body">
+      <h3>Read the ledger</h3>
+      <p><code>readiness ledger</code> prints the summary table and verifies the hash chain: every card carries the hash of the card before it, and the head hash and card count are anchored in a committed sidecar file, so neither an edit in the middle nor a deletion from the end goes unnoticed.</p>
+      <div data-transcript="ledger" data-title="readiness ledger -c tornado-ok"></div>
+      <div class="run" data-run="ledger -c tornado-ok" data-extra="#demo-tamper"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-8">
+    <div class="num">8</div>
+    <div class="body">
+      <h3>See the calibration failure as a shape</h3>
+      <p><code>readiness dashboard</code> renders the same ledger as a self-contained page — no JavaScript, no external assets — with a reliability diagram per experiment. The diagrams below are drawn from the committed <code>tornado-ok</code> ledger, one per card:</p>
+      <div id="diagrams" class="grid-4"></div>
+      <p class="mt16">The seasonal model's card shows the failure as a shape: the 0.1–0.2 and 0.2–0.3 bins sit above the diagonal, outside the shaded ±5-point tolerance band, while the big 0.0–0.1 bin sits just inside it. Filled points are populated bins (n ≥ 30); hollow points are thin bins, reported but not judged. The <a href="ledgers.html#tornado-ok">ledgers page</a> shows every card in full.</p>
+      <div class="run" data-run="dashboard -c tornado-ok" data-extra="#demo-dashboard"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-9">
+    <div class="num">9</div>
+    <div class="body">
+      <h3>Verify the exit criteria</h3>
+      <p><code>readiness verify</code> checks the two Phase 0 exit criteria for the contract: the climatology baselines reproduce bit-for-bit against the blessed fingerprints in <code>harness_expected/</code>, and the harness rejects the leaked model. It also re-verifies the ledger chain.</p>
+      <div data-transcript="verify" data-title="readiness verify -c tornado-ok"></div>
+      <div class="run" data-run="verify -c tornado-ok --quiet" data-extra="#demo-verify"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-10">
+    <div class="num">10</div>
+    <div class="body">
+      <h3>Watch the canary catch a cheat</h3>
+      <p><code>readiness canary</code> runs the leaked model on its own and shows both halves of the argument: the contract, <em>if it were honoured</em>, would pass this model on every clause — and the canary rejects it on every check.</p>
+      <div data-transcript="canary" data-title="readiness canary -c tornado-ok"></div>
+      <p>The canary is a smoke alarm over the model's output, not a proof. The real defence is structural: a model receives a <code>TrainingView</code> over training years only, <code>predict()</code> is handed bare units, and labels are fetched after it returns. The canary is for when that structure is breached by an accidental join or a file that should not have been read.</p>
+      <div class="run" data-run="canary -c tornado-ok --quiet"></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-11">
+    <div class="num">11</div>
+    <div class="body">
+      <h3>The same harness, three hazards</h3>
+      <p>Nothing above was specific to tornadoes or to Oklahoma. The three committed contracts differ in hazard, scope, period and zone policy, and the same seasonal model lands differently on each:</p>
+      <div id="compare" class="grid-3"></div>
+      <ul class="mt16">
+        <li>On <strong>inland flooding</strong> it has slight skill (+0.017) and misses the AUC floor.</li>
+        <li>On <strong>tornadoes</strong> it discriminates well and fails only on calibration.</li>
+        <li>On <strong>monthly tropical cyclones</strong> it <em>passes</em>: the season is so sharp that region plus month clears every clause. Its skill score is +0.009, because at a 0.66% base rate the pooled reference is already nearly right nearly everywhere. A passing contract is permission to spend one test touch, not a forecast.</li>
+      </ul>
+      <p>Running the same canary across base rates from 8% down to 0.66% is also what exposed — and fixed — a check that had been implicitly calibrated to one hazard.</p>
+      <div class="btn-row"><a class="btn small secondary" href="ledgers.html">Every committed ledger →</a><a class="btn small secondary" href="playground.html?cmd=loop%20-c%20tropical-cyclone-gulf%20--quiet">Run the Gulf loop in the sandbox →</a></div>
+    </div>
+  </article>
+
+  <article class="step" id="step-12">
+    <div class="num">12</div>
+    <div class="body">
+      <h3>The research briefing</h3>
+      <p>The design the implementation follows is the research briefing. Its second section is the argument for the planning layer that the risk numbers exist to serve: warnings have gotten remarkably good; readiness has not kept up.</p>
+      <figure class="media figure"><a data-report href="generated/report/index.html"><img src="generated/media/report-section-2.png" alt="report, section 2" loading="lazy"></a><figcaption>Section 2 of the briefing. <a data-report href="generated/report/index.html">Read the whole report →</a></figcaption></figure>
+    </div>
+  </article>
+
+</div></section>
+
+<footer class="site">
+  <p>This page follows <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/how-it-works.md">docs/how-it-works.md</a>; the transcripts are the committed captures under <code>docs/media/transcripts/</code>.</p>
+  <p><span data-built>…</span></p>
+</footer>
+
+<script src="assets/site.js"></script>
+<script>
+(async function () {
+  document.querySelectorAll("[data-run]").forEach((el) => {
+    const argv = el.dataset.run;
+    const extra = el.dataset.extra ? `<a class="btn small ghost" href="playground.html${el.dataset.extra}">Related demo →</a>` : "";
+    el.innerHTML = `<div class="btn-row">${RL.runLink(argv)}${extra}<code style="align-self:center">readiness ${RL.esc(argv)}</code></div>`;
+  });
+  const [tr, ledgers] = await Promise.all([RL.fetchJSON("transcripts.json"), RL.fetchJSON("ledgers.json")]);
+  document.querySelectorAll("[data-transcript]").forEach((el) => {
+    const text = tr.transcripts[el.dataset.transcript];
+    el.innerHTML = text ? RL.terminal(el.dataset.title, text) : `<p class="muted">transcript <code>${RL.esc(el.dataset.transcript)}</code> not captured</p>`;
+  });
+  const ok = ledgers["tornado-ok"];
+  if (ok) {
+    document.getElementById("diagrams").innerHTML = ok.cards.map((k) =>
+      `<figure class="figure card" style="padding:12px;margin:0">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 230)}<figcaption>${RL.esc(k.experiment_id)} · <code>${RL.esc(k.model)}</code> ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)}</figcaption></figure>`).join("");
+  }
+  const order = ["inland-flood-la", "tornado-ok", "tropical-cyclone-gulf"].filter((n) => ledgers[n]).concat(Object.keys(ledgers).filter((n) => !["inland-flood-la", "tornado-ok", "tropical-cyclone-gulf"].includes(n)));
+  document.getElementById("compare").innerHTML = order.map((n) => {
+    const k = ledgers[n].cards.find((c) => c.model === "climatology-seasonal");
+    if (!k) return "";
+    return `<figure class="figure card" style="padding:12px;margin:0">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 260)}<figcaption><a href="ledgers.html#${RL.esc(n)}">${RL.esc(n)}</a> · seasonal ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)} · base rate ${RL.fmt.pct(k.scorecard.base_rate, 2)}</figcaption></figure>`;
+  }).join("");
+})().catch((e) => {
+  document.getElementById("steps").insertAdjacentHTML("afterbegin", `<div class="card"><p class="mb0"><strong>Could not load the generated data</strong> (${RL.esc(e.message)}). Build it with <code>make site</code> and serve the <code>site/</code> directory over HTTP.</p></div>`);
+});
+</script>
+</body>
+</html>

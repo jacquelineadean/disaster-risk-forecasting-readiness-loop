@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8137", "--directory", "report"],
       "port": 8137
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8138", "--directory", "site"],
+      "port": 8138
     }
   ]
 }

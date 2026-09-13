@@ -21,3 +21,7 @@ experiments/index.html
 
 # Scratch registry and ledgers used while regenerating docs/media.
 docs/.demo/
+
+# The overview website's generated data: rebuilt from the repo's own artefacts
+# (and the pinned snapshots, if present) by `make site`.
+site/generated/

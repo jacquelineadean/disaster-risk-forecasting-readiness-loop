@@ -7,7 +7,9 @@ they can be trusted — then turns them into emergency plans.
 The research briefing that specifies this is in [`report/index.html`](report/index.html)
 (open it, or `make serve`). Everything below is the implementation; for a
 step-by-step tour with screenshots and a recording of a real run, see
-[**docs/how-it-works.md**](docs/how-it-works.md).
+[**docs/how-it-works.md**](docs/how-it-works.md), or open the
+[website](#the-website), which walks through the design and runs the real
+code in your browser.
 
 **Status: Phase 0 complete, for any hazard.** The eval plane is built and its
 exit criteria are met on real NOAA data. The whole loop is *contract-driven*:
@@ -163,6 +165,41 @@ Read the tables as assertions about the harness, not as forecasts:
 The first contract is the original Phase 0 series, and its numbers are
 unchanged by the move to contracts-as-data. Register a fourth with
 `readiness register` and the same table comes out for it.
+
+---
+
+## The website
+
+[`site/`](site/) is a static overview website: the system design, the
+walkthrough with its captured transcripts, every committed ledger with its
+reliability diagrams and a hash chain your browser re-verifies, and a
+**sandbox** that loads the actual `readiness` package into a Python runtime in
+the browser ([Pyodide](https://pyodide.org)) together with the registered
+contracts, the committed ledgers, the blessed fingerprints and the pinned
+Storm Events extracts for the example contracts. Every button there runs the
+same functions the command line runs — the loop, `verify` against the blessed
+fingerprints, a calibration playground scored by the real harness, ledger
+tampering caught by the real chain check.
+
+```bash
+make site          # generate site/generated/ from the registry, ledgers, fingerprints and snapshots
+make serve-site    # http://localhost:8138
+```
+
+`tools/build_site.py` writes nothing by hand: contracts, digests, ledgers,
+hazard catalogue, model registry and transcripts are read from the same
+modules the CLI uses, and the sandbox archive packs whatever pinned extracts
+are in `snapshots/` (run `make snapshot CONTRACT=<name>` first; without them
+the sandbox still registers and validates contracts, it just cannot build a
+panel). States named by a single-state contract are packed with every event
+type, so a visitor can register a new hazard against Oklahoma or Louisiana and
+run the loop on it; the Gulf states are packed with tropical-cyclone rows only.
+The whole archive is about 1 MB.
+
+[`.github/workflows/site.yml`](.github/workflows/site.yml) builds and publishes
+the site with GitHub Pages on every push to `main` (enable it under Settings →
+Pages → Source: GitHub Actions). It pulls the pinned data once per data
+version and caches it.
 
 ---
 
@@ -362,7 +399,8 @@ harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
 docs/                how-it-works.md (the walkthrough), contracts.md (the reference), media/
 skills/              agent runbooks: verification protocol, experiment-card format
-tools/               build_report.py (design -> report), demo/capture.py (docs media)
+tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media)
+site/                the overview website: pages, and the browser sandbox that runs the package
 plans/               scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py

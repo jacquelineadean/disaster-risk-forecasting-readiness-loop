@@ -1,0 +1,77 @@
+# Build the overview website and publish it with GitHub Pages.
+#
+# The site's data is generated from the repository's own artefacts by
+# tools/build_site.py. The browser sandbox additionally packs the pinned
+# Storm Events extracts for the example contracts, so the workflow pulls them
+# first — once per data version, thanks to the cache keyed on the manifest —
+# and carries on without them if NOAA is unreachable (the site then says so).
+#
+# Enable it under Settings → Pages → Source: "GitHub Actions".
+
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "tools/build_site.py"
+      - "readiness/**"
+      - "contracts/**"
+      - "experiments/**"
+      - "harness_expected/**"
+      - "snapshots/manifest.json"
+      - "docs/**"
+      - "report/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore the pinned data
+        uses: actions/cache@v4
+        with:
+          path: |
+            snapshots/census
+            snapshots/nws
+            snapshots/storm_events
+          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
+      - name: Pull and pin the example contracts' data (no-op when cached)
+        continue-on-error: true
+        run: |
+          python -m readiness.cli snapshot -c tropical-cyclone-gulf --keep-raw
+          python -m readiness.cli snapshot -c tornado-ok --keep-raw
+          python -m readiness.cli snapshot -c inland-flood-la
+          rm -rf snapshots/storm_events_raw
+      - name: Report any drift from the committed manifest
+        run: git diff --stat -- snapshots/manifest.json || true
+      - name: Build the site
+        run: python tools/build_site.py
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,4 +1,4 @@
-.PHONY: help install snapshot panel loop canary verify test report serve ledger contracts dashboard docs-capture clean-derived
+.PHONY: help install snapshot panel loop canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
 
 PY ?= python3
 # Which registered contract to run against. Leave empty to let the CLI resolve
@@ -51,6 +51,12 @@ report:          ## rebuild report/index.html from the design source
 serve:           ## serve the report at http://localhost:8137
 	$(PY) -m http.server 8137 --directory report
 
+site:            ## build the overview website's data into site/generated (packs pinned data if present)
+	$(PY) tools/build_site.py
+
+serve-site:      ## serve the overview website at http://localhost:8138 (run `make site` first)
+	$(PY) -m http.server 8138 --directory site
+
 clean-derived:   ## drop derived artefacts; keeps snapshots and the ledgers
-	rm -rf report/index.html experiments/*/dashboard.html experiments/index.html
+	rm -rf report/index.html experiments/*/dashboard.html experiments/index.html site/generated
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
