@@ -202,9 +202,21 @@ def snapshot(
 
         def pull(year: int) -> tuple[int, SourceRecord | None, dict[str, int]]:
             data, url = obtain(year)
-            grouped = parse_year(data, None if states is None else needed[year])
+            # A fresh download may carry reprocessed bytes. Every extract that
+            # already exists for this year was cut from the *previous* bytes
+            # and would otherwise stay stale under a manifest record that now
+            # says otherwise — so re-cut all of them, not just the ones asked
+            # for. One extra pass over data that is already in memory.
+            parts_to_write = list(needed[year])
+            if url is not None:
+                for existing in extract_dir.glob(f"*_{year}.jsonl"):
+                    part = existing.name[: -len(f"_{year}.jsonl")]
+                    if part not in parts_to_write:
+                        parts_to_write.append(part)
+            wanted = None if NATIONAL in parts_to_write else parts_to_write
+            grouped = parse_year(data, wanted)
             counts: dict[str, int] = {}
-            for part in needed[year]:
+            for part in parts_to_write:
                 if part == NATIONAL:
                     rows = (r for fips in sorted(grouped) for r in grouped[fips])
                 else:

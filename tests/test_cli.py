@@ -67,6 +67,16 @@ class TestRegistration(CliCase):
     def test_register_warns_about_zone_coded_hazards(self):
         _code, out = self.run_cli("register", "heat-zz", "--hazard", "heat", "--state", "zz")
         self.assertIn("zone-coded", out)
+        self.assertIn("--zone-policy expand", out)
+
+    def test_register_with_expand_policy(self):
+        code, out = self.run_cli(
+            "register", "heat-yy", "--hazard", "heat", "--state", "yy",
+            "--zone-policy", "expand",
+        )
+        self.assertEqual(code, 0)
+        self.assertNotIn("under-count", out)
+        self.assertEqual(contracts.load("heat-yy").zone_policy, "expand")
 
     def test_register_refuses_to_overwrite(self):
         self.run_cli("register", "tornado-zz", "--hazard", "tornado")

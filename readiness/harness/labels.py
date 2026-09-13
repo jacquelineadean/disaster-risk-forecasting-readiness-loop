@@ -18,12 +18,14 @@ Two things make this harder than it looks, and both are handled here:
 * **"Damaging" must be fixed in advance.** The threshold lives in the contract,
   not here, so it cannot drift while someone is iterating on a model.
 
-One thing is *not* handled here, and is reported rather than hidden: Storm
-Events codes many hazards against NWS forecast zones rather than counties.
-Zone-coded rows do not join to a county universe, and this builder drops them.
-`diagnose()` counts exactly how many, so a contract for a zone-coded hazard is
-told that its panel is empty for a reason, not silently handed a base rate of
-zero.
+A third thing is handled explicitly because Storm Events forces the choice:
+many hazards are coded against NWS forecast zones rather than counties, and a
+zone-coded row does not join to a county universe on its own. The contract's
+`zone_policy` decides. Under `drop` such rows are discarded; under `expand`
+each is mapped, through the NWS zone-county crosswalk, to every county in its
+zone. Either way `diagnose()` counts exactly what happened — dropped, expanded,
+or unmappable because the zone is not in the current crosswalk edition — so a
+thin panel is explained, not silently handed a base rate of zero.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Sequence
 
+from readiness.connectors.nws_zones import Crosswalk
 from readiness.contracts import Contract
 
 #: A single forecast unit. Ordered so panels sort deterministically.
@@ -188,18 +191,46 @@ class Panel:
         )
 
 
+def _require_crosswalk(contract: Contract, crosswalk: Crosswalk | None) -> None:
+    if contract.zone_policy == "expand" and crosswalk is None:
+        raise ValueError(
+            f"contract {contract.name!r} expands zone-coded events but no zone "
+            "crosswalk was supplied; refusing to build a panel that silently "
+            "drops them instead"
+        )
+
+
+def _regions_hit(
+    event: StormEvent, contract: Contract, crosswalk: Crosswalk | None
+) -> tuple[str, ...] | None:
+    """Which regions an event lands in, or None if it is zone-coded and dropped.
+
+    Returns an empty tuple for a zone-coded event whose zone the crosswalk does
+    not know (unmapped) — distinct from None so the diagnostics can count it.
+    """
+    if event.county_coded:
+        return (event.county_fips,)
+    if contract.zone_policy != "expand":
+        return None
+    assert crosswalk is not None
+    return crosswalk.counties_for(event.state_fips, event.cz_fips)
+
+
 def build_panel(
     events: Iterable[StormEvent],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
+    crosswalk: Crosswalk | None = None,
 ) -> Panel:
     """Cross regions x years x periods, then mark cells with a damaging event.
 
     `events` should already be filtered to the scope's states; hazard filtering
     happens here so the caller cannot accidentally pass a different event-type
-    set than the contract declares.
+    set than the contract declares. A contract whose `zone_policy` is `expand`
+    must be given the crosswalk; this refuses to guess.
     """
+    _require_crosswalk(contract, crosswalk)
     event_types = set(contract.event_types)
     year_set = set(years)
     region_set = set(regions)
@@ -209,12 +240,15 @@ def build_panel(
     for event in events:
         if event.event_type not in event_types:
             continue
-        if not event.county_coded:  # zone-coded rows do not join to regions
+        if event.year not in year_set:
             continue
-        if event.year not in year_set or event.county_fips not in region_set:
+        hit = _regions_hit(event, contract, crosswalk)
+        if not hit or not is_damaging(event, contract):
             continue
-        if is_damaging(event, contract):
-            positive.add(event.unit_for(ppy))
+        period = event.period_index(ppy)
+        for region in hit:
+            if region in region_set:
+                positive.add((region, event.year, period))
 
     units: list[Unit] = []
     labels: list[int] = []
@@ -239,33 +273,59 @@ class Diagnostics:
     """Where the hazard's events went while the panel was being built."""
 
     hazard: str
+    zone_policy: str
     n_events: int            # rows of the contract's event types, any year, any coding
     n_in_years: int          # ... within the contract's years
-    n_county_coded: int      # ... and county-coded
-    n_zone_coded: int        # ... but zone-coded, and therefore dropped
-    n_outside_universe: int  # county-coded but not in the region universe
-    n_damaging: int          # county-coded, in universe, and damaging
+    n_county_coded: int      # ... and county-coded, in the region universe
+    n_zone_coded: int        # ... but zone-coded
+    n_zone_expanded: int     # zone-coded rows mapped to >= 1 region (expand only)
+    n_zone_unmapped: int     # zone-coded rows whose zone the crosswalk lacks (expand)
+    n_outside_universe: int  # mapped to a county outside the region universe
+    n_damaging: int          # in universe and damaging (a zone row counts once)
     n_positive_units: int    # distinct units marked positive
+    crosswalk_edition: str = ""
 
     @property
     def zone_share(self) -> float:
         return self.n_zone_coded / self.n_in_years if self.n_in_years else 0.0
 
+    @property
+    def unmapped_share(self) -> float:
+        return self.n_zone_unmapped / self.n_zone_coded if self.n_zone_coded else 0.0
+
     def format(self) -> str:
         lines = [
             f"  {self.hazard}: {self.n_in_years:,} events in the contract's years",
-            f"    county-coded      {self.n_county_coded:>8,}"
-            f"   ({self.n_damaging:,} damaging -> "
-            f"{self.n_positive_units:,} positive units)",
-            f"    zone-coded        {self.n_zone_coded:>8,}"
-            "   dropped: zones do not join to regions",
-            f"    outside universe  {self.n_outside_universe:>8,}",
+            f"    county-coded      {self.n_county_coded:>8,}",
         ]
-        if self.n_in_years and self.zone_share >= 0.5:
+        if self.zone_policy == "expand":
+            lines.append(
+                f"    zone-coded        {self.n_zone_coded:>8,}"
+                f"   {self.n_zone_expanded:,} expanded via NWS crosswalk "
+                f"{self.crosswalk_edition or ''}".rstrip()
+                + f", {self.n_zone_unmapped:,} unmapped (zone not in this edition)"
+            )
+        else:
+            lines.append(
+                f"    zone-coded        {self.n_zone_coded:>8,}"
+                "   dropped (zone_policy: drop)"
+            )
+        lines.append(f"    outside universe  {self.n_outside_universe:>8,}")
+        lines.append(
+            f"    damaging          {self.n_damaging:>8,}"
+            f"   -> {self.n_positive_units:,} positive units"
+        )
+        if self.n_in_years and self.zone_share >= 0.5 and self.zone_policy != "expand":
             lines.append(
                 f"    WARNING: {self.zone_share:.0%} of this hazard's events are "
                 "zone-coded and were dropped. The panel under-counts it badly; "
-                "see the zone crosswalk in docs/contracts.md."
+                "register the contract with zone_policy 'expand' (docs/contracts.md)."
+            )
+        if self.n_zone_coded and self.unmapped_share >= 0.25:
+            lines.append(
+                f"    WARNING: {self.unmapped_share:.0%} of zone-coded events name a "
+                "zone the current crosswalk edition does not list. Zones were "
+                "renumbered; those events are lost, not mislabelled."
             )
         return "\n".join(lines)
 
@@ -275,13 +335,16 @@ def diagnose(
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
+    crosswalk: Crosswalk | None = None,
 ) -> Diagnostics:
     """Count what `build_panel` keeps and drops, so a thin panel is explained."""
+    _require_crosswalk(contract, crosswalk)
     event_types = set(contract.event_types)
     year_set = set(years)
     region_set = set(regions)
     ppy = contract.periods_per_year
-    n_events = n_in_years = n_county = n_zone = n_outside = n_damaging = 0
+    n_events = n_in_years = n_county = n_zone = n_expanded = n_unmapped = 0
+    n_outside = n_damaging = 0
     positive: set[Unit] = set()
     for event in events:
         if event.event_type not in event_types:
@@ -290,23 +353,37 @@ def diagnose(
         if event.year not in year_set:
             continue
         n_in_years += 1
+        hit = _regions_hit(event, contract, crosswalk)
         if not event.county_coded:
             n_zone += 1
-            continue
-        if event.county_fips not in region_set:
+            if hit is None:
+                continue  # dropped by policy
+            if not hit:
+                n_unmapped += 1
+                continue
+            n_expanded += 1
+        in_universe = [r for r in hit if r in region_set]
+        if not in_universe:
             n_outside += 1
             continue
-        n_county += 1
+        if event.county_coded:
+            n_county += 1
         if is_damaging(event, contract):
             n_damaging += 1
-            positive.add(event.unit_for(ppy))
+            period = event.period_index(ppy)
+            for region in in_universe:
+                positive.add((region, event.year, period))
     return Diagnostics(
         hazard=contract.hazard,
+        zone_policy=contract.zone_policy,
         n_events=n_events,
         n_in_years=n_in_years,
         n_county_coded=n_county,
         n_zone_coded=n_zone,
+        n_zone_expanded=n_expanded,
+        n_zone_unmapped=n_unmapped,
         n_outside_universe=n_outside,
         n_damaging=n_damaging,
         n_positive_units=len(positive),
+        crosswalk_edition=crosswalk.edition if crosswalk is not None else "",
     )
