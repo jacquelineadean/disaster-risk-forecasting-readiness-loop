@@ -2,26 +2,26 @@
 
 import unittest
 
-from readiness import config
-from readiness.config import CONTRACT
 from readiness.engine.baseline import (
-    ClimatologyCountyQuarter,
-    ClimatologyGlobal,
+    ClimatologyPooled,
+    ClimatologySeasonal,
     PersistenceLastYear,
 )
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
-from readiness.harness.splits import VALIDATE
-from tests.fixtures import make_panel
+from tests.fixtures import make_contract, make_panel
+
+CONTRACT = make_contract()
 
 
-def card(**overrides) -> scoring.Scorecard:
+def card(contract=CONTRACT, **overrides) -> scoring.Scorecard:
     """A scorecard that passes everything, so each test can break one thing."""
     bins = tuple(
         {
             "lower": i / 10,
             "upper": (i + 1) / 10,
             "count": 100,
+            "populated": True,
             "mean_forecast": i / 10 + 0.05,
             "observed_frequency": i / 10 + 0.05,
         }
@@ -30,6 +30,8 @@ def card(**overrides) -> scoring.Scorecard:
     base = dict(
         model="m",
         version="1.0.0",
+        contract=contract.name,
+        contract_digest=contract.digest(),
         split="validate",
         n_units=1000,
         n_positive=100,
@@ -45,7 +47,6 @@ def card(**overrides) -> scoring.Scorecard:
         reliability_bins=bins,
         panel_digest="a" * 16,
         train_digest="b" * 16,
-        contract_digest=CONTRACT.digest(),
     )
     base.update(overrides)
     return scoring.Scorecard(**base)
@@ -53,28 +54,35 @@ def card(**overrides) -> scoring.Scorecard:
 
 class TestVerdict(unittest.TestCase):
     def test_a_good_card_passes(self):
-        verdict = contract_mod.evaluate(card())
+        verdict = contract_mod.evaluate(card(), CONTRACT)
         self.assertTrue(verdict.passed, verdict.format())
+        self.assertEqual(verdict.contract, CONTRACT.name)
 
     def test_zero_skill_fails_because_the_clause_is_strict(self):
         # "BSS > 0", not ">= 0": matching climatology is not beating it.
-        self.assertFalse(contract_mod.evaluate(card(brier_skill_score=0.0)).passed)
+        self.assertFalse(contract_mod.evaluate(card(brier_skill_score=0.0), CONTRACT).passed)
 
     def test_negative_skill_fails(self):
-        self.assertFalse(contract_mod.evaluate(card(brier_skill_score=-0.01)).passed)
+        self.assertFalse(contract_mod.evaluate(card(brier_skill_score=-0.01), CONTRACT).passed)
 
     def test_low_auc_fails(self):
         self.assertFalse(
-            contract_mod.evaluate(card(auc=CONTRACT.min_auc - 0.001)).passed
+            contract_mod.evaluate(card(auc=CONTRACT.min_auc - 0.001), CONTRACT).passed
         )
 
     def test_auc_exactly_at_threshold_passes(self):
-        self.assertTrue(contract_mod.evaluate(card(auc=CONTRACT.min_auc)).passed)
+        self.assertTrue(contract_mod.evaluate(card(auc=CONTRACT.min_auc), CONTRACT).passed)
+
+    def test_thresholds_come_from_the_contract(self):
+        lenient = make_contract(thresholds={"min_auc": 0.6})
+        self.assertTrue(contract_mod.evaluate(card(lenient, auc=0.65), lenient).passed)
+        strict = make_contract(thresholds={"min_auc": 0.9})
+        self.assertFalse(contract_mod.evaluate(card(strict, auc=0.85), strict).passed)
 
     def test_miscalibrated_populated_bin_fails(self):
         bins = list(card().reliability_bins)
         bins[3] = dict(bins[3], observed_frequency=bins[3]["mean_forecast"] + 0.20)
-        verdict = contract_mod.evaluate(card(reliability_bins=tuple(bins)))
+        verdict = contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT)
         self.assertFalse(verdict.passed)
         rel = next(c for c in verdict.checks if c.name == "reliability")
         self.assertFalse(rel.passed)
@@ -85,61 +93,68 @@ class TestVerdict(unittest.TestCase):
         bins[3] = dict(
             bins[3], count=3, observed_frequency=bins[3]["mean_forecast"] + 0.40
         )
-        self.assertTrue(contract_mod.evaluate(card(reliability_bins=tuple(bins))).passed)
+        self.assertTrue(
+            contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT).passed
+        )
 
     def test_no_populated_bins_fails_rather_than_vacuously_passing(self):
         bins = tuple(dict(b, count=1) for b in card().reliability_bins)
-        verdict = contract_mod.evaluate(card(reliability_bins=bins))
+        verdict = contract_mod.evaluate(card(reliability_bins=bins), CONTRACT)
         self.assertFalse(verdict.passed)
         rel = next(c for c in verdict.checks if c.name == "reliability")
         self.assertIn("unmeasurable", rel.detail)
 
     def test_a_card_from_a_different_contract_fails_provenance(self):
-        verdict = contract_mod.evaluate(card(contract_digest="0" * 16))
+        verdict = contract_mod.evaluate(card(contract_digest="0" * 16), CONTRACT)
         self.assertFalse(verdict.passed)
         prov = next(c for c in verdict.checks if c.name == "contract provenance")
         self.assertFalse(prov.passed)
 
-
-class TestContractIdentity(unittest.TestCase):
-    def test_digest_is_stable(self):
-        self.assertEqual(CONTRACT.digest(), config.Contract().digest())
-
-    def test_changing_a_threshold_changes_the_digest(self):
-        import dataclasses
-
-        altered = dataclasses.replace(CONTRACT, min_auc=0.65)
-        self.assertNotEqual(altered.digest(), CONTRACT.digest())
-
-    def test_changing_the_damage_threshold_changes_the_digest(self):
-        import dataclasses
-
-        altered = dataclasses.replace(CONTRACT, damage_property_usd_min=1.0)
-        self.assertNotEqual(altered.digest(), CONTRACT.digest())
+    def test_a_card_judged_by_a_changed_contract_fails_provenance(self):
+        # The card was produced under CONTRACT; the thresholds then moved.
+        moved = make_contract(thresholds={"min_auc": 0.65})
+        verdict = contract_mod.evaluate(card(), moved)
+        prov = next(c for c in verdict.checks if c.name == "contract provenance")
+        self.assertFalse(prov.passed)
+        self.assertIn("contract changed", prov.detail)
 
 
 class TestAgainstRealModels(unittest.TestCase):
     """End to end on a synthetic panel: the contract must both pass and fail."""
 
     def setUp(self):
-        self.panel = make_panel(n_counties=16)
+        self.c = make_contract()
+        self.panel = make_panel(contract=self.c, n_regions=16)
 
     def test_reference_scored_against_itself_is_exactly_zero_skill(self):
-        c = scoring.score(ClimatologyGlobal(), self.panel, VALIDATE)
-        self.assertAlmostEqual(c.brier_skill_score, 0.0, places=6)
-        self.assertAlmostEqual(c.auc, 0.5, places=9)
-        self.assertFalse(contract_mod.evaluate(c).passed)
+        card = scoring.score(ClimatologyPooled(), self.panel, self.c, "validate")
+        self.assertAlmostEqual(card.brier_skill_score, 0.0, places=6)
+        self.assertAlmostEqual(card.auc, 0.5, places=9)
+        self.assertFalse(contract_mod.evaluate(card, self.c).passed)
 
-    def test_county_quarter_climatology_beats_the_reference(self):
-        c = scoring.score(ClimatologyCountyQuarter(), self.panel, VALIDATE)
-        self.assertGreater(c.brier_skill_score, 0.0)
+    def test_seasonal_climatology_beats_the_reference(self):
+        card = scoring.score(ClimatologySeasonal(), self.panel, self.c, "validate")
+        self.assertGreater(card.brier_skill_score, 0.0)
 
     def test_a_sharp_uncalibrated_model_fails_on_reliability(self):
-        c = scoring.score(PersistenceLastYear(), self.panel, VALIDATE)
-        verdict = contract_mod.evaluate(c)
+        card = scoring.score(PersistenceLastYear(), self.panel, self.c, "validate")
+        verdict = contract_mod.evaluate(card, self.c)
         rel = next(ch for ch in verdict.checks if ch.name == "reliability")
-        self.assertFalse(rel.passed, c.format())
+        self.assertFalse(rel.passed, card.format())
         self.assertFalse(verdict.passed)
+
+    def test_scorecard_carries_the_contract(self):
+        card = scoring.score(ClimatologyPooled(), self.panel, self.c, "validate")
+        self.assertEqual(card.contract, self.c.name)
+        self.assertEqual(card.contract_digest, self.c.digest())
+        self.assertIn(self.c.name, card.format())
+
+    def test_the_same_model_scores_under_a_monthly_contract(self):
+        monthly = make_contract(period="month")
+        panel = make_panel(contract=monthly, n_regions=8)
+        card = scoring.score(ClimatologySeasonal(), panel, monthly, "validate")
+        self.assertEqual(card.n_units, 8 * 5 * 12)
+        self.assertGreater(card.brier_skill_score, 0.0)
 
 
 if __name__ == "__main__":

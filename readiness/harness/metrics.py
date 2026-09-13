@@ -95,12 +95,6 @@ class ReliabilityBin:
         """Signed calibration error in probability units. Positive = under-forecast."""
         return self.observed_frequency - self.mean_forecast
 
-    @property
-    def populated(self) -> bool:
-        from readiness.config import RELIABILITY_MIN_BIN_COUNT
-
-        return self.count >= RELIABILITY_MIN_BIN_COUNT
-
 
 def reliability_table(
     probs: Sequence[float], outcomes: Sequence[int], n_bins: int = 10

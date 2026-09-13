@@ -5,12 +5,14 @@ with injuries, fatalities and property/crop damage per event. This project reads
 it from 1996 onward only; report §7 warns that collection practice changed over
 the decades and that many event types standardised in 1996.
 
-The raw year files are ~10 MB gzipped each and the full 1996-2025 pull is a few
-hundred megabytes. By default each year is downloaded, checksummed, filtered to
-the state of interest, written out as a compact extract, and the raw bytes are
-discarded. The checksum in the manifest is what pins the experiment; pass
-`keep_raw=True` if you want to mirror the originals (report §7 argues you
-should, given the Billion-Dollar Disasters retirement).
+The raw year files are ~10 MB gzipped each and a full 1996–2025 pull is a few
+hundred megabytes. Each year file is national, so one download serves every
+state and every hazard: it is downloaded, checksummed, split into one compact
+extract per state (or one national extract), and the raw bytes are discarded
+unless `keep_raw` is set. The checksum in the manifest is what pins the
+experiment. A kept raw file whose checksum still matches the manifest is
+re-used to cut a new state's extract without another download — report §7
+argues you should keep them, given the Billion-Dollar Disasters retirement.
 """
 
 from __future__ import annotations
@@ -21,8 +23,9 @@ import io
 import json
 import pathlib
 import re
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from readiness.connectors.base import (
     ConnectorError,
@@ -36,6 +39,9 @@ from readiness.harness.labels import StormEvent, county_fips, parse_damage
 
 INDEX_URL = "https://www.ncei.noaa.gov/pub/data/swdi/stormevents/csvfiles/"
 LICENSE = "US Government work — public domain (17 U.S.C. §105); cite NOAA NCEI"
+
+#: The scope label used for a national (every state) extract.
+NATIONAL = "all"
 
 #: Files are named with both a data year and a *creation* date that changes when
 #: NCEI reprocesses. The index has to be read to learn the current creation date.
@@ -93,9 +99,14 @@ def discover_files(years: Iterable[int]) -> dict[int, str]:
     return {y: INDEX_URL + name for y, (_, name) in sorted(found.items())}
 
 
-def _parse_year(data: bytes, state: str) -> list[dict]:
-    """Decompress one year file and keep only rows for `state`."""
-    rows: list[dict] = []
+def parse_year(data: bytes, states: Iterable[str] | None) -> dict[str, list[dict]]:
+    """Decompress one national year file and group rows by 2-digit state FIPS.
+
+    `states` limits the output to those states; `None` keeps every row. Rows
+    are returned under their zero-padded state FIPS.
+    """
+    wanted = None if states is None else {int(s) for s in states}
+    rows: dict[str, list[dict]] = defaultdict(list)
     with gzip.open(io.BytesIO(data), "rt", encoding="utf-8", errors="replace") as fh:
         reader = csv.DictReader(fh)
         missing = [f for f in _FIELDS if f not in (reader.fieldnames or [])]
@@ -105,20 +116,38 @@ def _parse_year(data: bytes, state: str) -> list[dict]:
                 "absent. A data-steward review is required before this year "
                 "can be used (report §5, data steward subagent)."
             )
-        want = int(state)
         for row in reader:
             raw = (row.get("STATE_FIPS") or "").strip()
             # Older files are inconsistent about zero-padding ("1" vs "01"),
             # so compare numerically rather than as strings.
-            if not raw.isdigit() or int(raw) != want:
+            if not raw.isdigit():
                 continue
-            rows.append({k: (row.get(k) or "").strip() for k in _FIELDS})
-    return rows
+            fips = int(raw)
+            if wanted is not None and fips not in wanted:
+                continue
+            rows[f"{fips:02d}"].append({k: (row.get(k) or "").strip() for k in _FIELDS})
+    return dict(rows)
+
+
+def scope_label(states: Sequence[str] | None) -> str:
+    """`"22"`, `"22+28"`, or `"all"` — the prefix extracts are filed under."""
+    if states is None:
+        return NATIONAL
+    return "+".join(sorted({f"{int(s):02d}" for s in states}))
+
+
+def _write_extract(path: pathlib.Path, rows: Iterable[dict]) -> int:
+    n = 0
+    with path.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+            n += 1
+    return n
 
 
 def snapshot(
     years: Iterable[int],
-    state_fips: str,
+    states: Sequence[str] | None,
     snapshot_dir: pathlib.Path,
     manifest: Manifest,
     *,
@@ -127,13 +156,19 @@ def snapshot(
     workers: int = 1,
     progress: Callable[[str], None] = lambda _msg: None,
 ) -> pathlib.Path:
-    """Pull the requested years, pin their checksums, and write a state extract.
+    """Pull the requested years, pin their checksums, and write the scope's extract.
 
-    Returns the path to the extract (JSONL, one row per retained event).
+    `states` is a sequence of 2-digit state FIPS codes, or `None` for every
+    state. Returns the path to the combined extract (JSONL, one row per event).
     """
     years = sorted(set(years))
     extract_dir = snapshot_dir / "storm_events"
+    raw_dir = snapshot_dir / "storm_events_raw"
     extract_dir.mkdir(parents=True, exist_ok=True)
+    parts = [NATIONAL] if states is None else sorted({f"{int(s):02d}" for s in states})
+
+    def part_path(part: str, year: int) -> pathlib.Path:
+        return extract_dir / f"{part}_{year}.jsonl"
 
     # A cached extract with no manifest record is *unpinned*: the bytes are on
     # disk but nothing records which upstream file they came from or what it
@@ -141,71 +176,92 @@ def snapshot(
     # that as missing and re-fetch, rather than quietly scoring against data of
     # unknown provenance. (This is the state left behind when a download
     # completes but a later parsing step raises before the manifest is saved.)
-    needed = [
-        y
-        for y in years
-        if refresh
-        or not (extract_dir / f"{state_fips}_{y}.jsonl").exists()
-        or f"noaa/storm_events/{y}" not in manifest.records
-    ]
+    needed: dict[int, list[str]] = {}
+    for year in years:
+        pinned = f"noaa/storm_events/{year}" in manifest.records
+        missing = [
+            p for p in parts if refresh or not pinned or not part_path(p, year).exists()
+        ]
+        if missing:
+            needed[year] = missing
 
     if needed:
-        progress(f"resolving {len(needed)} year file(s) from the NCEI index")
-        urls = discover_files(needed)
+        urls: dict[int, str] = {}
 
-        def pull(year: int) -> tuple[int, SourceRecord, int]:
-            url = urls[year]
-            data = fetch(url)
-            rows = _parse_year(data, state_fips)
-            out = extract_dir / f"{state_fips}_{year}.jsonl"
-            with out.open("w", encoding="utf-8") as fh:
-                for row in rows:
-                    fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+        def obtain(year: int) -> tuple[bytes, str | None]:
+            """Raw bytes for one year: a kept, still-pinned raw file, else a download."""
+            raw = raw_dir / f"{year}.csv.gz"
+            record = manifest.records.get(f"noaa/storm_events/{year}")
+            if not refresh and raw.exists() and record is not None:
+                data = raw.read_bytes()
+                if sha256_bytes(data) == record.sha256:
+                    return data, None
+            if year not in urls:
+                urls.update(discover_files([y for y in needed if y not in urls]))
+            return fetch(urls[year]), urls[year]
+
+        def pull(year: int) -> tuple[int, SourceRecord | None, dict[str, int]]:
+            data, url = obtain(year)
+            grouped = parse_year(data, None if states is None else needed[year])
+            counts: dict[str, int] = {}
+            for part in needed[year]:
+                if part == NATIONAL:
+                    rows = (r for fips in sorted(grouped) for r in grouped[fips])
+                else:
+                    rows = iter(grouped.get(part, []))
+                counts[part] = _write_extract(part_path(part, year), rows)
             if keep_raw:
-                (snapshot_dir / "storm_events_raw").mkdir(parents=True, exist_ok=True)
-                (snapshot_dir / "storm_events_raw" / f"{year}.csv.gz").write_bytes(data)
-            return (
-                year,
-                SourceRecord(
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                (raw_dir / f"{year}.csv.gz").write_bytes(data)
+            record = None
+            if url is not None:
+                total = sum(len(v) for v in grouped.values()) if states is None else None
+                record = SourceRecord(
                     source="NOAA NCEI Storm Events Database",
                     url=url,
                     sha256=sha256_bytes(data),
                     bytes=len(data),
                     fetched_at=utc_now(),
                     license=LICENSE,
-                    notes=f"{len(rows)} rows retained for state FIPS {state_fips}",
-                ),
-                len(rows),
-            )
+                    notes=f"{total:,} events nationally" if total is not None else "",
+                )
+            return year, record, counts
 
+        progress(f"resolving {len(needed)} year file(s)")
         # Default is sequential, and deliberately so: every file comes from the
         # same host, so one keep-alive connection beats N parallel cold ones —
         # connection setup, not transfer, is the expensive part of this pull.
         # Raise `workers` only if you are fetching from several hosts at once.
         if workers <= 1:
-            results = (pull(year) for year in needed)
+            results = (pull(year) for year in sorted(needed))
         else:
             pool = ThreadPoolExecutor(max_workers=workers)
-            results = pool.map(pull, needed)
+            results = pool.map(pull, sorted(needed))
 
-        for year, record, n in results:
-            manifest.add(f"noaa/storm_events/{year}", record)
-            progress(f"  {year}  {record.bytes / 1e6:>5.1f} MB  {n:>5} state rows")
+        for year, record, counts in results:
+            if record is not None:
+                manifest.add(f"noaa/storm_events/{year}", record)
+                size = f"{record.bytes / 1e6:>5.1f} MB"
+            else:
+                size = "  (raw)"
+            summary = ", ".join(f"{p}: {n}" for p, n in counts.items())
+            progress(f"  {year}  {size}  rows {summary}")
         if workers > 1:
             pool.shutdown()
 
-    combined = extract_dir / f"{state_fips}_extract.jsonl"
+    combined = extract_dir / f"{scope_label(states)}_extract.jsonl"
     with combined.open("w", encoding="utf-8") as out:
         for year in years:
-            part = extract_dir / f"{state_fips}_{year}.jsonl"
-            if not part.exists():
-                raise ConnectorError(f"missing extract for {year}: {part}")
-            out.write(part.read_text(encoding="utf-8"))
+            for part in parts:
+                path = part_path(part, year)
+                if not path.exists():
+                    raise ConnectorError(f"missing extract for {year}: {path}")
+                out.write(path.read_text(encoding="utf-8"))
     return combined
 
 
 def load_events(extract: pathlib.Path) -> list[StormEvent]:
-    """Read a state extract into typed events."""
+    """Read an extract into typed events."""
     events: list[StormEvent] = []
     with extract.open(encoding="utf-8") as fh:
         for line in fh:

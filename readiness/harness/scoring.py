@@ -8,17 +8,16 @@ the labels. Keeping those steps in that order in one place is what makes the
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Protocol, Sequence, runtime_checkable
 
-from readiness.config import CONTRACT
+from readiness.contracts import Contract, Split
 from readiness.harness import metrics
 from readiness.harness.labels import Panel, Unit
 from readiness.harness.splits import (
-    TRAIN,
     PredictionRequest,
-    Split,
     TrainingView,
+    get_split,
     split_panel,
 )
 
@@ -45,6 +44,8 @@ class Scorecard:
 
     model: str
     version: str
+    contract: str
+    contract_digest: str
     split: str
     n_units: int
     n_positive: int
@@ -60,7 +61,6 @@ class Scorecard:
     reliability_bins: tuple[dict, ...]
     panel_digest: str
     train_digest: str
-    contract_digest: str = field(default_factory=CONTRACT.digest)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -68,6 +68,7 @@ class Scorecard:
     def format(self) -> str:
         lines = [
             f"  model            {self.model}@{self.version}",
+            f"  contract         {self.contract}  (sha256:{self.contract_digest})",
             f"  split            {self.split}  "
             f"({self.n_units:,} units, {self.n_positive:,} positive, "
             f"base rate {self.base_rate:.4f})",
@@ -85,7 +86,7 @@ class Scorecard:
         for b in self.reliability_bins:
             if not b["count"]:
                 continue
-            flag = "" if b["count"] >= CONTRACT.reliability_min_bin_count else "  (thin)"
+            flag = "" if b["populated"] else "  (thin)"
             lines.append(
                 f"    {b['lower']:.2f}-{b['upper']:.2f}  {b['count']:>8,}"
                 f"{b['mean_forecast']:>11.4f}{b['observed_frequency']:>11.4f}"
@@ -97,10 +98,11 @@ class Scorecard:
 def climatology_reference(n_positive: int, n_total: int) -> float:
     """**The** definition of the contract's reference forecast.
 
-    `CONTRACT.reference_model` names `climatology-global`, and every Brier Skill
-    Score in this project is measured against it. So the reference must be one
-    number computed one way — the unsmoothed training base rate — and both the
-    harness and the engine's `ClimatologyGlobal` must obtain it from here.
+    Every contract names `climatology-pooled` as its reference, and every Brier
+    Skill Score in this project is measured against it. So the reference must
+    be one number computed one way — the unsmoothed training base rate — and
+    both the harness and the engine's `ClimatologyPooled` must obtain it from
+    here.
 
     An earlier version let the engine apply Laplace smoothing while the harness
     used the raw rate. The difference was ~1e-4 in probability, and it meant the
@@ -119,20 +121,26 @@ def _reference_probability(train_panel: Panel) -> float:
     return climatology_reference(sum(train_panel.labels), len(train_panel))
 
 
+def _resolve(contract: Contract, split: Split | str) -> Split:
+    return get_split(contract, split) if isinstance(split, str) else split
+
+
 def score(
     model: Model,
     panel: Panel,
-    split: Split,
+    contract: Contract,
+    split: Split | str,
     *,
-    train_split: Split = TRAIN,
     reference_probs: Sequence[float] | None = None,
 ) -> Scorecard:
-    """Fit `model` on the training split and score it against `split`.
+    """Fit `model` on the contract's training split and score it against `split`.
 
     `reference_probs` lets a caller supply an explicit reference forecast; by
     default the harness uses its own constant climatology, which is what the
     contract names.
     """
+    split = _resolve(contract, split)
+    train_split = contract.splits.train
     train_panel = split_panel(panel, train_split)
     eval_panel = split_panel(panel, split)
 
@@ -156,12 +164,14 @@ def score(
 
     bs = metrics.brier_score(probs, outcomes)
     bs_ref = metrics.brier_score(reference_probs, outcomes)
-    murphy = metrics.murphy_decomposition(probs, outcomes, CONTRACT.n_reliability_bins)
-    table = metrics.reliability_table(probs, outcomes, CONTRACT.n_reliability_bins)
+    murphy = metrics.murphy_decomposition(probs, outcomes, contract.n_reliability_bins)
+    table = metrics.reliability_table(probs, outcomes, contract.n_reliability_bins)
 
     return Scorecard(
         model=model.name,
         version=model.version,
+        contract=contract.name,
+        contract_digest=contract.digest(),
         split=split.name,
         n_units=len(outcomes),
         n_positive=sum(outcomes),
@@ -179,6 +189,7 @@ def score(
                 "lower": b.lower,
                 "upper": b.upper,
                 "count": b.count,
+                "populated": b.count >= contract.reliability_min_bin_count,
                 "mean_forecast": b.mean_forecast if b.count else None,
                 "observed_frequency": b.observed_frequency if b.count else None,
             }
@@ -190,13 +201,15 @@ def score(
 
 
 def predictions_for(
-    model: Model, panel: Panel, split: Split, *, train_split: Split = TRAIN
+    model: Model, panel: Panel, contract: Contract, split: Split | str
 ) -> tuple[list[Unit], list[float], list[int]]:
     """Same fit/predict sequence as `score`, exposing the raw arrays.
 
     Used by the canary, which needs to inspect the forecasts themselves rather
     than the summary statistics.
     """
+    split = _resolve(contract, split)
+    train_split = contract.splits.train
     train_panel = split_panel(panel, train_split)
     eval_panel = split_panel(panel, split)
     view = TrainingView(train_panel, train_split)
@@ -204,3 +217,26 @@ def predictions_for(
     request = PredictionRequest.from_panel(eval_panel, split)
     probs = list(model.predict(request))
     return list(eval_panel.units), probs, list(eval_panel.labels)
+
+
+def screen(model: Model, panel: Panel, contract: Contract, split: Split | str):
+    """Score a model and run the leakage canary over the same fit/predict path.
+
+    Returns `(scorecard, canary_report)`. Every command that scores anything
+    goes through here so that a scorecard is never produced without its canary.
+    """
+    from readiness.harness import canary as canary_mod
+
+    split = _resolve(contract, split)
+    card = score(model, panel, contract, split)
+    _units, probs, outcomes = predictions_for(model, panel, contract, split)
+    view = TrainingView(split_panel(panel, contract.splits.train), contract.splits.train)
+    report = canary_mod.run(
+        probs=probs,
+        outcomes=outcomes,
+        brier_skill_score=card.brier_skill_score,
+        auc=card.auc,
+        view=view,
+        declared_train_digest=getattr(model, "training_digest", None),
+    )
+    return card, report

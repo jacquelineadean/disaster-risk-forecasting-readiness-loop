@@ -1,15 +1,17 @@
-"""County universe, from the Census national county file.
+"""Region universe, from the Census national county file.
 
 Without an authoritative county list the panel is built from whatever counties
 happen to appear in the event table, which silently drops every county that
 never had a recorded event — deflating the denominator and inflating the base
-rate. This connector supplies the denominator.
+rate. This connector supplies the denominator, for any state or for the whole
+country.
 """
 
 from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
+from typing import Sequence
 
 from readiness.connectors.base import Manifest, SourceRecord, fetch, sha256_bytes, utc_now
 
@@ -54,7 +56,10 @@ def load(
         )
     else:
         data = cache.read_bytes()
+    return parse(data)
 
+
+def parse(data: bytes) -> list[County]:
     counties: list[County] = []
     for i, line in enumerate(data.decode("utf-8", "replace").splitlines()):
         if i == 0 or not line.strip():
@@ -71,11 +76,22 @@ def load(
     return counties
 
 
-def for_state(counties: list[County], state: str) -> list[County]:
-    """Filter to one state, sorted by FIPS for deterministic panels."""
+def for_states(counties: list[County], states: Sequence[str]) -> list[County]:
+    """Filter to the requested states, sorted by FIPS for deterministic panels.
+
+    An empty `states` means every region in the file — the national scope.
+    An unknown state is an error, not an empty panel.
+    """
+    wanted = {s.upper() for s in states}
+    known = {c.state for c in counties}
+    unknown = sorted(wanted - known)
+    if unknown:
+        raise KeyError(
+            f"no counties found for state(s) {unknown}; known: {sorted(known)}"
+        )
     subset = sorted(
-        (c for c in counties if c.state == state.upper()), key=lambda c: c.fips
+        (c for c in counties if not wanted or c.state in wanted), key=lambda c: c.fips
     )
     if not subset:
-        raise KeyError(f"no counties found for state {state!r}")
+        raise KeyError("the county universe is empty")
     return subset

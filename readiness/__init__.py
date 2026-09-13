@@ -10,4 +10,4 @@ Four planes, one contract (report §5):
 The agent proposes; the harness disposes.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

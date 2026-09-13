@@ -2,12 +2,15 @@
 
 Report §6, Phase 0: "Build the eval plane first, with no forecasting at all"
 — the only models here are climatologies. They exist to prove the harness
-works end to end and to give Phase 1 something to beat.
+works end to end and to give Phase 1 something to beat. None of them knows
+which hazard or which geography it is being scored on; they see only units
+of the form (region, year, period) and their training labels.
 
-`ClimatologyGlobal` is the contract's named reference: a single number, the
-training-period base rate, issued for every unit. `ClimatologyCountyQuarter`
-is the first thing with any structure in it — it knows that August in Terrebonne
-Parish is not January in Caddo — and it is the candidate Phase 0 actually scores.
+`ClimatologyPooled` is the contract's named reference: a single number, the
+training-period base rate, issued for every unit. `ClimatologySeasonal` is the
+first thing with any structure in it — it knows that one region in one part
+of the year is not another region in another part of the year — and it is the
+candidate Phase 0 actually scores.
 
 `LeakyOracle` is not a forecaster. It exists so the leakage canary has something
 to reject, and it lives here rather than in the tests because Phase 0's exit
@@ -24,7 +27,7 @@ from readiness.harness.scoring import climatology_reference
 from readiness.harness.splits import PredictionRequest, TrainingView
 
 
-class ClimatologyGlobal:
+class ClimatologyPooled:
     """One probability for everything: the training-period base rate.
 
     Perfectly calibrated in aggregate, completely unsharp. This is the bar the
@@ -32,7 +35,7 @@ class ClimatologyGlobal:
     that adds noise without adding signal scores worse.
     """
 
-    name = "climatology-global"
+    name = "climatology-pooled"
     version = "1.0.0"
 
     def __init__(self) -> None:
@@ -55,63 +58,64 @@ class ClimatologyGlobal:
         return [self.p] * len(request)
 
 
-class ClimatologyCountyQuarter:
-    """Empirical frequency per (county, quarter-of-year), smoothed and backed off.
+class ClimatologySeasonal:
+    """Empirical frequency per (region, period-of-year), smoothed and backed off.
 
-    Sparse cells are the whole difficulty: 20 training years gives 20
-    observations per county-quarter, so an unsmoothed frequency is 0.00 or 0.05
-    and nothing between. The estimate shrinks toward the state-quarter rate and
-    then the global rate, with the shrinkage strength fixed rather than tuned —
-    Phase 0 is not allowed to tune anything.
+    Sparse cells are the whole difficulty: twenty training years gives twenty
+    observations per region-period, so an unsmoothed frequency is 0.00 or 0.05
+    and nothing between. The estimate shrinks toward the scope-wide rate for
+    that period of the year, and then toward the pooled rate, with the
+    shrinkage strength fixed rather than tuned — Phase 0 is not allowed to
+    tune anything.
     """
 
-    name = "climatology-county-quarter"
+    name = "climatology-seasonal"
     version = "1.0.0"
 
     def __init__(self, shrinkage: float = 10.0) -> None:
         #: Pseudo-observations pulling each cell toward its backoff. Fixed.
         self.shrinkage = shrinkage
-        self.by_county_quarter: dict[tuple[str, int], float] = {}
-        self.by_quarter: dict[int, float] = {}
-        self.global_rate: float = 0.0
+        self.by_region_period: dict[tuple[str, int], float] = {}
+        self.by_period: dict[int, float] = {}
+        self.pooled_rate: float = 0.0
         self.training_digest: str | None = None
 
     def fit(self, view: TrainingView) -> None:
         rows = view.rows()
-        cq_pos: dict[tuple[str, int], int] = defaultdict(int)
-        cq_n: dict[tuple[str, int], int] = defaultdict(int)
-        q_pos: dict[int, int] = defaultdict(int)
-        q_n: dict[int, int] = defaultdict(int)
+        rp_pos: dict[tuple[str, int], int] = defaultdict(int)
+        rp_n: dict[tuple[str, int], int] = defaultdict(int)
+        p_pos: dict[int, int] = defaultdict(int)
+        p_n: dict[int, int] = defaultdict(int)
         total_pos = 0
 
-        for (fips, _year, quarter), label in rows:
-            cq_pos[(fips, quarter)] += label
-            cq_n[(fips, quarter)] += 1
-            q_pos[quarter] += label
-            q_n[quarter] += 1
+        for (region, _year, period), label in rows:
+            rp_pos[(region, period)] += label
+            rp_n[(region, period)] += 1
+            p_pos[period] += label
+            p_n[period] += 1
             total_pos += label
 
-        self.global_rate = total_pos / len(rows)
-        self.by_quarter = {
-            q: (q_pos[q] + self.shrinkage * self.global_rate) / (q_n[q] + self.shrinkage)
-            for q in q_n
+        self.pooled_rate = total_pos / len(rows)
+        self.by_period = {
+            p: (p_pos[p] + self.shrinkage * self.pooled_rate) / (p_n[p] + self.shrinkage)
+            for p in p_n
         }
-        self.by_county_quarter = {
+        self.by_region_period = {
             key: (
-                cq_pos[key] + self.shrinkage * self.by_quarter[key[1]]
+                rp_pos[key] + self.shrinkage * self.by_period[key[1]]
             )
-            / (cq_n[key] + self.shrinkage)
-            for key in cq_n
+            / (rp_n[key] + self.shrinkage)
+            for key in rp_n
         }
         self.training_digest = view.digest
 
     def _probability(self, unit: Unit) -> float:
-        fips, _year, quarter = unit
-        if (fips, quarter) in self.by_county_quarter:
-            return self.by_county_quarter[(fips, quarter)]
-        if quarter in self.by_quarter:
-            return self.by_quarter[quarter]
-        return self.global_rate
+        region, _year, period = unit
+        if (region, period) in self.by_region_period:
+            return self.by_region_period[(region, period)]
+        if period in self.by_period:
+            return self.by_period[period]
+        return self.pooled_rate
 
     def predict(self, request: PredictionRequest) -> Sequence[float]:
         if self.training_digest is None:
@@ -120,7 +124,7 @@ class ClimatologyCountyQuarter:
 
 
 class PersistenceLastYear:
-    """Did this county-quarter have a damaging event in the same quarter last year?
+    """Did this region-period have a damaging event in the same period last year?
 
     A deliberately crude second baseline. It is sharp and badly calibrated,
     which makes it a useful demonstration that the reliability clause of the
@@ -145,8 +149,8 @@ class PersistenceLastYear:
         if self.training_digest is None:
             raise RuntimeError(f"{self.name} was not fitted")
         out = []
-        for fips, year, quarter in request:
-            prior = self.history.get((fips, year - 1, quarter))
+        for region, year, period in request:
+            prior = self.history.get((region, year - 1, period))
             out.append(self.hit if prior == 1 else self.miss)
         return out
 

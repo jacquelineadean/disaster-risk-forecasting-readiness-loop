@@ -16,9 +16,10 @@ heuristics over the *output*, so it can be fooled by a sufficiently subtle leak
 that produces merely-excellent rather than impossible scores. It is a smoke
 alarm, not a proof.
 
-Every check errs toward rejection: on this task, a forecast of quarterly county
-flood risk that separates outcomes almost perfectly is far more likely to be
-leaking than to be brilliant.
+Every check errs toward rejection: on this task — whether a region sees at
+least one damaging event of some hazard in a given period — a forecast that
+separates outcomes almost perfectly is far more likely to be leaking than to be
+brilliant, whatever the hazard.
 """
 
 from __future__ import annotations
@@ -79,8 +80,9 @@ def run(
     """
     findings: list[CanaryFinding] = []
 
-    # 1. Implausible skill. Quarterly county-level hazard occurrence is
-    #    genuinely hard; near-perfect skill is evidence of leakage, not talent.
+    # 1. Implausible skill. Region-period hazard occurrence is genuinely hard
+    #    for every hazard in the catalogue; near-perfect skill is evidence of
+    #    leakage, not talent.
     bss_trip = brier_skill_score > CANARY_MAX_PLAUSIBLE_BSS
     findings.append(
         CanaryFinding(

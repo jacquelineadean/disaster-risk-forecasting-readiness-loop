@@ -9,8 +9,8 @@ import io
 import json
 import unittest
 
-from readiness.config import CONTRACT
 from readiness.connectors import mcp_server
+from tests.fixtures import make_contract
 
 
 class TestProtocol(unittest.TestCase):
@@ -62,7 +62,7 @@ class TestProtocol(unittest.TestCase):
                 "jsonrpc": "2.0",
                 "id": 6,
                 "method": "tools/call",
-                "params": {"name": "get_county_history", "arguments": {}},
+                "params": {"name": "get_region_history", "arguments": {}},
             }
         )
         self.assertIn("content", resp["result"])
@@ -94,6 +94,13 @@ class TestProtocol(unittest.TestCase):
 
 
 class TestNoHoldoutExposure(unittest.TestCase):
+    def setUp(self):
+        self.c = make_contract()
+        mcp_server.configure(self.c)
+
+    def tearDown(self):
+        mcp_server.configure(None)
+
     def test_no_tool_offers_holdout_outcomes(self):
         blob = json.dumps(
             [{"name": n, **s} for n, (s, _f) in mcp_server.TOOLS.items()]
@@ -103,20 +110,26 @@ class TestNoHoldoutExposure(unittest.TestCase):
             # unavailable. Assert no tool *name* promises them.
             self.assertNotIn(f'"name": "get_{word}', blob)
 
-    def test_county_history_is_restricted_to_training_years(self):
+    def test_region_history_is_restricted_to_training_years(self):
         # Read the implementation's contract rather than hitting the network:
-        # the tool filters on CONTRACT.train_years and nothing else.
+        # the tool filters on the contract's train_years and nothing else.
         import inspect
 
-        src = inspect.getsource(mcp_server.tool_county_history)
+        src = inspect.getsource(mcp_server.tool_region_history)
         self.assertIn("train_years", src)
         self.assertNotIn("validate_years", src)
         self.assertNotIn("test_years", src)
 
-    def test_contract_tool_reports_the_current_contract(self):
+    def test_contract_tool_reports_the_bound_contract(self):
         text = mcp_server.tool_contract({})
-        self.assertIn(CONTRACT.digest(), text)
-        self.assertIn(CONTRACT.hazard, text)
+        self.assertIn(self.c.digest(), text)
+        self.assertIn(self.c.hazard, text)
+        self.assertIn(self.c.name, text)
+
+    def test_server_is_bound_to_one_contract_at_a_time(self):
+        other = make_contract(name="other-hazard", hazard="tornado")
+        mcp_server.configure(other)
+        self.assertIn("tornado", mcp_server.tool_contract({}))
 
 
 if __name__ == "__main__":

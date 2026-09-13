@@ -5,6 +5,9 @@ Report §4:
     the agent may propose any model it likes, but it cannot touch the harness,
     the holdout years, or the threshold.
 
+The split years themselves come from the contract (`Contract.splits`). This
+module provides the machinery that enforces them:
+
 `TrainingView` is the only way a model receives data. It carries training-year
 units *and* their labels (fitting needs them) and refuses to hand over anything
 from validate or test. `PredictionRequest` carries units with no labels at all.
@@ -18,62 +21,32 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass
-from typing import Sequence
 
-from readiness.config import CONTRACT
+from readiness.contracts import Contract, ContractError, Split, Splits
 from readiness.harness.labels import Panel, Unit
+
+__all__ = [
+    "Split",
+    "Splits",
+    "SplitViolation",
+    "TrainingView",
+    "PredictionRequest",
+    "TouchBudget",
+    "get_split",
+    "split_panel",
+    "coverage_report",
+]
 
 
 class SplitViolation(RuntimeError):
     """Raised when something reaches for data it is not entitled to see."""
 
 
-@dataclass(frozen=True)
-class Split:
-    name: str
-    years: tuple[int, ...]
-    purpose: str
-
-    def __contains__(self, year: int) -> bool:
-        return year in self.years
-
-    def __str__(self) -> str:
-        return f"{self.name} ({self.years[0]}-{self.years[-1]})"
-
-
-TRAIN = Split(
-    "train", CONTRACT.train_years, "fit models; the 20-year climatology window"
-)
-VALIDATE = Split(
-    "validate", CONTRACT.validate_years, "iterate freely; scores may be read often"
-)
-TEST = Split(
-    "test", CONTRACT.test_years, "touched once per model version, then never again"
-)
-
-SPLITS: dict[str, Split] = {s.name: s for s in (TRAIN, VALIDATE, TEST)}
-
-
-def get_split(name: str) -> Split:
+def get_split(contract: Contract, name: str) -> Split:
     try:
-        return SPLITS[name]
-    except KeyError:
-        raise SplitViolation(
-            f"unknown split {name!r}; known: {sorted(SPLITS)}"
-        ) from None
-
-
-def assert_disjoint() -> None:
-    """Guard against an edit to `config` that quietly overlaps the splits."""
-    seen: dict[int, str] = {}
-    for split in (TRAIN, VALIDATE, TEST):
-        for year in split.years:
-            if year in seen:
-                raise SplitViolation(
-                    f"year {year} appears in both {seen[year]!r} and {split.name!r}; "
-                    "splits must be disjoint or every score is contaminated"
-                )
-            seen[year] = split.name
+        return contract.splits.get(name)
+    except ContractError as exc:
+        raise SplitViolation(str(exc)) from None
 
 
 class TrainingView:
@@ -84,7 +57,7 @@ class TrainingView:
     the canary can later verify the model was fitted on what it claims.
     """
 
-    def __init__(self, panel: Panel, split: Split = TRAIN) -> None:
+    def __init__(self, panel: Panel, split: Split) -> None:
         leaked = sorted(set(panel.years) - set(split.years))
         if leaked:
             raise SplitViolation(
@@ -149,13 +122,14 @@ class PredictionRequest:
 class TouchBudget:
     """Persistent count of how often each model version has been scored on TEST.
 
-    Report §4: "final test 2021-2025, touched once". A budget that lives in
-    memory is not a budget; this one lives in the repo next to the ledger and is
-    meant to be committed.
+    Report §4: "final test [...] touched once". A budget that lives in memory is
+    not a budget; this one lives in the repo next to the contract's ledger and
+    is meant to be committed.
     """
 
-    def __init__(self, path: pathlib.Path) -> None:
+    def __init__(self, path: pathlib.Path, budget: int) -> None:
         self.path = path
+        self.budget = budget
         self._counts: dict[str, int] = {}
         if path.exists():
             self._counts = json.loads(path.read_text())
@@ -169,10 +143,10 @@ class TouchBudget:
     def check(self, model: str, version: str) -> None:
         """Raise if this model version has already spent its test budget."""
         used = self.count(model, version)
-        if used >= CONTRACT.test_touch_budget:
+        if used >= self.budget:
             raise SplitViolation(
                 f"{model}@{version} has already been scored against the test "
-                f"split {used} time(s); budget is {CONTRACT.test_touch_budget}. "
+                f"split {used} time(s); budget is {self.budget}. "
                 "Bump the model version and justify it on an experiment card, "
                 "or accept the result you already have."
             )
@@ -200,11 +174,11 @@ def split_panel(panel: Panel, split: Split) -> Panel:
     return sliced
 
 
-def coverage_report(panel: Panel) -> str:
+def coverage_report(panel: Panel, splits: Splits) -> str:
     """Human-readable check that the panel actually spans all three splits."""
     lines = []
     have = set(panel.years)
-    for split in (TRAIN, VALIDATE, TEST):
+    for split in splits:
         missing = sorted(set(split.years) - have)
         sliced = panel.filter_years(split.years)
         status = "ok" if not missing else f"MISSING {missing}"
