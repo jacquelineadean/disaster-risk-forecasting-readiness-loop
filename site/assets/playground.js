@@ -133,13 +133,13 @@
     const info = sb.info || { contracts: {} };
     const rows = Object.entries(coverage.contracts).map(([name, c]) => {
       const live = info.contracts[name] || {};
-      const cov = c.coverage === "missing" ? '<span class="tag fail">no data</span>' : c.coverage === "full" ? '<span class="tag ok">all event types</span>' : '<span class="tag warn">hazard rows only</span>';
-      const repro = c.coverage === "missing" ? "–" : c.reproducible ? '<span class="tag ok">matches the blessed data version</span>' : '<span class="tag warn">data version differs from the blessed one</span>';
-      return `<tr><td><code>${RL.esc(name)}</code></td><td>${RL.esc(Object.keys(c.states).join(", "))}</td><td>${cov}</td><td>${repro}</td><td>${live.has_ledger ? "yes" : "not yet"}</td></tr>`;
+      const cov = c.coverage === "missing" ? '<span class="pill fail" title="no pinned extract on board">no data</span>' : c.coverage === "full" ? '<span class="pill ok" title="every event type of the state is on board">full</span>' : '<span class="pill warn" title="only the contract\'s event types are on board">hazard-only</span>';
+      const repro = c.coverage === "missing" ? "–" : c.reproducible ? '<span class="pill ok" title="the packed data version matches the blessed fingerprints">reproducible</span>' : '<span class="pill warn" title="the packed data version differs from the blessed fingerprints">differs</span>';
+      return `<tr><td><code>${RL.esc(name)}</code><br><span class="small">${RL.esc(Object.keys(c.states).join(", "))}</span></td><td>${cov}</td><td>${repro}</td><td>${live.has_ledger ? "yes" : "not yet"}</td></tr>`;
     }).join("");
     const states = Object.values(coverage.states).map((s) => `${s.state} (${s.event_types ? s.event_types.length + " event types, " : "every event type, "}${RL.fmt.int(s.rows)} rows)`).join(" · ");
-    host.innerHTML = `<div class="table-wrap"><table><thead><tr><th>contract</th><th>states</th><th>pinned data on board</th><th>reproducibility</th><th>ledger in this tree</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <p class="small mt8">Packed extracts: ${RL.esc(states)}. Snapshot pinned ${RL.esc((coverage.manifest_generated_at || "").slice(0, 10))}; archive ${(coverage.zip_bytes / 1e6).toFixed(2)} MB. A state packed with every event type lets you register any catalogue hazard against it and run the loop here.</p>`;
+    host.innerHTML = `<div class="table-wrap"><table class="compact"><thead><tr><th>contract</th><th>data</th><th>fingerprints</th><th>ledger</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="small mt8">Packed extracts: ${RL.esc(states)}. Snapshot pinned ${RL.esc((coverage.manifest_generated_at || "").slice(0, 10))}; archive ${(coverage.zip_bytes / 1e6).toFixed(2)} MB. <em>Full</em> means every event type of the state is on board, so any catalogue hazard can be registered against it and run here; <em>hazard-only</em> means the contract's own event types. <em>Reproducible</em> means the packed data version matches the blessed fingerprints.</p>`;
   }
 
   // --- selects -----------------------------------------------------------------------
@@ -177,7 +177,7 @@
     const c = sb.info && sb.info.contracts[name];
     const note = $("#walk-note");
     if (!c) { note.textContent = ""; return; }
-    note.innerHTML = c.has_data ? `<span class="tag ok">pinned data on board</span> the panel for <code>${RL.esc(name)}</code> builds here.` : `<span class="tag warn">no pinned data</span> ${RL.esc(c.data_gap || "")} — the commands that need a panel will say so.`;
+    note.innerHTML = c.has_data ? `<span class="pill ok">pinned data on board</span> the panel for <code>${RL.esc(name)}</code> builds here.` : `<span class="pill warn">no pinned data</span> ${RL.esc(c.data_gap || "")} — the commands that need a panel will say so.`;
   }
   $("#walk-contract").addEventListener("change", walkNote);
   $$("[data-cmd]").forEach((b) => b.addEventListener("click", () => {
@@ -214,11 +214,11 @@
     const states = $("#reg-states").value.toUpperCase().split(/[\s,]+/).filter(Boolean);
     const hint = $("#reg-hint");
     if (hz && hz.coding !== "county" && $("#reg-zone").value === "drop") {
-      hint.innerHTML = `<span class="tag warn">${RL.esc(hz.coding)}-coded</span> Storm Events codes this hazard against forecast zones; with <code>drop</code> the panel will under-count it. Consider <code>expand</code>.`;
+      hint.innerHTML = `<span class="pill warn">${RL.esc(hz.coding)}-coded</span> Storm Events codes this hazard against forecast zones; with <code>drop</code> the panel will under-count it. Consider <code>expand</code>.`;
     } else if (coverage && states.length) {
       const packed = Object.values(coverage.states);
       const gaps = states.filter((s) => { const p = packed.find((x) => x.state === s); return !p || (p.event_types && hz && hz.event_types.some((t) => !p.event_types.includes(t))); });
-      hint.innerHTML = gaps.length ? `<span class="tag warn">no rows on board</span> the sandbox has no ${RL.esc(hz ? hz.event_types.join("/") : "matching")} extract for ${RL.esc(gaps.join(", "))}: the contract registers, but its panel cannot be built here.` : `<span class="tag ok">pinned data on board</span> after registering you can build the panel and run the loop here.`;
+      hint.innerHTML = gaps.length ? `<span class="pill warn">no rows on board</span> the sandbox has no ${RL.esc(hz ? hz.event_types.join("/") : "matching")} extract for ${RL.esc(gaps.join(", "))}: the contract registers, but its panel cannot be built here.` : `<span class="pill ok">pinned data on board</span> after registering you can build the panel and run the loop here.`;
     } else hint.textContent = "";
   }
   $$("#register-form input, #register-form select").forEach((el) => el.addEventListener("input", registerPreview));
@@ -275,7 +275,7 @@
       const r = await sb.call("score_playground", args);
       const sc = r.scorecard;
       const v = r.verdict, k = r.canary;
-      const tag = k.rejected ? '<span class="tag reject">REJECTED</span>' : v.passed ? '<span class="tag pass">PASS</span>' : '<span class="tag fail">FAIL</span>';
+      const tag = k.rejected ? '<span class="pill reject">REJECTED</span>' : v.passed ? '<span class="pill pass">PASS</span>' : '<span class="pill fail">FAIL</span>';
       out.innerHTML = `<div><p class="mt0"><strong>${RL.esc(r.model)}</strong> on <code>${RL.esc(r.contract)}</code> · ${tag}</p>
         ${RL.reliabilitySVG(sc.reliability_bins, r.tolerance, 300, { ghost: r.base_scorecard.reliability_bins })}
         <p class="small">Filled: populated bins; hollow: thin. Dotted grey: the untransformed model's bins.</p>
@@ -284,7 +284,7 @@
         <h4>Contract</h4>${RL.checksList(v.checks)}<h4>Leakage canary</h4>${RL.findingsList(k.findings)}</div></div>
         ${RL.terminal("harness output", r.text)}`;
     } catch (e) {
-      out.innerHTML = `<p class="small"><span class="tag fail">error</span> ${RL.esc(e.message)}</p>`;
+      out.innerHTML = `<p class="small"><span class="pill fail">error</span> ${RL.esc(e.message)}</p>`;
     } finally { setBusy(false); }
   }
 
@@ -295,11 +295,11 @@
     try {
       const st = await sb.call("ledger_state", { contract: name });
       $("#tam-state").innerHTML = st.exists
-        ? `<code>${RL.esc(st.path)}</code> · ${st.n_cards} card(s) · <span class="tag ${st.valid ? "ok" : "fail"}">${RL.esc(st.status.split("\n")[0])}</span>${st.backup ? ' <span class="tag warn">tampered — restore to get the original back</span>' : ""}`
-        : `<span class="tag neutral">no ledger yet in this tree</span> run the loop first: <button class="btn small" data-needs-sandbox id="tam-loop">loop -c ${RL.esc(name)} --quiet</button>`;
+        ? `<code>${RL.esc(st.path)}</code> · ${st.n_cards} card(s) · <span class="pill ${st.valid ? "ok" : "fail"}">${RL.esc(st.status.split("\n")[0])}</span>${st.backup ? ' <span class="pill warn">tampered — restore to get the original back</span>' : ""}`
+        : `<span class="pill neutral">no ledger yet in this tree</span> run the loop first: <button class="btn small" data-needs-sandbox id="tam-loop">loop -c ${RL.esc(name)} --quiet</button>`;
       const b = $("#tam-loop"); if (b) b.addEventListener("click", async () => { await runCLI(`loop -c ${name} --quiet`); await refreshInfo(); tamperState(); });
       $$("[data-tamper]").forEach((x) => { x.disabled = !st.exists; });
-    } catch (e) { $("#tam-state").innerHTML = `<span class="tag fail">error</span> ${RL.esc(e.message)}`; }
+    } catch (e) { $("#tam-state").innerHTML = `<span class="pill fail">error</span> ${RL.esc(e.message)}`; }
   }
   $("#tam-contract").addEventListener("change", tamperState);
   $$("[data-tamper]").forEach((b) => b.addEventListener("click", async () => {
@@ -328,12 +328,12 @@
     setBusy(true);
     try {
       const r = await sb.call("fingerprints", { contract: name });
-      if (!r.has_expected) { out.innerHTML = `<p class="small"><span class="tag warn">nothing blessed</span> no <code>${RL.esc(r.expected_path)}</code>; <code>readiness verify --bless</code> would write one.</p>`; return; }
+      if (!r.has_expected) { out.innerHTML = `<p class="small"><span class="pill warn">nothing blessed</span> no <code>${RL.esc(r.expected_path)}</code>; <code>readiness verify --bless</code> would write one.</p>`; return; }
       const rows = r.rows.map((x) => `<tr class="diffrow ${x.match ? "good" : "bad"}"><td><code>${RL.esc(x.group)}</code></td><td><code>${RL.esc(x.field)}</code></td><td class="num">${RL.esc(JSON.stringify(x.expected))}</td><td class="num">${RL.esc(JSON.stringify(x.observed))}</td><td class="mark">${x.match ? "=" : "≠"}</td></tr>`).join("");
       const n = r.rows.length, bad = r.rows.filter((x) => !x.match).length;
-      out.innerHTML = `<p class="small">${r.all_match ? `<span class="tag ok">bit-for-bit</span> all ${n} fields recomputed in this browser equal the fingerprints blessed from a clean clone (<code>${RL.esc(r.expected_path)}</code>).` : `<span class="tag fail">${bad} of ${n} differ</span> the reproducibility criterion fails for this contract in this sandbox.`}</p>
+      out.innerHTML = `<p class="small">${r.all_match ? `<span class="pill ok">bit-for-bit</span> all ${n} fields recomputed in this browser equal the fingerprints blessed from a clean clone (<code>${RL.esc(r.expected_path)}</code>).` : `<span class="pill fail">${bad} of ${n} differ</span> the reproducibility criterion fails for this contract in this sandbox.`}</p>
         <div class="table-wrap"><table class="tabular"><thead><tr><th>group</th><th>field</th><th class="num">blessed</th><th class="num">recomputed here</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    } catch (e) { out.innerHTML = `<p class="small"><span class="tag fail">error</span> ${RL.esc(e.message)}</p>`; }
+    } catch (e) { out.innerHTML = `<p class="small"><span class="pill fail">error</span> ${RL.esc(e.message)}</p>`; }
     finally { setBusy(false); }
   });
   $("#ver-cli").addEventListener("click", () => runCLI(`verify -c ${$("#ver-contract").value} --quiet`));

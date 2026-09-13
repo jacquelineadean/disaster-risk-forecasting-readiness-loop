@@ -40,23 +40,23 @@
     tabs.querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.name === name));
     const cards = led.cards;
     const parts = [];
-    parts.push(`<section class="block" style="padding-top:8px">
-      <div class="eyebrow-row"><span class="eyebrow">${RL.esc(name)}</span><span class="line"></span><span class="n">contract sha256:${RL.esc(c.digest)}</span></div>
+    parts.push(`<section class="section" style="padding-top:var(--s4)"><div class="col">
+      <p class="eyebrow">${RL.esc(name)}<span class="n">contract sha256:${RL.esc(c.digest)}</span></p>
       <h2>${RL.esc(c.description || c.hazard)}</h2>
       <div class="cols">
         <div class="main"><pre class="code" style="margin-top:16px">${RL.esc(c.describe)}</pre></div>
-        <aside class="note" style="margin-top:16px"><strong>Ledger</strong><br><code>${RL.esc(led.path)}</code><br>${cards.length} card(s)${led.anchor ? `, anchored at <code>${RL.esc(String(led.anchor.head).slice(0, 12))}…</code>` : ", no anchor"}<br><br>${RL.runLink("ledger -c " + name, "Verify with the CLI in the sandbox")}</aside>
+        <aside class="aside"><strong>Ledger</strong><br><code>${RL.esc(led.path)}</code><br>${cards.length} card(s)${led.anchor ? `, anchored at <code>${RL.esc(String(led.anchor.head).slice(0, 12))}…</code>` : ", no anchor"}<br><br>${RL.runLink("ledger -c " + name, "Verify with the CLI in the sandbox")}</aside>
       </div>`);
     if (panel) {
       parts.push(`<h3>The panel</h3><p>${RL.esc(panel.summary)}<br><span class="small">${RL.fmt.int(panel.n_regions)} regions (${RL.esc(panel.first_region)} … ${RL.esc(panel.last_region)}) · data version sha256:${RL.esc(panel.data_version)}</span></p>
-        <div class="grid-2"><div><h4>split coverage</h4><pre class="code">${RL.esc(panel.coverage)}</pre></div><div><h4>event coverage</h4><pre class="code">${RL.esc(panel.diagnostics.text)}</pre></div></div>`);
+        <div class="cards cards--2"><div><h4>split coverage</h4><pre class="code">${RL.esc(panel.coverage)}</pre></div><div><h4>event coverage</h4><pre class="code">${RL.esc(panel.diagnostics.text)}</pre></div></div>`);
     }
     parts.push(`<h3>Experiments</h3>${RL.summaryTable(cards, { link: "ledgers.html" + "#" + encodeURIComponent(name) + "/" })}`);
     parts.push(`<div class="card mt16" id="chain">
-      <h4 class="mt0">Hash chain</h4>
+      <h3 class="mt0">Hash chain</h3>
       <p class="small">Recorded at build time: <code>${RL.esc(led.status.text.split("\n")[0])}</code>. The button re-verifies the committed lines in this browser with Web Crypto: each card's <code>prev_hash</code> must equal the previous card's hash, each card's SHA-256 must match its stored <code>card_hash</code>, and the anchor must name the last card and the count.</p>
       <div class="btn-row"><button class="btn small" id="verify-btn">Verify in this browser</button>
-        <select id="tamper-action" style="font:13px var(--sans);padding:6px 8px;border:1px solid var(--rule);border-radius:3px;background:#fff">
+        <select id="tamper-action" class="select" style="width:auto;max-width:100%">
           <option value="">— then try an attack —</option>
           <option value="edit">edit exp-0002's skill score in place</option>
           <option value="swap">swap exp-0002 and exp-0003</option>
@@ -70,6 +70,7 @@
     </div>`);
     parts.push(cards.map((k) => cardHTML(k, c)).join(""));
     if (exp) parts.push(fingerprintsHTML(exp, cards, c));
+    parts.push("</div></section>");
     host.innerHTML = parts.join("");
 
     tamperState.lines = cards.map((k) => k.raw);
@@ -145,12 +146,12 @@
 
   function cardHTML(k, c) {
     const sc = k.scorecard || {};
-    return `<section class="card" id="card-${RL.esc(k.experiment_id)}" style="margin-top:18px">
-      <header style="display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+    return `<section class="card wide mt24" id="card-${RL.esc(k.experiment_id)}">
+      <header class="card__head">
         <h3 class="mt0" style="margin-bottom:0">${RL.esc(k.experiment_id)} · <code>${RL.esc(k.model)}@${RL.esc(k.version)}</code></h3>
         <div>${RL.verdictTag(k)} <span class="small">${RL.esc(k.split)} · ${RL.esc(k.timestamp)}</span></div>
       </header>
-      <div class="grid-2" style="grid-template-columns:320px minmax(0,1fr)">
+      <div class="card__split">
         <div>
           ${RL.reliabilitySVG(sc.reliability_bins, c.thresholds.reliability_tolerance_pp, 300)}
           <dl class="kv">
@@ -189,7 +190,7 @@
         rows.push(`<tr class="diffrow ${same === false ? "bad" : "good"}"><td><code>${RL.esc(m)}</code></td><td><code>${RL.esc(field)}</code></td><td class="num">${RL.esc(JSON.stringify(value))}</td><td class="num">${comparable ? RL.esc(JSON.stringify(got)) : '<span class="muted">hash of the bins</span>'}</td><td class="mark">${same === null ? "" : same ? "=" : "≠"}</td></tr>`);
       }
     }
-    return `<section class="card" style="margin-top:18px"><h3 class="mt0">Blessed fingerprints · <code>harness_expected/${RL.esc(c.name)}.json</code></h3>
+    return `<section class="card wide mt24"><h3 class="mt0">Blessed fingerprints · <code>harness_expected/${RL.esc(c.name)}.json</code></h3>
       <p class="small">What <code>readiness verify</code> compares against: every scorecard number the two climatology baselines produce on the validate split, blessed once from a clean clone. Beside each, the value the committed ledger card carries. Data version <code>${RL.esc(exp._data_version)}</code>, contract <code>${RL.esc(exp._contract)}</code>. ${RL.runLink("verify -c " + c.name + " --quiet", "Recompute in the sandbox")}</p>
       <div class="table-wrap"><table class="tabular"><thead><tr><th>model</th><th>field</th><th class="num">blessed</th><th class="num">on the card</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table></div></section>`;
   }
@@ -205,7 +206,7 @@
       const k = ledgers[n].cards.find((x) => x.model === m);
       const c = byName[n];
       if (!k) return `<div class="card"><p class="mb0 muted">${RL.esc(n)}: no card for <code>${RL.esc(m)}</code></p></div>`;
-      return `<figure class="figure card" style="padding:12px;margin:0">${RL.reliabilitySVG(k.scorecard.reliability_bins, c.thresholds.reliability_tolerance_pp, 260)}<figcaption><a href="#${encodeURIComponent(n)}/${RL.esc(k.experiment_id)}">${RL.esc(n)}</a> ${RL.verdictTag(k)}<br>${RL.esc(c.hazard)} · ${RL.esc(c.period)}ly · base rate ${RL.fmt.pct(k.scorecard.base_rate, 2)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)}</figcaption></figure>`;
+      return `<figure class="card">${RL.reliabilitySVG(k.scorecard.reliability_bins, c.thresholds.reliability_tolerance_pp, 260)}<figcaption><a href="#${encodeURIComponent(n)}/${RL.esc(k.experiment_id)}">${RL.esc(n)}</a> ${RL.verdictTag(k)}<br>${RL.esc(c.hazard)} · ${RL.esc(c.period)}ly · base rate ${RL.fmt.pct(k.scorecard.base_rate, 2)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)}</figcaption></figure>`;
     }).join("");
   }
 
