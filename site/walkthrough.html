@@ -9,41 +9,60 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body data-page="walkthrough">
 
-<div class="mast"><div class="bar">
-  <a class="brand" href="index.html">The Readiness Loop<span>Walkthrough</span></a>
-  <nav class="site">
-    <a data-page="index" href="index.html">Overview</a>
-    <a data-page="design" href="design.html">System design</a>
-    <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
-    <a data-page="ledgers" href="ledgers.html">Ledgers</a>
-    <a data-page="playground" href="playground.html">Sandbox</a>
-    <a data-report href="generated/report/index.html">Research briefing</a>
-    <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
-  </nav>
-</div></div>
-
-<header class="hero">
-  <div class="meta"><span class="k">Usage</span><span>the loop, end to end, on real data</span></div>
-  <h1>How the forecaster works.</h1>
-  <p class="lede">One hazard in one place — damaging tornadoes, Oklahoma counties, quarterly — and then the same loop on two others. Every transcript below was captured from the real command line by <code>tools/demo/capture.py</code>. Nothing is mocked.</p>
-  <div class="cols">
-    <div class="main">
-<pre class="code" style="margin-top:22px;font-size:12px"><code>contract (JSON) ──► data plane ──► labelled panel ──► models ──► harness ──► ledger
- hazard, scope,     Storm Events    region × period   propose    score,      hash-chained,
- period, damage,    + Census        binary labels               screen,     one per contract
- splits, thresholds + NWS zones                                  judge</code></pre>
-      <p class="mt16">Each step has a <em>Run in the sandbox</em> button. It executes the same command with the same code in a Python runtime in your browser, against the pinned data — so you can read the captured transcript and then reproduce it.</p>
-    </div>
-    <aside class="note" style="margin-top:22px"><strong>Regenerating the captures</strong><br><code>pip install -e '.[docs]'</code>, <code>playwright install chromium</code>, <code>readiness snapshot -c tornado-ok</code>, then <code>make docs-capture</code>. The script registers into a scratch copy of the registry and an empty scratch experiments tree, which is why the paths read <code>docs/.demo/…</code>.</aside>
+<header class="top" id="top">
+  <div class="top__bar">
+    <a class="brand" href="index.html">The Readiness Loop<span class="brand__tag">Phase 0</span></a>
+    <button class="top__menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="site-nav"><i></i><i></i><i></i></button>
+    <nav class="top__nav" id="site-nav" aria-label="Site">
+      <a data-page="index" href="index.html">Overview</a>
+      <a data-page="design" href="design.html">System design</a>
+      <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+      <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="playground" href="playground.html">Sandbox</a>
+      <a data-report href="generated/report/index.html">Research briefing</a>
+      <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+    </nav>
   </div>
 </header>
 
-<section class="block"><div class="wrap" id="steps">
+<section class="hero hero--plain"><div class="col">
+  <p class="eyebrow">Usage<span class="n">the loop, end to end, on real data</span></p>
+  <h1>How the forecaster works.</h1>
+  <p class="lede">One hazard in one place — damaging tornadoes, Oklahoma counties, quarterly — and then the same loop on two others. Every transcript below was captured from the real command line by <code>tools/demo/capture.py</code>. Nothing is mocked.</p>
+  <figure class="media wide"><img src="generated/media/loop.gif" alt="readiness loop, replayed" loading="lazy" width="1004" height="640"><figcaption>The loop, replayed frame by frame from the captured transcript.</figcaption></figure>
+  <div class="flow wide" role="img" aria-label="contract to data plane to labelled panel to models to harness to ledger">
+    <div class="flow__step is-contract"><b>contract</b><code>JSON, hashed</code><span>hazard, scope, period, damage, splits, thresholds</span></div>
+    <div class="flow__step"><b>data plane</b><code>Storm Events + Census + NWS zones</code><span>fetched, checksummed, pinned</span></div>
+    <div class="flow__step"><b>labelled panel</b><code>region × period → 0/1</code><span>dense: the Census supplies the zeros</span></div>
+    <div class="flow__step"><b>models</b><code>propose</code><span>training years only</span></div>
+    <div class="flow__step is-harness"><b>harness</b><code>score · screen · judge</code><span>scorecard, canary, verdict</span></div>
+    <div class="flow__step"><b>ledger</b><code>hash-chained</code><span>one per contract, anchored</span></div>
+  </div>
+  <p class="mt24">Each step has a <em>Run in the sandbox</em> button. It executes the same command with the same code in a Python runtime in your browser, against the pinned data — so you can read the captured transcript and then reproduce it.</p>
+  <aside class="aside"><strong>Regenerating the captures</strong><br><code>pip install -e '.[docs]'</code>, <code>playwright install chromium</code>, <code>readiness snapshot -c tornado-ok</code>, then <code>make docs-capture</code>. The script registers into a scratch copy of the registry and an empty scratch experiments tree, which is why the paths read <code>docs/.demo/…</code>.</aside>
+</div></section>
+
+<nav class="jumpbar" aria-label="Steps"><div class="jumpbar__inner">
+  <a href="#step-1"><span class="k">1</span>Registered</a>
+  <a href="#step-2"><span class="k">2</span>A contract</a>
+  <a href="#step-3"><span class="k">3</span>Register</a>
+  <a href="#step-4"><span class="k">4</span>Panel</a>
+  <a href="#step-5"><span class="k">5</span>Score</a>
+  <a href="#step-6"><span class="k">6</span>Loop</a>
+  <a href="#step-7"><span class="k">7</span>Ledger</a>
+  <a href="#step-8"><span class="k">8</span>Shape</a>
+  <a href="#step-9"><span class="k">9</span>Verify</a>
+  <a href="#step-10"><span class="k">10</span>Canary</a>
+  <a href="#step-11"><span class="k">11</span>Three hazards</a>
+  <a href="#step-12"><span class="k">12</span>Briefing</a>
+</div></nav>
+
+<section class="section" style="padding-top:var(--s3)"><div class="col" id="steps">
 
   <article class="step" id="step-1">
     <div class="num">1</div>
@@ -110,8 +129,7 @@
     <div class="num">6</div>
     <div class="body">
       <h3>Run the loop</h3>
-      <p><code>readiness loop</code> is <em>gather context → take action → verify work → repeat</em> over a fixed queue of candidate models, writing one sealed experiment card per candidate into the contract's own ledger. Here it is running — a replay of the captured transcript, not a mock-up:</p>
-      <figure class="media figure"><img src="generated/media/loop.gif" alt="readiness loop, replayed" loading="lazy" width="1004" height="640"><figcaption>The loop transcript, replayed frame by frame from the capture.</figcaption></figure>
+      <p><code>readiness loop</code> is <em>gather context → take action → verify work → repeat</em> over a fixed queue of candidate models, writing one sealed experiment card per candidate into the contract's own ledger. The recording at the top of the page is this run; here is its transcript:</p>
       <div data-transcript="loop" data-title="readiness loop -c tornado-ok"></div>
       <p>Read the four cards as assertions about the harness:</p>
       <ol>
@@ -139,7 +157,7 @@
     <div class="body">
       <h3>See the calibration failure as a shape</h3>
       <p><code>readiness dashboard</code> renders the same ledger as a self-contained page — no JavaScript, no external assets — with a reliability diagram per experiment. The diagrams below are drawn from the committed <code>tornado-ok</code> ledger, one per card:</p>
-      <div id="diagrams" class="grid-4"></div>
+      <div id="diagrams" class="cards cards--4 wide"></div>
       <p class="mt16">The seasonal model's card shows the failure as a shape: the 0.1–0.2 and 0.2–0.3 bins sit above the diagonal, outside the shaded ±5-point tolerance band, while the big 0.0–0.1 bin sits just inside it. Filled points are populated bins (n ≥ 30); hollow points are thin bins, reported but not judged. The <a href="ledgers.html#tornado-ok">ledgers page</a> shows every card in full.</p>
       <div class="run" data-run="dashboard -c tornado-ok" data-extra="#demo-dashboard"></div>
     </div>
@@ -171,7 +189,7 @@
     <div class="body">
       <h3>The same harness, three hazards</h3>
       <p>Nothing above was specific to tornadoes or to Oklahoma. The three committed contracts differ in hazard, scope, period and zone policy, and the same seasonal model lands differently on each:</p>
-      <div id="compare" class="grid-3"></div>
+      <div id="compare" class="cards cards--3 wide"></div>
       <ul class="mt16">
         <li>On <strong>inland flooding</strong> it has slight skill (+0.017) and misses the AUC floor.</li>
         <li>On <strong>tornadoes</strong> it discriminates well and fails only on calibration.</li>
@@ -187,15 +205,15 @@
     <div class="body">
       <h3>The research briefing</h3>
       <p>The design the implementation follows is the research briefing. Its second section is the argument for the planning layer that the risk numbers exist to serve: warnings have gotten remarkably good; readiness has not kept up.</p>
-      <figure class="media figure"><a data-report href="generated/report/index.html"><img src="generated/media/report-section-2.png" alt="report, section 2" loading="lazy"></a><figcaption>Section 2 of the briefing. <a data-report href="generated/report/index.html">Read the whole report →</a></figcaption></figure>
+      <figure class="media"><a data-report href="generated/report/index.html"><img src="generated/media/report-section-2.png" alt="report, section 2" loading="lazy"></a><figcaption>Section 2 of the briefing. <a data-report href="generated/report/index.html">Read the whole report →</a></figcaption></figure>
     </div>
   </article>
 
 </div></section>
 
 <footer class="site">
-  <p>This page follows <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/how-it-works.md">docs/how-it-works.md</a>; the transcripts are the committed captures under <code>docs/media/transcripts/</code>.</p>
-  <p><span data-built>…</span></p>
+  <p class="credits">This page follows <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/how-it-works.md">docs/how-it-works.md</a>; the transcripts are the committed captures under <code>docs/media/transcripts/</code>.</p>
+  <p class="links"><span data-built>…</span></p>
 </footer>
 
 <script src="assets/site.js"></script>
@@ -214,13 +232,13 @@
   const ok = ledgers["tornado-ok"];
   if (ok) {
     document.getElementById("diagrams").innerHTML = ok.cards.map((k) =>
-      `<figure class="figure card" style="padding:12px;margin:0">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 230)}<figcaption>${RL.esc(k.experiment_id)} · <code>${RL.esc(k.model)}</code> ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)}</figcaption></figure>`).join("");
+      `<figure class="card">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 230)}<figcaption>${RL.esc(k.experiment_id)} · <code>${RL.esc(k.model)}</code> ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)}</figcaption></figure>`).join("");
   }
   const order = ["inland-flood-la", "tornado-ok", "tropical-cyclone-gulf"].filter((n) => ledgers[n]).concat(Object.keys(ledgers).filter((n) => !["inland-flood-la", "tornado-ok", "tropical-cyclone-gulf"].includes(n)));
   document.getElementById("compare").innerHTML = order.map((n) => {
     const k = ledgers[n].cards.find((c) => c.model === "climatology-seasonal");
     if (!k) return "";
-    return `<figure class="figure card" style="padding:12px;margin:0">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 260)}<figcaption><a href="ledgers.html#${RL.esc(n)}">${RL.esc(n)}</a> · seasonal ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)} · base rate ${RL.fmt.pct(k.scorecard.base_rate, 2)}</figcaption></figure>`;
+    return `<figure class="card">${RL.reliabilitySVG(k.scorecard.reliability_bins, 0.05, 260)}<figcaption><a href="ledgers.html#${RL.esc(n)}">${RL.esc(n)}</a> · seasonal ${RL.verdictTag(k)}<br>BSS ${RL.fmt.signed4(k.scorecard.brier_skill_score)} · AUC ${RL.fmt.f4(k.scorecard.auc)} · base rate ${RL.fmt.pct(k.scorecard.base_rate, 2)}</figcaption></figure>`;
   }).join("");
 })().catch((e) => {
   document.getElementById("steps").insertAdjacentHTML("afterbegin", `<div class="card"><p class="mb0"><strong>Could not load the generated data</strong> (${RL.esc(e.message)}). Build it with <code>make site</code> and serve the <code>site/</code> directory over HTTP.</p></div>`);
