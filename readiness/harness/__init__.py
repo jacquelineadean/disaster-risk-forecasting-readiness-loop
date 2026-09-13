@@ -12,6 +12,8 @@ preserve them:
 1. **No model ever receives a holdout label.** `splits.TrainingView` is the only
    channel through which a model sees data, and it exposes training years only.
    Scoring happens in `scoring.py`, after `predict()` has already returned.
+   Which years are training years is set by the contract being scored against
+   (`readiness.contracts`), never by anything in this package.
 
 2. **Nothing here calls a language model.** Verification must be rules-based to
    be worth anything (report §4, source [4]: rules-based feedback is the

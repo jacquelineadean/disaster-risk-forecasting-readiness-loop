@@ -1,7 +1,7 @@
-"""Evaluate a scorecard against the pre-registered contract.
+"""Evaluate a scorecard against its pre-registered contract.
 
 The verdict is mechanical. There is no judgement call, no "close enough", and
-no LLM in the path. If the numbers clear the thresholds in `config`, the model
+no LLM in the path. If the numbers clear the contract's thresholds, the model
 passes; otherwise it does not, and the failing checks say why.
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-from readiness.config import CONTRACT
+from readiness.contracts import Contract
 from readiness.harness.scoring import Scorecard
 
 
@@ -27,6 +27,7 @@ class Check:
 class Verdict:
     passed: bool
     checks: tuple[Check, ...]
+    contract: str
     contract_version: str
     contract_digest: str
 
@@ -35,26 +36,27 @@ class Verdict:
 
     def format(self) -> str:
         head = (
-            f"contract {self.contract_version} (sha256:{self.contract_digest}) -> "
+            f"contract {self.contract} {self.contract_version} "
+            f"(sha256:{self.contract_digest}) -> "
             f"{'PASS' if self.passed else 'FAIL'}"
         )
         return "\n".join([head, *(c.format() for c in self.checks)])
 
 
-def evaluate(card: Scorecard) -> Verdict:
+def evaluate(card: Scorecard, contract: Contract) -> Verdict:
     """Apply every contract clause to one scorecard."""
     checks: list[Check] = []
 
     # 1. Skill relative to climatology. Raw Brier is not comparable across
     #    hazards, so the contract is written in skill terms only.
-    bss_ok = card.brier_skill_score > CONTRACT.min_brier_skill_score
+    bss_ok = card.brier_skill_score > contract.min_brier_skill_score
     checks.append(
         Check(
             "brier skill score",
             bss_ok,
             f"{card.brier_skill_score:+.4f} vs required "
-            f"> {CONTRACT.min_brier_skill_score:+.4f} "
-            f"(reference: {CONTRACT.reference_model})",
+            f"> {contract.min_brier_skill_score:+.4f} "
+            f"(reference: {contract.reference_model})",
         )
     )
 
@@ -64,7 +66,7 @@ def evaluate(card: Scorecard) -> Verdict:
     populated = [
         b
         for b in card.reliability_bins
-        if b["count"] >= CONTRACT.reliability_min_bin_count
+        if b["count"] >= contract.reliability_min_bin_count
     ]
     worst: tuple[float, dict] | None = None
     for b in populated:
@@ -77,43 +79,43 @@ def evaluate(card: Scorecard) -> Verdict:
             Check(
                 "reliability",
                 False,
-                f"no bin reached n >= {CONTRACT.reliability_min_bin_count}; "
+                f"no bin reached n >= {contract.reliability_min_bin_count}; "
                 "calibration is unmeasurable on this sample",
             )
         )
     else:
         assert worst is not None
         dev, b = worst
-        rel_ok = dev <= CONTRACT.reliability_tolerance_pp
+        rel_ok = dev <= contract.reliability_tolerance_pp
         checks.append(
             Check(
                 "reliability",
                 rel_ok,
                 f"worst populated bin [{b['lower']:.1f},{b['upper']:.1f}) "
                 f"n={b['count']:,} deviates {dev:.4f}, "
-                f"tolerance {CONTRACT.reliability_tolerance_pp:.4f} "
+                f"tolerance {contract.reliability_tolerance_pp:.4f} "
                 f"({len(populated)}/{len(card.reliability_bins)} bins populated)",
             )
         )
 
     # 3. Discrimination.
-    auc_ok = card.auc >= CONTRACT.min_auc
+    auc_ok = card.auc >= contract.min_auc
     checks.append(
         Check(
             "auc",
             auc_ok,
-            f"{card.auc:.4f} vs required >= {CONTRACT.min_auc:.2f}",
+            f"{card.auc:.4f} vs required >= {contract.min_auc:.2f}",
         )
     )
 
     # 4. Provenance: the card must have been produced under this contract.
-    same_contract = card.contract_digest == CONTRACT.digest()
+    same_contract = card.contract_digest == contract.digest()
     checks.append(
         Check(
             "contract provenance",
             same_contract,
             f"card carries sha256:{card.contract_digest}, "
-            f"current contract sha256:{CONTRACT.digest()}"
+            f"current contract sha256:{contract.digest()}"
             + ("" if same_contract else "  <- contract changed since this run"),
         )
     )
@@ -121,6 +123,7 @@ def evaluate(card: Scorecard) -> Verdict:
     return Verdict(
         passed=all(c.passed for c in checks),
         checks=tuple(checks),
-        contract_version=CONTRACT.version,
-        contract_digest=CONTRACT.digest(),
+        contract=contract.name,
+        contract_version=contract.version,
+        contract_digest=contract.digest(),
     )

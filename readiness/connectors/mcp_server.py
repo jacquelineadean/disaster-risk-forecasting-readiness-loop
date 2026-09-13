@@ -1,23 +1,25 @@
-"""A read-only MCP server over the pinned data and the experiment ledger.
+"""A read-only MCP server over the pinned data and one contract's experiment ledger.
 
 Report §5, data plane: "MCP servers / tools per source: storm-events,
 openfema-nri, footprints, forecast-grids."
 
 Phase 0 ships the `storm-events` side of that plus read access to the harness's
 own outputs, which is what an agent actually needs to run the loop: see the
-panel, read past experiments, read score reports. Every tool here is a read.
-There is deliberately no tool that writes a label, edits the contract, or
-returns a holdout outcome — an agent connected to this server cannot cheat
-through it.
+contract, see the panel, read past experiments, read score reports. Every tool
+here is a read. There is deliberately no tool that writes a label, edits a
+contract, or returns a holdout outcome — an agent connected to this server
+cannot cheat through it.
 
-Implemented against the stdio transport with the standard library only, so it
-runs from a clean clone with nothing installed:
+The server is bound to one registered contract, chosen the same way the CLI
+chooses (`readiness mcp -c NAME`). Implemented against the stdio transport with
+the standard library only, so it runs from a clean clone with nothing
+installed:
 
-    readiness mcp
+    readiness mcp -c NAME
 
 or, in an MCP client config:
 
-    {"command": "python3", "args": ["-m", "readiness.cli", "mcp"]}
+    {"command": "python3", "args": ["-m", "readiness.cli", "mcp", "-c", "NAME"]}
 """
 
 from __future__ import annotations
@@ -26,20 +28,33 @@ import json
 import sys
 from typing import Any, Callable
 
-from readiness import config, data as data_mod
+from readiness import contracts, data as data_mod
 from readiness.connectors.base import Manifest
+from readiness.contracts import Contract
 from readiness.harness.ledger import Ledger
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "readiness-storm-events", "version": "0.1.0"}
+SERVER_INFO = {"name": "readiness-data", "version": "0.2.0"}
 
-_cache: dict[str, Any] = {}
+_state: dict[str, Any] = {"contract": None, "dataset": None}
 
 
-def _dataset():
-    if "dataset" not in _cache:
-        _cache["dataset"] = data_mod.build()
-    return _cache["dataset"]
+def configure(contract: Contract | None) -> None:
+    """Bind the server to a contract (or reset it, so the next call resolves anew)."""
+    _state["contract"] = contract
+    _state["dataset"] = None
+
+
+def _contract() -> Contract:
+    if _state["contract"] is None:
+        _state["contract"] = contracts.resolve()
+    return _state["contract"]
+
+
+def _dataset() -> data_mod.Dataset:
+    if _state["dataset"] is None:
+        _state["dataset"] = data_mod.build(_contract())
+    return _state["dataset"]
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +63,11 @@ def _dataset():
 
 
 def tool_contract(_args: dict) -> str:
-    return config.describe()
+    return _contract().describe()
+
+
+def tool_contracts(_args: dict) -> str:
+    return contracts.describe_registry()
 
 
 def tool_manifest(_args: dict) -> str:
@@ -62,50 +81,54 @@ def tool_panel_summary(_args: dict) -> str:
     return "\n".join(
         [
             ds.panel.summary(),
-            f"counties: {len(ds.counties)}",
+            f"regions: {len(ds.regions)}",
             f"data version: sha256:{ds.data_version}",
             "",
             "split coverage:",
-            splits.coverage_report(ds.panel),
+            splits.coverage_report(ds.panel, ds.contract.splits),
+            "",
+            "event coverage:",
+            ds.diagnostics.format(),
         ]
     )
 
 
-def tool_county_history(args: dict) -> str:
-    """Training-split label history for one county. Never returns holdout years."""
-    fips = str(args.get("county_fips", "")).strip()
-    if not fips:
-        return "error: county_fips is required"
+def tool_region_history(args: dict) -> str:
+    """Training-split label history for one region. Never returns holdout years."""
+    region = str(args.get("region_id", "")).strip()
+    if not region:
+        return "error: region_id is required"
     ds = _dataset()
-    train_years = set(config.CONTRACT.train_years)
+    contract = ds.contract
+    train_years = set(contract.train_years)
     rows = [
         (u, y)
         for u, y in zip(ds.panel.units, ds.panel.labels)
-        if u[0] == fips and u[1] in train_years
+        if u[0] == region and u[1] in train_years
     ]
     if not rows:
         return (
-            f"no training-split rows for county {fips}. "
+            f"no training-split rows for region {region}. "
             f"Note: only train years ({min(train_years)}-{max(train_years)}) are "
             "exposed through this tool; validate and test labels are not "
             "available through any tool on this server."
         )
-    lines = [f"county {fips}: {len(rows)} training county-quarters, "
+    lines = [f"region {region}: {len(rows)} training region-{contract.period}s, "
              f"{sum(y for _, y in rows)} positive"]
-    by_quarter: dict[int, list[int]] = {}
-    for (_f, _y, q), label in rows:
-        by_quarter.setdefault(q, []).append(label)
-    for q in sorted(by_quarter):
-        vals = by_quarter[q]
+    by_period: dict[int, list[int]] = {}
+    for (_r, _y, p), label in rows:
+        by_period.setdefault(p, []).append(label)
+    for p in sorted(by_period):
+        vals = by_period[p]
         lines.append(
-            f"  Q{q}: {sum(vals)}/{len(vals)} years with a damaging event "
-            f"({sum(vals) / len(vals):.3f})"
+            f"  {contract.period} {p}: {sum(vals)}/{len(vals)} years with a damaging "
+            f"event ({sum(vals) / len(vals):.3f})"
         )
     return "\n".join(lines)
 
 
 def tool_ledger(args: dict) -> str:
-    ledger = Ledger(data_mod.LEDGER_PATH)
+    ledger = Ledger(data_mod.paths(_contract()).ledger)
     if args.get("experiment_id"):
         for card in ledger.read():
             if card.experiment_id == args["experiment_id"]:
@@ -126,13 +149,22 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], str]]] = {
     "get_contract": (
         {
             "description": (
-                "The pre-registered acceptance contract: forecast unit, damage "
-                "threshold, locked splits, and the thresholds a model must clear. "
-                "Read this before proposing anything."
+                "The pre-registered acceptance contract this server is bound to: "
+                "forecast unit, damage threshold, locked splits, and the "
+                "thresholds a model must clear. Read this before proposing anything."
             ),
             "inputSchema": {"type": "object", "properties": {}},
         },
         tool_contract,
+    ),
+    "list_contracts": (
+        {
+            "description": (
+                "Every registered contract, with its hazard, scope and digest."
+            ),
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        tool_contracts,
     ),
     "get_data_manifest": (
         {
@@ -147,38 +179,40 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], str]]] = {
     "get_panel_summary": (
         {
             "description": (
-                "Size, base rate, digest and per-split coverage of the labelled "
-                "county-quarter panel."
+                "Size, base rate, digest, per-split coverage and event coverage of "
+                "the contract's labelled region-period panel."
             ),
             "inputSchema": {"type": "object", "properties": {}},
         },
         tool_panel_summary,
     ),
-    "get_county_history": (
+    "get_region_history": (
         {
             "description": (
-                "Per-quarter damaging-event frequency for one county, over the "
+                "Per-period damaging-event frequency for one region, over the "
                 "TRAINING years only. Holdout labels are not available from this "
                 "server."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "county_fips": {
+                    "region_id": {
                         "type": "string",
-                        "description": "5-digit state+county FIPS, e.g. 22005",
+                        "description": (
+                            "region identifier; a 5-digit county FIPS for US contracts"
+                        ),
                     }
                 },
-                "required": ["county_fips"],
+                "required": ["region_id"],
             },
         },
-        tool_county_history,
+        tool_region_history,
     ),
     "read_ledger": (
         {
             "description": (
-                "The append-only experiment ledger: what has been tried, what "
-                "scored, and whether the hash chain is intact."
+                "The contract's append-only experiment ledger: what has been "
+                "tried, what scored, and whether the hash chain is intact."
             ),
             "inputSchema": {
                 "type": "object",
@@ -194,7 +228,7 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], str]]] = {
     ),
     "list_models": (
         {
-            "description": "Models that can be proposed and scored.",
+            "description": "Models that can be proposed and scored against any contract.",
             "inputSchema": {"type": "object", "properties": {}},
         },
         tool_models,
@@ -212,7 +246,11 @@ def _result(request_id: Any, payload: dict) -> dict:
 
 
 def _error(request_id: Any, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {"code": code, "message": message},
+    }
 
 
 def handle(message: dict) -> dict | None:
@@ -270,8 +308,10 @@ def handle(message: dict) -> dict | None:
     return _error(request_id, -32601, f"method not found: {method}")
 
 
-def serve(stdin=None, stdout=None) -> None:
+def serve(stdin=None, stdout=None, *, contract: Contract | None = None) -> None:
     """Read newline-delimited JSON-RPC from stdin, write responses to stdout."""
+    if contract is not None:
+        configure(contract)
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:

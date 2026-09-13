@@ -1,7 +1,9 @@
 """The experimental loop: gather context -> take action -> verify work -> repeat.
 
 Report §4 maps the Claude Agent SDK's loop onto this problem one-to-one, and
-this module is that map made executable.
+this module is that map made executable. The loop is run *against a contract*:
+the same code, the same queue of baselines and the same verification runs for
+any registered hazard and geography.
 
 Two backends run the *same* loop:
 
@@ -27,21 +29,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
 from readiness import data as data_mod
-from readiness.config import CONTRACT
-from readiness.engine import build_model
-from readiness.harness import canary as canary_mod
+from readiness.contracts import Contract, Split
+from readiness.engine import build_model, needs_panel
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
-from readiness.harness.labels import Panel
 from readiness.harness.ledger import ExperimentCard, Ledger, utc_now
-from readiness.harness.splits import (
-    TRAIN,
-    Split,
-    TouchBudget,
-    TrainingView,
-    get_split,
-    split_panel,
-)
+from readiness.harness.splits import TouchBudget, get_split
 
 Progress = Callable[[str], None]
 
@@ -56,11 +49,12 @@ class Candidate:
     kwargs: dict = field(default_factory=dict)
 
 
-#: Phase 0's queue. Deliberately short and deliberately unambitious: the point
-#: of Phase 0 is that the plumbing works, not that the forecast is good.
-PHASE0_QUEUE: tuple[Candidate, ...] = (
+#: The baseline queue. Deliberately short and deliberately unambitious: the
+#: point of Phase 0 is that the plumbing works for any contract, not that the
+#: forecast is good.
+BASELINE_QUEUE: tuple[Candidate, ...] = (
     Candidate(
-        model="climatology-global",
+        model="climatology-pooled",
         changed="Initial run: the contract's reference forecast, scored against itself.",
         hypothesis=(
             "Scored against itself the reference must produce BSS exactly 0.0 and "
@@ -69,22 +63,25 @@ PHASE0_QUEUE: tuple[Candidate, ...] = (
         ),
     ),
     Candidate(
-        model="climatology-county-quarter",
+        model="climatology-seasonal",
         changed=(
-            "Replaced the single global rate with a per-county, per-quarter "
-            "empirical frequency, shrunk toward state-quarter and global rates."
+            "Replaced the single pooled rate with a per-region, per-period-of-year "
+            "empirical frequency, shrunk toward the scope-wide seasonal rate and "
+            "then the pooled rate."
         ),
         hypothesis=(
-            "Flood risk in this state is strongly seasonal and strongly spatial, "
-            "so conditioning on county and quarter should add resolution without "
-            "hurting reliability — BSS > 0 against global climatology."
+            "Hazard occurrence is usually seasonal and spatial, so conditioning on "
+            "region and period-of-year should add resolution without hurting "
+            "reliability — BSS > 0 against the pooled climatology. Falsified if "
+            "resolution does not improve, or if reliability degrades beyond the "
+            "contract's tolerance in any populated bin."
         ),
     ),
     Candidate(
         model="persistence-last-year",
         changed=(
             "Swapped in a sharp, deliberately uncalibrated forecast: fixed high "
-            "probability if the same county-quarter had an event last year."
+            "probability if the same region-period had an event last year."
         ),
         hypothesis=(
             "Expected to FAIL the reliability clause while looking acceptable on "
@@ -94,9 +91,22 @@ PHASE0_QUEUE: tuple[Candidate, ...] = (
     ),
 )
 
+CANARY_CANDIDATE = Candidate(
+    model="leaky-oracle",
+    changed=(
+        "Canary run: a model constructed with direct access to the outcomes it "
+        "is scored on."
+    ),
+    hypothesis=(
+        "Phase 0 exit criterion. The harness must REJECT this, regardless of how "
+        "good its scores look."
+    ),
+)
+
 
 @dataclass
 class LoopResult:
+    contract: Contract
     cards: list[ExperimentCard]
     dataset: data_mod.Dataset
     passed: list[str]
@@ -105,7 +115,7 @@ class LoopResult:
 
     def format(self) -> str:
         lines = [
-            f"ran {len(self.cards)} experiment(s)",
+            f"ran {len(self.cards)} experiment(s) against {self.contract.name}",
             f"  passed contract   {self.passed or '-'}",
             f"  failed contract   {self.failed or '-'}",
             f"  rejected (canary) {self.rejected or '-'}",
@@ -128,11 +138,11 @@ def run_experiment(
     through the training view, predict, score, screen for leakage, judge against
     the contract, then write an immutable card.
     """
+    contract = dataset.contract
     panel = dataset.panel
-    needs_panel = candidate.model == "leaky-oracle"
     model = build_model(
         candidate.model,
-        panel=panel if needs_panel else None,
+        panel=panel if needs_panel(candidate.model) else None,
         **candidate.kwargs,
     )
 
@@ -141,27 +151,13 @@ def run_experiment(
             raise RuntimeError("scoring against test requires a touch budget")
         touch_budget.check(model.name, model.version)
 
-    progress(f"  fit {model.name}@{model.version} on {TRAIN}")
-    card_scorecard = scoring.score(model, panel, split)
-
-    # Re-run the fit/predict path to obtain the raw arrays the canary needs.
-    # Same inputs, same code path, so this cannot disagree with the scorecard.
-    _units, probs, outcomes = scoring.predictions_for(model, panel, split)
-    view = TrainingView(split_panel(panel, TRAIN), TRAIN)
-    report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
-        brier_skill_score=card_scorecard.brier_skill_score,
-        auc=card_scorecard.auc,
-        view=view,
-        declared_train_digest=getattr(model, "training_digest", None),
-    )
-
-    verdict = contract_mod.evaluate(card_scorecard)
+    progress(f"  fit {model.name}@{model.version} on {contract.splits.train}")
+    card_scorecard, report = scoring.screen(model, panel, contract, split)
+    verdict = contract_mod.evaluate(card_scorecard, contract)
 
     if split.name == "test" and touch_budget is not None:
         spent = touch_budget.spend(model.name, model.version)
-        progress(f"  test touch {spent}/{CONTRACT.test_touch_budget} spent")
+        progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
 
     if report.rejected:
         outcome = "REJECTED by leakage canary; contract verdict not honoured"
@@ -184,46 +180,41 @@ def run_experiment(
         verdict=verdict.to_dict(),
         canary=report.to_dict(),
         data_snapshot=dataset.provenance(),
-        contract_digest=CONTRACT.digest(),
+        contract_digest=contract.digest(),
     )
     return ledger.append(card)
 
 
 def run_local(
+    contract: Contract,
     *,
     split_name: str = "validate",
-    queue: Sequence[Candidate] = PHASE0_QUEUE,
+    queue: Sequence[Candidate] = BASELINE_QUEUE,
     include_canary: bool = True,
     snapshot_dir: pathlib.Path = data_mod.SNAPSHOT_DIR,
-    ledger_path: pathlib.Path = data_mod.LEDGER_PATH,
+    experiments_dir: pathlib.Path = data_mod.EXPERIMENTS_DIR,
+    dataset: data_mod.Dataset | None = None,
     progress: Progress = print,
 ) -> LoopResult:
-    """Run the Phase 0 loop with no language model in the control flow."""
-    split = get_split(split_name)
+    """Run the loop for one contract with no language model in the control flow."""
+    split = get_split(contract, split_name)
+    where = data_mod.paths(contract, experiments_dir=experiments_dir)
 
     progress("gather context")
-    dataset = data_mod.build(snapshot_dir=snapshot_dir, progress=lambda m: progress("  " + m))
+    progress(f"  contract: {contract.name} (sha256:{contract.digest()})")
+    if dataset is None:
+        dataset = data_mod.build(
+            contract, snapshot_dir=snapshot_dir, progress=lambda m: progress("  " + m)
+        )
     progress(f"  panel: {dataset.panel.summary()}")
     progress(f"  data version: sha256:{dataset.data_version}")
 
-    ledger = Ledger(ledger_path)
-    budget = TouchBudget(data_mod.TOUCH_BUDGET_PATH)
+    ledger = Ledger(where.ledger)
+    budget = TouchBudget(where.touch_budget, contract.test_touch_budget)
 
     work = list(queue)
     if include_canary:
-        work.append(
-            Candidate(
-                model="leaky-oracle",
-                changed=(
-                    "Canary run: a model constructed with direct access to the "
-                    "outcomes it is scored on."
-                ),
-                hypothesis=(
-                    "Phase 0 exit criterion. The harness must REJECT this, "
-                    "regardless of how good its scores look."
-                ),
-            )
-        )
+        work.append(CANARY_CANDIDATE)
 
     cards: list[ExperimentCard] = []
     passed: list[str] = []
@@ -253,30 +244,36 @@ def run_local(
             failed.append(card.model)
 
     progress("repeat  (queue exhausted)")
-    return LoopResult(cards, dataset, passed, failed, rejected)
+    return LoopResult(contract, cards, dataset, passed, failed, rejected)
 
 
 # ---------------------------------------------------------------------------
 # Claude Agent SDK backend
 # ---------------------------------------------------------------------------
 
-AGENT_SYSTEM_PROMPT = f"""\
+
+def system_prompt(contract: Contract) -> str:
+    c = contract
+    return f"""\
 You are the orchestrator of an open-source disaster-risk forecasting loop.
 
 Your cycle is: gather context -> take action -> verify work -> repeat.
 
-The forecast unit is: at least one damaging {CONTRACT.hazard} event in a given
-county during a given quarter, in {CONTRACT.state}.
+You are running against the registered contract `{c.name}`
+(sha256:{c.digest()}). Its forecast unit is: at least one damaging {c.hazard}
+event in a given region during a given {c.period}, in {c.scope_label}.
+Read it in full with `readiness contract -c {c.name}` before doing anything.
 
 RULES YOU CANNOT NEGOTIATE:
   * You may propose any model in readiness.engine. You may not modify anything
-    under readiness/harness/ or readiness/config.py. Those files define how you
-    are judged; editing them is not iteration, it is cheating.
+    under readiness/harness/, readiness/contracts.py, readiness/config.py or
+    contracts/. Those files define how you are judged; editing them is not
+    iteration, it is cheating.
   * You never see holdout labels. Ask for them and the answer is no.
-  * The validate split ({CONTRACT.validate_years[0]}-{CONTRACT.validate_years[-1]})
+  * The validate split ({c.validate_years[0]}-{c.validate_years[-1]})
     is yours to iterate against. The test split
-    ({CONTRACT.test_years[0]}-{CONTRACT.test_years[-1]}) may be touched
-    {CONTRACT.test_touch_budget} time per model version, ever.
+    ({c.test_years[0]}-{c.test_years[-1]}) may be touched
+    {c.test_touch_budget} time(s) per model version, ever.
   * Every experiment gets a card: what you changed, why you expected it to help,
     and what happened — including when it did not help.
 
@@ -286,6 +283,7 @@ of ideas that are worth a card. Say which of the two it was.
 
 
 def run_claude(
+    contract: Contract,
     *,
     split_name: str = "validate",
     max_turns: int = 24,
@@ -306,23 +304,24 @@ def run_claude(
             "and an ANTHROPIC_API_KEY in the environment.\n"
             "Phase 0's exit criteria are checked against the deterministic "
             "'local' backend, so you do not need this to verify the build:\n"
-            "    readiness loop --backend local\n"
+            f"    readiness loop -c {contract.name} --backend local\n"
             f"({exc})"
         ) from exc
 
-    from readiness.agent.subagents import SUBAGENTS  # local import: optional path
+    from readiness.agent.subagents import subagents_for  # local import: optional path
 
     options = ClaudeAgentOptions(
-        system_prompt=AGENT_SYSTEM_PROMPT,
+        system_prompt=system_prompt(contract),
         max_turns=max_turns,
         allowed_tools=["Read", "Bash", "Glob", "Grep"],
-        agents=SUBAGENTS,
+        agents=subagents_for(contract),
     )
     prompt = (
-        f"Run the experimental loop against the '{split_name}' split. "
-        "Start by reading skills/verification-protocol.md and "
-        "skills/experiment-card.md, then use the `readiness` CLI to inspect the "
-        "panel and score candidates. Report the ledger at the end."
+        f"Run the experimental loop for contract '{contract.name}' against the "
+        f"'{split_name}' split. Start by reading skills/verification-protocol.md "
+        "and skills/experiment-card.md, then use the `readiness` CLI (always with "
+        f"`-c {contract.name}`) to inspect the panel and score candidates. Report "
+        "the ledger at the end."
     )
 
     import asyncio

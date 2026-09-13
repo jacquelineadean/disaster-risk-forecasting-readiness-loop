@@ -31,12 +31,13 @@ Deciding this before the first import is much cheaper than after.
 
 **2. What CLIMADA is being asked for.** It computes *expected damage* from
 hazard intensity, exposure and a vulnerability curve. The Phase 0/1 forecast
-unit is *probability of at least one damaging event*. These are different
+unit is *probability of at least one damaging event* in a region-period, for
+whichever hazard the contract names. These are different
 quantities and the conversion is a modelling choice, not a formatting one. State
 which of these you are doing, on the experiment card:
 
 - use CLIMADA's event set to derive an occurrence probability per
-  county-quarter, or
+  region-period, or
 - change the forecast unit to expected loss and register a new contract for it.
 
 Do not blur them. A model that quietly answers a different question than the
@@ -57,7 +58,7 @@ readiness/engine/climada_glue.py
       def fit(self, view: TrainingView) -> None:
           # calibrate vulnerability / thresholds against TRAINING years only
       def predict(self, request: PredictionRequest) -> Sequence[float]:
-          # run the event set, convert to P(>=1 damaging event | county, quarter)
+          # run the event set, convert to P(>=1 damaging event | region, period)
 ```
 
 Constraints that are not negotiable:
@@ -73,9 +74,9 @@ Constraints that are not negotiable:
 
 ## What to calibrate, and against what
 
-Calibrate the vulnerability curve and the damage threshold mapping on
-**1996–2015 only**. Validate on 2016–2020. The test years stay untouched until a
-candidate passes on validate.
+Calibrate the vulnerability curve and the damage threshold mapping on the
+contract's **training years only**. Validate on its validate years. The test
+years stay untouched until a candidate passes on validate.
 
 The temptation specific to physical models is to justify a post-hoc parameter
 change as "a better representation of the physics" rather than as a fit to the
@@ -83,7 +84,7 @@ validation set. It is both. Write it on the card as both.
 
 ## Where this is likely to disappoint
 
-Worth writing down before anyone is invested: county-quarter *occurrence* may be
+Worth writing down before anyone is invested: region-period *occurrence* may be
 dominated by reporting practice rather than physics — Storm Events records what
 someone reported, and a rigorous hydrodynamic model of what actually happened
 does not predict what a NWS office wrote down. If CLIMADA underperforms a

@@ -1,6 +1,15 @@
-"""`readiness` — the command line for the Phase 0 loop.
+"""`readiness` — the command line for the loop.
 
-    readiness contract          print the pre-registered contract and its hash
+Every command that touches data or scores runs against one registered
+contract, chosen with `-c/--contract NAME` (a path to a contract JSON also
+works). If the flag is omitted, `READINESS_CONTRACT` is consulted, then the
+sole registered contract if there is exactly one; otherwise the command
+refuses and lists the choices.
+
+    readiness contracts         list the registered contracts
+    readiness contract          print one contract and its hash
+    readiness register NAME     pre-register a new contract from options
+    readiness hazards           list the hazard catalogue
     readiness models            list proposable models
     readiness snapshot          pull and pin the data, print the manifest
     readiness panel             build the labelled panel, print split coverage
@@ -17,19 +26,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import pathlib
 import subprocess
 import sys
 
-from readiness import config, data as data_mod
+from readiness import config, contracts, data as data_mod
 from readiness.connectors.base import ConnectorError
-from readiness.engine import build_model, describe_registry
-from readiness.harness import canary as canary_mod
+from readiness.contracts import Contract, ContractError
+from readiness.engine import build_model, describe_registry, needs_panel
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring, splits
 from readiness.harness.ledger import Ledger
-
-EXPECTED_PATH = data_mod.EXPECTED_DIR / "phase0.json"
 
 #: Scorecard fields that must reproduce exactly. Reliability bins are included
 #: via a hash so a bin-level difference cannot hide behind matching aggregates.
@@ -50,6 +56,9 @@ _REPRO_FIELDS = (
     "contract_digest",
 )
 
+#: The baselines whose scores must reproduce bit-for-bit from a clean clone.
+_REPRO_MODELS = ("climatology-pooled", "climatology-seasonal")
+
 
 def _p(msg: str = "") -> None:
     print(msg, flush=True)
@@ -61,8 +70,13 @@ def _rule(title: str) -> None:
     _p("-" * max(len(title), 60))
 
 
-def _dataset(args) -> data_mod.Dataset:
+def _contract(args) -> Contract:
+    return contracts.resolve(getattr(args, "contract", None))
+
+
+def _dataset(args, contract: Contract) -> data_mod.Dataset:
     return data_mod.build(
+        contract,
         keep_raw=getattr(args, "keep_raw", False),
         refresh=getattr(args, "refresh", False),
         progress=_p if not getattr(args, "quiet", False) else (lambda _m: None),
@@ -70,16 +84,73 @@ def _dataset(args) -> data_mod.Dataset:
 
 
 # ---------------------------------------------------------------------------
-# commands
+# contracts
 # ---------------------------------------------------------------------------
 
 
+def cmd_contracts(args) -> int:
+    _rule(f"registered contracts  ({contracts.contracts_dir()})")
+    _p(contracts.describe_registry())
+    return 0
+
+
 def cmd_contract(args) -> int:
+    c = _contract(args)
     _rule("pre-registered contract")
-    _p(config.describe())
+    _p(c.describe())
     if args.json:
         _p()
-        _p(json.dumps(config.CONTRACT.to_dict(), indent=2, sort_keys=True))
+        _p(json.dumps(c.to_spec(), indent=2))
+    return 0
+
+
+def cmd_register(args) -> int:
+    c = contracts.new(
+        args.name,
+        hazard=args.hazard,
+        states=args.state or (),
+        period=args.period,
+        event_types=args.event_type,
+        property_usd_min=args.damage_usd,
+        count_casualties=not args.no_casualties,
+        train=args.train,
+        validate=args.validate,
+        test=args.test,
+        description=args.description or "",
+        version=args.version,
+        min_brier_skill_score=args.min_bss,
+        reliability_tolerance_pp=args.tolerance,
+        reliability_min_bin_count=args.min_bin_count,
+        min_auc=args.min_auc,
+        n_reliability_bins=args.bins,
+    )
+    if args.dry_run:
+        _p(json.dumps(c.to_spec(), indent=2))
+        return 0
+    path = c.save(contracts.contracts_dir(), force=args.force)
+    _rule(f"registered  {path}")
+    _p(c.describe())
+    hazard = config.HAZARDS.get(c.hazard)
+    if hazard is not None and hazard.coding != "county":
+        _p()
+        _p(
+            f"note: {c.hazard} is {hazard.coding}-coded in Storm Events. Zone-coded "
+            "events do not join to counties and are dropped by the label builder; "
+            "`readiness panel` reports how many. See docs/contracts.md."
+        )
+    _p()
+    _p("next:")
+    _p(f"  readiness panel -c {c.name}     # pull the data and inspect the panel")
+    _p(f"  readiness loop  -c {c.name}     # run the baselines and write the ledger")
+    return 0
+
+
+def cmd_hazards(args) -> int:
+    _rule("hazard catalogue  (name, Storm Events coding, event types)")
+    _p(config.describe_hazards())
+    _p()
+    _p("A contract may also name a hazard outside the catalogue by listing its")
+    _p("event types explicitly (`readiness register ... --event-type ...`).")
     return 0
 
 
@@ -89,71 +160,75 @@ def cmd_models(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# data
+# ---------------------------------------------------------------------------
+
+
 def cmd_snapshot(args) -> int:
-    _rule("data snapshot")
-    ds = _dataset(args)
+    c = _contract(args)
+    _rule(f"data snapshot  ({c.name}: {c.scope_label})")
+    ds = _dataset(args, c)
     _p()
     _p(ds.manifest.summary())
     return 0
 
 
 def cmd_panel(args) -> int:
-    _rule("county-quarter panel")
-    ds = _dataset(args)
+    c = _contract(args)
+    _rule(f"region-{c.period} panel  ({c.name})")
+    ds = _dataset(args, c)
     _p()
     _p(f"  {ds.panel.summary()}")
-    _p(f"  counties: {len(ds.counties)}  ({ds.counties[0]} ... {ds.counties[-1]})")
+    _p(f"  regions: {len(ds.regions)}  ({ds.regions[0]} ... {ds.regions[-1]})")
     _p()
     _p("split coverage")
-    splits.assert_disjoint()
-    _p(splits.coverage_report(ds.panel))
+    _p(splits.coverage_report(ds.panel, c.splits))
+    _p()
+    _p("event coverage")
+    _p(ds.diagnostics.format())
     return 0
 
 
+# ---------------------------------------------------------------------------
+# scoring
+# ---------------------------------------------------------------------------
+
+
 def cmd_score(args) -> int:
-    ds = _dataset(args)
-    split = splits.get_split(args.split)
-    needs_panel = args.model == "leaky-oracle"
-    model = build_model(args.model, panel=ds.panel if needs_panel else None)
+    c = _contract(args)
+    ds = _dataset(args, c)
+    split = splits.get_split(c, args.split)
+    model = build_model(args.model, panel=ds.panel if needs_panel(args.model) else None)
+    where = data_mod.paths(c)
 
     if split.name == "test":
-        budget = splits.TouchBudget(data_mod.TOUCH_BUDGET_PATH)
+        budget = splits.TouchBudget(where.touch_budget, c.test_touch_budget)
         budget.check(model.name, model.version)
         if not args.spend_test_touch:
             _p()
             _p(
                 f"refusing to score against the test split without "
-                f"--spend-test-touch.\nThis is the {config.CONTRACT.test_touch_budget}-shot "
+                f"--spend-test-touch.\nThis is the {c.test_touch_budget}-shot "
                 f"holdout ({split.years[0]}-{split.years[-1]}); once spent for "
                 f"{model.name}@{model.version} it cannot be spent again."
             )
             return 2
 
-    _rule(f"score  {model.name}@{model.version}  on {split}")
-    card = scoring.score(model, ds.panel, split)
+    _rule(f"score  {model.name}@{model.version}  on {split}  ({c.name})")
+    card, report = scoring.screen(model, ds.panel, c, split)
     _p(card.format())
     _p()
-    _p(contract_mod.evaluate(card).format())
-
-    _units, probs, outcomes = scoring.predictions_for(model, ds.panel, split)
-    view = splits.TrainingView(splits.split_panel(ds.panel, splits.TRAIN), splits.TRAIN)
-    report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
-        brier_skill_score=card.brier_skill_score,
-        auc=card.auc,
-        view=view,
-        declared_train_digest=getattr(model, "training_digest", None),
-    )
+    _p(contract_mod.evaluate(card, c).format())
     _p()
     _p(report.format())
 
     if split.name == "test" and args.spend_test_touch:
-        spent = splits.TouchBudget(data_mod.TOUCH_BUDGET_PATH).spend(
+        spent = splits.TouchBudget(where.touch_budget, c.test_touch_budget).spend(
             model.name, model.version
         )
         _p()
-        _p(f"test touch {spent}/{config.CONTRACT.test_touch_budget} spent for "
+        _p(f"test touch {spent}/{c.test_touch_budget} spent for "
            f"{model.name}@{model.version}")
     # Exit non-zero only when the canary rejects: a contract failure is a
     # legitimate experimental outcome, not a tool error.
@@ -163,12 +238,14 @@ def cmd_score(args) -> int:
 def cmd_loop(args) -> int:
     from readiness.agent import orchestrator
 
+    c = _contract(args)
     if args.backend == "claude":
-        orchestrator.run_claude(split_name=args.split, progress=_p)
+        orchestrator.run_claude(c, split_name=args.split, progress=_p)
         return 0
 
-    _rule(f"experimental loop  ({args.backend} backend, split={args.split})")
+    _rule(f"experimental loop  ({c.name}, {args.backend} backend, split={args.split})")
     result = orchestrator.run_local(
+        c,
         split_name=args.split,
         include_canary=not args.no_canary,
         progress=_p,
@@ -176,35 +253,26 @@ def cmd_loop(args) -> int:
     _p()
     _p(result.format())
     _p()
-    _p(f"ledger: {data_mod.LEDGER_PATH.relative_to(data_mod.REPO_ROOT)}")
+    where = data_mod.paths(c)
+    _p(f"ledger: {where.relative(where.ledger)}")
     return 0
 
 
 def cmd_canary(args) -> int:
-    ds = _dataset(args)
-    split = splits.get_split(args.split)
-    _rule(f"leakage canary  (target: leaky-oracle, split={split})")
+    c = _contract(args)
+    ds = _dataset(args, c)
+    split = splits.get_split(c, args.split)
+    _rule(f"leakage canary  (target: leaky-oracle, split={split}, {c.name})")
     _p("A model with direct access to the outcomes it is scored on. The Phase 0")
     _p("exit criterion is that the harness rejects it.")
     _p()
 
     model = build_model("leaky-oracle", panel=ds.panel)
-    card = scoring.score(model, ds.panel, split)
+    card, report = scoring.screen(model, ds.panel, c, split)
     _p(card.format())
     _p()
     _p("contract, if it were honoured:")
-    _p(contract_mod.evaluate(card).format())
-
-    _units, probs, outcomes = scoring.predictions_for(model, ds.panel, split)
-    view = splits.TrainingView(splits.split_panel(ds.panel, splits.TRAIN), splits.TRAIN)
-    report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
-        brier_skill_score=card.brier_skill_score,
-        auc=card.auc,
-        view=view,
-        declared_train_digest=getattr(model, "training_digest", None),
-    )
+    _p(contract_mod.evaluate(card, c).format())
     _p()
     _p(report.format())
     _p()
@@ -216,8 +284,10 @@ def cmd_canary(args) -> int:
 
 
 def cmd_ledger(args) -> int:
-    ledger = Ledger(data_mod.LEDGER_PATH)
-    _rule("experiment ledger")
+    c = _contract(args)
+    where = data_mod.paths(c)
+    ledger = Ledger(where.ledger)
+    _rule(f"experiment ledger  ({c.name}: {where.relative(where.ledger)})")
     if args.show:
         for card in ledger.read():
             if args.id and card.experiment_id != args.id:
@@ -239,42 +309,43 @@ def _repro_fingerprint(card: scoring.Scorecard) -> dict:
 
 
 def cmd_verify(args) -> int:
-    """Check the Phase 0 exit criteria (report §6, Phase 0).
+    """Check the Phase 0 exit criteria (report §6, Phase 0) for one contract.
 
         Exit when the agent reproduces the climatology baseline's scores
         bit-for-bit from a clean clone, and the harness rejects a deliberately
         leaked model (a canary test).
     """
-    _rule("Phase 0 exit criteria")
+    c = _contract(args)
+    where = data_mod.paths(c)
+    _rule(f"Phase 0 exit criteria  ({c.name})")
     failures: list[str] = []
 
-    splits.assert_disjoint()
-    _p("[ok]   splits are disjoint")
+    _p(f"[ok]   contract {c.name} validates (sha256:{c.digest()}); splits are disjoint")
 
-    ds = _dataset(args)
-    split = splits.get_split("validate")
+    ds = _dataset(args, c)
+    split = c.splits.validate
 
     # --- criterion 1: bit-for-bit reproducibility of the baselines ----------
     observed = {}
-    for name in ("climatology-global", "climatology-county-quarter"):
-        card = scoring.score(build_model(name), ds.panel, split)
+    for name in _REPRO_MODELS:
+        card = scoring.score(build_model(name), ds.panel, c, split)
         observed[name] = _repro_fingerprint(card)
     observed["_data_version"] = ds.data_version
-    observed["_contract"] = config.CONTRACT.digest()
+    observed["_contract"] = c.digest()
 
+    expected_path = where.expected
     if args.bless:
-        EXPECTED_PATH.parent.mkdir(parents=True, exist_ok=True)
-        EXPECTED_PATH.write_text(json.dumps(observed, indent=2, sort_keys=True) + "\n")
-        _p(f"[ok]   blessed baseline fingerprints -> "
-           f"{EXPECTED_PATH.relative_to(data_mod.REPO_ROOT)}")
-    elif not EXPECTED_PATH.exists():
+        expected_path.parent.mkdir(parents=True, exist_ok=True)
+        expected_path.write_text(json.dumps(observed, indent=2, sort_keys=True) + "\n")
+        _p(f"[ok]   blessed baseline fingerprints -> {where.relative(expected_path)}")
+    elif not expected_path.exists():
         failures.append(
-            f"no blessed baseline at {EXPECTED_PATH.relative_to(data_mod.REPO_ROOT)}; "
-            "run `readiness verify --bless` once, then commit it"
+            f"no blessed baseline at {where.relative(expected_path)}; "
+            f"run `readiness verify -c {c.name} --bless` once, then commit it"
         )
         _p("[FAIL] reproducibility: nothing to compare against")
     else:
-        expected = json.loads(EXPECTED_PATH.read_text())
+        expected = json.loads(expected_path.read_text())
         diffs = []
         for key in sorted(set(expected) | set(observed)):
             if expected.get(key) != observed.get(key):
@@ -291,17 +362,7 @@ def cmd_verify(args) -> int:
 
     # --- criterion 2: the canary rejects a leaked model ---------------------
     oracle = build_model("leaky-oracle", panel=ds.panel)
-    ocard = scoring.score(oracle, ds.panel, split)
-    _units, probs, outcomes = scoring.predictions_for(oracle, ds.panel, split)
-    view = splits.TrainingView(splits.split_panel(ds.panel, splits.TRAIN), splits.TRAIN)
-    report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
-        brier_skill_score=ocard.brier_skill_score,
-        auc=ocard.auc,
-        view=view,
-        declared_train_digest=getattr(oracle, "training_digest", None),
-    )
+    _ocard, report = scoring.screen(oracle, ds.panel, c, split)
     if report.rejected:
         tripped = [f.check for f in report.findings if f.tripped]
         _p(f"[ok]   leakage canary rejected leaky-oracle (tripped: {', '.join(tripped)})")
@@ -310,7 +371,7 @@ def cmd_verify(args) -> int:
         _p("[FAIL] leakage canary accepted a leaked model")
 
     # --- criterion 3: the ledger has not been rewritten ---------------------
-    status = Ledger(data_mod.LEDGER_PATH).verify()
+    status = Ledger(where.ledger).verify()
     if status.valid:
         _p(f"[ok]   {status.format()}")
     else:
@@ -319,11 +380,11 @@ def cmd_verify(args) -> int:
 
     _p()
     if failures:
-        _p(f"Phase 0 NOT met — {len(failures)} failure(s):")
+        _p(f"Phase 0 NOT met for {c.name} — {len(failures)} failure(s):")
         for f in failures:
             _p(f"  - {f}")
         return 1
-    _p("Phase 0 exit criteria met.")
+    _p(f"Phase 0 exit criteria met for {c.name}.")
     return 0
 
 
@@ -335,7 +396,7 @@ def cmd_report(args) -> int:
 def cmd_mcp(args) -> int:
     from readiness.connectors.mcp_server import serve
 
-    serve()
+    serve(contract=_contract(args))
     return 0
 
 
@@ -350,7 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="command", required=True)
 
+    def contract_flag(sp):
+        sp.add_argument(
+            "-c", "--contract",
+            help=(
+                "registered contract name, or a path to a contract JSON "
+                f"(default: ${contracts.CONTRACT_ENV}, else the sole registered contract)"
+            ),
+        )
+        return sp
+
     def data_flags(sp):
+        contract_flag(sp)
         sp.add_argument("--refresh", action="store_true",
                         help="re-download sources even if a snapshot exists")
         sp.add_argument("--keep-raw", action="store_true",
@@ -358,10 +430,56 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--quiet", action="store_true")
         return sp
 
-    sp = sub.add_parser("contract", help="print the pre-registered contract")
-    sp.add_argument("--json", action="store_true")
+    sub.add_parser("contracts", help="list the registered contracts").set_defaults(
+        func=cmd_contracts
+    )
+
+    sp = contract_flag(sub.add_parser("contract", help="print one contract and its hash"))
+    sp.add_argument("--json", action="store_true", help="also print the JSON spec")
     sp.set_defaults(func=cmd_contract)
 
+    sp = sub.add_parser(
+        "register",
+        help="pre-register a new contract from options",
+        description=(
+            "Write contracts/NAME.json. Everything not given takes the documented "
+            "default (quarterly, $10,000 property damage or any casualty, "
+            "1996-2015 / 2016-2020 / 2021-2025, BSS > 0, +/-5pp, AUC >= 0.70)."
+        ),
+    )
+    sp.add_argument("name", help="lowercase letters, digits and hyphens")
+    sp.add_argument("--hazard", required=True,
+                    help="a catalogue hazard (see `readiness hazards`) or a new name")
+    sp.add_argument("--state", action="append", metavar="XX",
+                    help="two-letter state; repeatable; omit for the whole country")
+    sp.add_argument("--period", default="quarter", choices=sorted(contracts.PERIODS))
+    sp.add_argument("--event-type", action="append", metavar="TYPE",
+                    help="Storm Events EVENT_TYPE; repeatable; required for an "
+                         "uncatalogued hazard")
+    sp.add_argument("--damage-usd", type=float, default=10_000.0,
+                    help="property damage at or above which an event is damaging")
+    sp.add_argument("--no-casualties", action="store_true",
+                    help="do not count injuries or deaths as damaging")
+    sp.add_argument("--train", default="1996-2015", metavar="YYYY-YYYY")
+    sp.add_argument("--validate", default="2016-2020", metavar="YYYY-YYYY")
+    sp.add_argument("--test", default="2021-2025", metavar="YYYY-YYYY")
+    sp.add_argument("--min-bss", type=float, default=None, help="default 0.0")
+    sp.add_argument("--tolerance", type=float, default=None,
+                    help="reliability tolerance in probability units, default 0.05")
+    sp.add_argument("--min-bin-count", type=int, default=None, help="default 30")
+    sp.add_argument("--min-auc", type=float, default=None, help="default 0.70")
+    sp.add_argument("--bins", type=int, default=None,
+                    help="reliability bins, default 10")
+    sp.add_argument("--description", default="")
+    sp.add_argument("--version", default="1.0.0")
+    sp.add_argument("--force", action="store_true", help="overwrite an existing file")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="print the JSON, write nothing")
+    sp.set_defaults(func=cmd_register)
+
+    sub.add_parser("hazards", help="list the hazard catalogue").set_defaults(
+        func=cmd_hazards
+    )
     sub.add_parser("models", help="list proposable models").set_defaults(func=cmd_models)
 
     data_flags(sub.add_parser("snapshot", help="pull and pin source data")).set_defaults(
@@ -378,7 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="required to score against the one-shot test split")
     sp.set_defaults(func=cmd_score)
 
-    sp = sub.add_parser("loop", help="run the experimental loop")
+    sp = contract_flag(sub.add_parser("loop", help="run the experimental loop"))
     sp.add_argument("--backend", default="local", choices=["local", "claude"])
     sp.add_argument("--split", default="validate", choices=["train", "validate", "test"])
     sp.add_argument("--no-canary", action="store_true",
@@ -390,7 +508,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--split", default="validate", choices=["train", "validate", "test"])
     sp.set_defaults(func=cmd_canary)
 
-    sp = sub.add_parser("ledger", help="show and verify the experiment ledger")
+    sp = contract_flag(
+        sub.add_parser("ledger", help="show and verify the experiment ledger")
+    )
     sp.add_argument("--show", action="store_true", help="print full cards as JSON")
     sp.add_argument("--id", help="only this experiment id")
     sp.set_defaults(func=cmd_ledger)
@@ -403,9 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("report", help="rebuild the static research report").set_defaults(
         func=cmd_report
     )
-    sub.add_parser("mcp", help="run the read-only MCP data server").set_defaults(
-        func=cmd_mcp
-    )
+    contract_flag(
+        sub.add_parser("mcp", help="run the read-only MCP data server")
+    ).set_defaults(func=cmd_mcp)
     return p
 
 
@@ -416,10 +536,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         _p("\ninterrupted")
         return 130
-    except (splits.SplitViolation, ConnectorError) as exc:
-        # These are the harness and the data plane refusing to do something,
-        # not crashes. A traceback would suggest the tool is broken when it is
-        # in fact working exactly as designed.
+    except (splits.SplitViolation, ConnectorError, ContractError) as exc:
+        # These are the harness, the data plane and the registry refusing to
+        # do something, not crashes. A traceback would suggest the tool is
+        # broken when it is in fact working exactly as designed.
         _p()
         _p(str(exc))
         return 2

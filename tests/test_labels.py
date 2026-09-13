@@ -2,14 +2,14 @@
 
 import unittest
 
-from readiness.config import CONTRACT
 from readiness.harness.labels import (
     build_panel,
     county_fips,
+    diagnose,
     is_damaging,
     parse_damage,
 )
-from tests.fixtures import make_event
+from tests.fixtures import make_contract, make_event
 
 
 class TestDamageParsing(unittest.TestCase):
@@ -29,15 +29,14 @@ class TestDamageParsing(unittest.TestCase):
         self.assertEqual(parse_damage("3.5k"), 3_500.0)
 
     def test_bare_magnitude_suffix_is_zero(self):
-        # NOAA emits a lone unit letter for an otherwise-empty field; observed
-        # once in ~25k Louisiana rows (DAMAGE_CROPS == "K"). No digits, no
-        # amount.
+        # NOAA emits a lone unit letter for an otherwise-empty field. No
+        # digits, no amount.
         for raw in ("K", "M", " B ", "t"):
             with self.subTest(raw=raw):
                 self.assertEqual(parse_damage(raw), 0.0)
 
     def test_garbage_raises_rather_than_becoming_zero(self):
-        # A silent zero here is a mislabelled county-quarter, which is the one
+        # A silent zero here is a mislabelled region-period, which is the one
         # class of bug the harness cannot detect downstream.
         for bad in ("unknown", "12X", "1.2.3K", "-5K"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
@@ -45,106 +44,171 @@ class TestDamageParsing(unittest.TestCase):
 
 
 class TestDamageThreshold(unittest.TestCase):
+    def setUp(self):
+        self.c = make_contract()
+
     def test_property_at_threshold_counts(self):
-        self.assertTrue(is_damaging(make_event(damage=CONTRACT.damage_property_usd_min)))
+        self.assertTrue(is_damaging(make_event(damage=self.c.damage_property_usd_min), self.c))
 
     def test_property_below_threshold_does_not(self):
         self.assertFalse(
-            is_damaging(make_event(damage=CONTRACT.damage_property_usd_min - 1))
+            is_damaging(make_event(damage=self.c.damage_property_usd_min - 1), self.c)
         )
 
     def test_casualties_count_regardless_of_property_damage(self):
-        self.assertTrue(is_damaging(make_event(damage=0.0, injuries=1)))
-        self.assertTrue(is_damaging(make_event(damage=0.0, deaths=1)))
+        self.assertTrue(is_damaging(make_event(damage=0.0, injuries=1), self.c))
+        self.assertTrue(is_damaging(make_event(damage=0.0, deaths=1), self.c))
 
     def test_harmless_event_is_not_damaging(self):
-        self.assertFalse(is_damaging(make_event(damage=0.0)))
+        self.assertFalse(is_damaging(make_event(damage=0.0), self.c))
+
+    def test_threshold_comes_from_the_contract(self):
+        strict = make_contract(damaging={"property_usd_min": 1_000_000.0})
+        self.assertFalse(is_damaging(make_event(damage=50_000.0), strict))
+        no_casualties = make_contract(damaging={"count_casualties": False})
+        self.assertFalse(is_damaging(make_event(injuries=3), no_casualties))
 
 
 class TestCountyFips(unittest.TestCase):
     def test_pads_both_components(self):
-        self.assertEqual(county_fips("22", "5"), "22005")
+        self.assertEqual(county_fips("48", "5"), "48005")
         self.assertEqual(county_fips("1", "1"), "01001")
         self.assertEqual(county_fips("06", "037"), "06037")
 
 
-class TestPanel(unittest.TestCase):
-    def setUp(self):
-        self.counties = ["22001", "22003", "22005"]
-        self.years = [2010, 2011]
-
-    def test_panel_is_dense(self):
-        panel = build_panel([], self.counties, self.years)
-        self.assertEqual(len(panel), 3 * 2 * 4)
-        self.assertEqual(sum(panel.labels), 0)
-        self.assertEqual(panel.base_rate, 0.0)
-
-    def test_damaging_event_marks_exactly_one_cell(self):
-        event = make_event(year=2010, month=8, county="22003", damage=50_000)
-        panel = build_panel([event], self.counties, self.years)
-        self.assertEqual(sum(panel.labels), 1)
-        positives = [u for u, y in panel if y == 1]
-        self.assertEqual(positives, [("22003", 2010, 3)])  # August -> Q3
-
-    def test_two_events_in_one_quarter_still_mark_one_cell(self):
-        events = [
-            make_event(year=2010, month=7, county="22003", damage=50_000),
-            make_event(year=2010, month=9, county="22003", damage=90_000),
-        ]
-        panel = build_panel(events, self.counties, self.years)
-        self.assertEqual(sum(panel.labels), 1)
-
-    def test_non_hazard_event_types_are_ignored(self):
-        event = make_event(event_type="Tornado", year=2010, county="22003", damage=1e6)
-        panel = build_panel([event], self.counties, self.years)
-        self.assertEqual(sum(panel.labels), 0)
-
-    def test_zone_coded_rows_are_dropped(self):
-        # CZ_TYPE 'Z' rows are forecast zones, which do not join to counties.
-        event = make_event(year=2010, county="22003", damage=1e6)
-        zoned = type(event)(**{**event.__dict__, "cz_type": "Z"})
-        panel = build_panel([zoned], self.counties, self.years)
-        self.assertEqual(sum(panel.labels), 0)
-
-    def test_events_outside_the_county_universe_are_dropped(self):
-        event = make_event(year=2010, county="48999", damage=1e6)
-        panel = build_panel([event], self.counties, self.years)
-        self.assertEqual(sum(panel.labels), 0)
-
+class TestPeriods(unittest.TestCase):
     def test_quarter_boundaries(self):
         for month, quarter in ((1, 1), (3, 1), (4, 2), (6, 2), (7, 3), (9, 3), (10, 4), (12, 4)):
             with self.subTest(month=month):
-                self.assertEqual(make_event(month=month).quarter, quarter)
+                self.assertEqual(make_event(month=month).period_index(4), quarter)
+
+    def test_month_and_year_periods(self):
+        for month in range(1, 13):
+            self.assertEqual(make_event(month=month).period_index(12), month)
+            self.assertEqual(make_event(month=month).period_index(1), 1)
+
+    def test_unit_for_uses_the_period(self):
+        e = make_event(year=2010, month=8, county="99003")
+        self.assertEqual(e.unit_for(4), ("99003", 2010, 3))
+        self.assertEqual(e.unit_for(12), ("99003", 2010, 8))
+
+
+class TestPanel(unittest.TestCase):
+    def setUp(self):
+        self.c = make_contract()
+        self.regions = ["99001", "99003", "99005"]
+        self.years = [2010, 2011]
+
+    def build(self, events, contract=None, regions=None, years=None):
+        return build_panel(
+            events, regions or self.regions, years or self.years, contract or self.c
+        )
+
+    def test_panel_is_dense(self):
+        panel = self.build([])
+        self.assertEqual(len(panel), 3 * 2 * 4)
+        self.assertEqual(sum(panel.labels), 0)
+        self.assertEqual(panel.base_rate, 0.0)
+        self.assertEqual(panel.regions, tuple(self.regions))
+
+    def test_panel_density_follows_the_period(self):
+        self.assertEqual(len(self.build([], make_contract(period="month"))), 3 * 2 * 12)
+        self.assertEqual(len(self.build([], make_contract(period="year"))), 3 * 2 * 1)
+
+    def test_damaging_event_marks_exactly_one_cell(self):
+        event = make_event(year=2010, month=8, county="99003", damage=50_000)
+        panel = self.build([event])
+        self.assertEqual(sum(panel.labels), 1)
+        positives = [u for u, y in panel if y == 1]
+        self.assertEqual(positives, [("99003", 2010, 3)])  # August -> Q3
+
+    def test_monthly_contract_marks_the_month(self):
+        event = make_event(year=2010, month=8, county="99003", damage=50_000)
+        panel = self.build([event], make_contract(period="month"))
+        positives = [u for u, y in panel if y == 1]
+        self.assertEqual(positives, [("99003", 2010, 8)])
+
+    def test_two_events_in_one_period_still_mark_one_cell(self):
+        events = [
+            make_event(year=2010, month=7, county="99003", damage=50_000),
+            make_event(year=2010, month=9, county="99003", damage=90_000),
+        ]
+        self.assertEqual(sum(self.build(events).labels), 1)
+
+    def test_only_the_contracts_event_types_count(self):
+        event = make_event(event_type="Tornado", year=2010, county="99003", damage=1e6)
+        self.assertEqual(sum(self.build([event]).labels), 0)
+        tornado = make_contract(hazard="tornado")
+        self.assertEqual(sum(self.build([event], tornado).labels), 1)
+
+    def test_zone_coded_rows_are_dropped(self):
+        # CZ_TYPE 'Z' rows are forecast zones, which do not join to counties.
+        event = make_event(year=2010, county="99003", damage=1e6, cz_type="Z")
+        self.assertEqual(sum(self.build([event]).labels), 0)
+
+    def test_events_outside_the_region_universe_are_dropped(self):
+        event = make_event(year=2010, county="98999", damage=1e6)
+        self.assertEqual(sum(self.build([event]).labels), 0)
+
+    def test_panel_carries_the_contracts_identity(self):
+        panel = self.build([])
+        self.assertEqual(panel.hazard, self.c.hazard)
+        self.assertEqual(panel.scope, self.c.scope_key)
+        self.assertEqual(panel.period, self.c.period)
 
     def test_digest_is_order_independent_and_content_sensitive(self):
-        a = build_panel(
-            [make_event(year=2010, month=8, county="22003", damage=50_000)],
-            self.counties,
-            self.years,
-        )
+        a = self.build([make_event(year=2010, month=8, county="99003", damage=50_000)])
         b = build_panel(
-            [make_event(year=2010, month=8, county="22003", damage=50_000)],
-            list(reversed(self.counties)),
+            [make_event(year=2010, month=8, county="99003", damage=50_000)],
+            list(reversed(self.regions)),
             list(reversed(self.years)),
+            self.c,
         )
         self.assertEqual(a.digest(), b.digest())
+        self.assertNotEqual(a.digest(), self.build([]).digest())
 
-        c = build_panel([], self.counties, self.years)
-        self.assertNotEqual(a.digest(), c.digest())
+    def test_digest_distinguishes_contracts_over_identical_units(self):
+        a = self.build([])
+        b = self.build([], make_contract(hazard="tornado"))
+        self.assertNotEqual(a.digest(), b.digest())
 
     def test_units_digest_ignores_labels(self):
-        a = build_panel(
-            [make_event(year=2010, month=8, county="22003", damage=50_000)],
-            self.counties,
-            self.years,
-        )
-        b = build_panel([], self.counties, self.years)
+        a = self.build([make_event(year=2010, month=8, county="99003", damage=50_000)])
+        b = self.build([])
         self.assertEqual(a.units_digest(), b.units_digest())
         self.assertNotEqual(a.digest(), b.digest())
 
-    def test_unknown_hazard_raises(self):
-        with self.assertRaises(KeyError):
-            build_panel([], self.counties, self.years, hazard="volcano")
+
+class TestDiagnostics(unittest.TestCase):
+    def test_counts_where_events_went(self):
+        c = make_contract()
+        events = [
+            make_event(year=2010, month=8, county="99003", damage=50_000),   # positive
+            make_event(year=2010, month=8, county="99003", damage=0),        # harmless
+            make_event(year=2010, month=2, county="99003", damage=1e6, cz_type="Z"),  # zone
+            make_event(year=2010, month=2, county="98001", damage=1e6),      # outside
+            make_event(year=1999, month=2, county="99003", damage=1e6),      # wrong year
+            make_event(event_type="Hail", year=2010, county="99003", damage=1e6),  # other hazard
+        ]
+        d = diagnose(events, ["99001", "99003"], [2010, 2011], c)
+        self.assertEqual(d.n_events, 5)
+        self.assertEqual(d.n_in_years, 4)
+        self.assertEqual(d.n_county_coded, 2)
+        self.assertEqual(d.n_zone_coded, 1)
+        self.assertEqual(d.n_outside_universe, 1)
+        self.assertEqual(d.n_damaging, 1)
+        self.assertEqual(d.n_positive_units, 1)
+        self.assertNotIn("WARNING", d.format())
+
+    def test_warns_when_a_hazard_is_mostly_zone_coded(self):
+        c = make_contract(hazard="heat")
+        events = [
+            make_event(event_type="Heat", year=2010, county="99003", cz_type="Z", deaths=1)
+            for _ in range(9)
+        ] + [make_event(event_type="Heat", year=2010, county="99003", deaths=1)]
+        d = diagnose(events, ["99003"], [2010], c)
+        self.assertGreaterEqual(d.zone_share, 0.5)
+        self.assertIn("WARNING", d.format())
 
 
 if __name__ == "__main__":

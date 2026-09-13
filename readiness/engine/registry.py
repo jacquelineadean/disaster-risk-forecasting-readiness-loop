@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import Callable
 
 from readiness.engine.baseline import (
-    ClimatologyCountyQuarter,
-    ClimatologyGlobal,
+    ClimatologyPooled,
+    ClimatologySeasonal,
     LeakyOracle,
     PersistenceLastYear,
 )
@@ -35,17 +35,17 @@ class ModelSpec:
 
 
 REGISTRY: dict[str, ModelSpec] = {
-    "climatology-global": ModelSpec(
-        ClimatologyGlobal,
+    "climatology-pooled": ModelSpec(
+        ClimatologyPooled,
         "training-period base rate, issued everywhere; the contract's reference",
     ),
-    "climatology-county-quarter": ModelSpec(
-        ClimatologyCountyQuarter,
-        "per-county seasonal frequency, shrunk toward state and global rates",
+    "climatology-seasonal": ModelSpec(
+        ClimatologySeasonal,
+        "per-region, per-period-of-year frequency, shrunk toward scope and pooled rates",
     ),
     "persistence-last-year": ModelSpec(
         PersistenceLastYear,
-        "same quarter last year repeated; sharp and badly calibrated on purpose",
+        "same period last year repeated; sharp and badly calibrated on purpose",
     ),
     "leaky-oracle": ModelSpec(
         LeakyOracle,
@@ -54,6 +54,11 @@ REGISTRY: dict[str, ModelSpec] = {
         is_canary_target=True,
     ),
 }
+
+
+def needs_panel(name: str) -> bool:
+    spec = REGISTRY.get(name)
+    return bool(spec and spec.needs_panel)
 
 
 def build_model(name: str, *, panel: Panel | None = None, **kwargs):

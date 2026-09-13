@@ -9,36 +9,24 @@ Report §6:
 import unittest
 
 from readiness.engine.baseline import (
-    ClimatologyCountyQuarter,
-    ClimatologyGlobal,
+    ClimatologyPooled,
+    ClimatologySeasonal,
     LeakyOracle,
 )
 from readiness.harness import canary, scoring
-from readiness.harness.splits import TRAIN, VALIDATE, TrainingView, split_panel
-from tests.fixtures import make_panel
-
-
-def _screen(model, panel, split=VALIDATE):
-    card = scoring.score(model, panel, split)
-    _units, probs, outcomes = scoring.predictions_for(model, panel, split)
-    view = TrainingView(split_panel(panel, TRAIN), TRAIN)
-    report = canary.run(
-        probs=probs,
-        outcomes=outcomes,
-        brier_skill_score=card.brier_skill_score,
-        auc=card.auc,
-        view=view,
-        declared_train_digest=getattr(model, "training_digest", None),
-    )
-    return card, report
+from tests.fixtures import make_contract, make_panel
 
 
 class TestCanaryRejectsLeakage(unittest.TestCase):
     def setUp(self):
-        self.panel = make_panel(n_counties=10)
+        self.c = make_contract()
+        self.panel = make_panel(contract=self.c, n_regions=10)
+
+    def screen(self, model):
+        return scoring.screen(model, self.panel, self.c, "validate")
 
     def test_leaky_oracle_is_rejected(self):
-        card, report = _screen(LeakyOracle(self.panel), self.panel)
+        card, report = self.screen(LeakyOracle(self.panel))
         self.assertTrue(
             report.rejected,
             f"harness accepted a leaked model (BSS {card.brier_skill_score:+.4f}, "
@@ -49,12 +37,12 @@ class TestCanaryRejectsLeakage(unittest.TestCase):
         # The point of the canary: without it, the contract would happily pass
         # this model. That is what makes "iterate until the score clears"
         # dangerous.
-        card, _ = _screen(LeakyOracle(self.panel), self.panel)
+        card, _ = self.screen(LeakyOracle(self.panel))
         self.assertGreater(card.brier_skill_score, 0.99)
         self.assertGreater(card.auc, 0.99)
 
     def test_multiple_independent_checks_trip(self):
-        _card, report = _screen(LeakyOracle(self.panel), self.panel)
+        _card, report = self.screen(LeakyOracle(self.panel))
         tripped = {f.check for f in report.findings if f.tripped}
         self.assertIn("implausible skill", tripped)
         self.assertIn("train provenance", tripped)
@@ -62,33 +50,40 @@ class TestCanaryRejectsLeakage(unittest.TestCase):
     def test_a_subtler_oracle_still_trips_on_provenance(self):
         # Lower confidence keeps BSS under the skill ceiling on some samples,
         # but the model still cannot produce a matching training digest.
-        _card, report = _screen(LeakyOracle(self.panel, confidence=0.62), self.panel)
-        provenance = next(
-            f for f in report.findings if f.check == "train provenance"
-        )
+        _card, report = self.screen(LeakyOracle(self.panel, confidence=0.62))
+        provenance = next(f for f in report.findings if f.check == "train provenance")
         self.assertTrue(provenance.tripped)
         self.assertTrue(report.rejected)
+
+    def test_rejection_does_not_depend_on_the_hazard(self):
+        for hazard, period in (("tornado", "quarter"), ("heat", "month"), ("wildfire", "year")):
+            with self.subTest(hazard=hazard):
+                c = make_contract(hazard=hazard, period=period)
+                panel = make_panel(contract=c, n_regions=6)
+                _card, report = scoring.screen(LeakyOracle(panel), panel, c, "validate")
+                self.assertTrue(report.rejected)
 
 
 class TestCanaryClearsHonestModels(unittest.TestCase):
     """A canary that rejects everything is not a canary, it is a wall."""
 
     def setUp(self):
-        self.panel = make_panel(n_counties=10)
+        self.c = make_contract()
+        self.panel = make_panel(contract=self.c, n_regions=10)
 
-    def test_global_climatology_is_clear(self):
-        _card, report = _screen(ClimatologyGlobal(), self.panel)
+    def test_pooled_climatology_is_clear(self):
+        _card, report = scoring.screen(ClimatologyPooled(), self.panel, self.c, "validate")
         self.assertFalse(report.rejected, report.format())
 
-    def test_county_quarter_climatology_is_clear(self):
-        _card, report = _screen(ClimatologyCountyQuarter(), self.panel)
+    def test_seasonal_climatology_is_clear(self):
+        _card, report = scoring.screen(ClimatologySeasonal(), self.panel, self.c, "validate")
         self.assertFalse(report.rejected, report.format())
 
     def test_a_genuinely_skilful_model_is_not_punished(self):
-        # The county-quarter climatology should beat global climatology on a
+        # The seasonal climatology should beat the pooled climatology on a
         # panel built with real spatial and seasonal structure — and clearing
         # the contract must not itself look like leakage.
-        card, report = _screen(ClimatologyCountyQuarter(), self.panel)
+        card, report = scoring.screen(ClimatologySeasonal(), self.panel, self.c, "validate")
         self.assertGreater(card.brier_skill_score, 0.0)
         self.assertFalse(report.rejected)
 

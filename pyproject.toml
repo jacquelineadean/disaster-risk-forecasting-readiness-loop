@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "readiness-loop"
-version = "0.1.0"
+version = "0.2.0"
 description = "An open-source agentic loop that forecasts disaster risk from public data and validates its own probabilities against history."
 readme = "README.md"
 requires-python = ">=3.10"
