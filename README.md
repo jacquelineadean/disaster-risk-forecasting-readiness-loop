@@ -38,14 +38,14 @@ make verify CONTRACT=flood-xx     # check the Phase 0 exit criteria
 ```
 
 ```bash
-make test                         # 224 tests, no network needed
+make test                         # 250 tests, no network needed
 ```
 
 Replace `XX` with a two-letter US state, or omit `--state` for the whole
-country, and `inland_flood` with any hazard from `readiness hazards`. When only
-one contract is registered, `CONTRACT=` can be left off. Ready-made example
-contracts, with their ledgers, are added in the examples step; `contracts/`
-is empty in a fresh clone.
+country, and `inland_flood` with any hazard from `readiness hazards`. Three
+example contracts ship registered, with their ledgers and blessed fingerprints
+— see [Examples](#examples) — so `make loop CONTRACT=tornado-ok` works from a
+clean clone once the data is pulled.
 
 ---
 
@@ -97,6 +97,70 @@ becoming an elaborate way to memorise the past.
 
 Phase 0 exit criteria met for flood-xx.
 ```
+
+---
+
+## Examples
+
+Three contracts are registered in [`contracts/`](contracts/). They were chosen
+to differ in every dimension the contract controls, so that the same harness
+is seen running across hazards, scopes, periods and zone policies:
+
+| contract | hazard | scope | period | zone events | panel |
+|---|---|---|---|---|---|
+| `inland-flood-la` | inland flood | one state (64 parishes) | quarter | dropped (county-coded hazard) | 7,680 units, base rate 8.0% |
+| `tornado-ok` | tornado | one state (77 counties) | quarter | dropped (county-coded hazard) | 9,240 units, base rate 6.8% |
+| `tropical-cyclone-gulf` | tropical cyclone | five states (534 counties) | month | expanded via the NWS crosswalk | 192,240 units, base rate 0.66% |
+
+Each has been run through `make loop`, blessed and verified. The ledgers are
+committed; `make verify CONTRACT=<name>` reproduces them from a clean clone.
+
+```
+inland-flood-la
+id        model                        split           BSS     AUC  verdict
+exp-0001  climatology-pooled@1.0.0     validate    +0.0000  0.5000  FAIL
+exp-0002  climatology-seasonal@1.0.0   validate    +0.0169  0.5957  FAIL
+exp-0003  persistence-last-year@1.0.0  validate    -0.0526  0.5012  FAIL
+exp-0004  leaky-oracle@1.0.0           validate    +1.0000  1.0000  REJECTED
+
+tornado-ok
+exp-0001  climatology-pooled@1.0.0     validate    +0.0000  0.5000  FAIL
+exp-0002  climatology-seasonal@1.0.0   validate    +0.1201  0.8175  FAIL
+exp-0003  persistence-last-year@1.0.0  validate    +0.0114  0.5401  FAIL
+exp-0004  leaky-oracle@1.0.0           validate    +1.0000  1.0000  REJECTED
+
+tropical-cyclone-gulf
+exp-0001  climatology-pooled@1.0.0     validate    +0.0000  0.5000  FAIL
+exp-0002  climatology-seasonal@1.0.0   validate    +0.0092  0.8484  PASS
+exp-0003  persistence-last-year@1.0.0  validate    -0.0588  0.5000  FAIL
+exp-0004  leaky-oracle@1.0.0           validate    +0.9999  1.0000  REJECTED
+```
+
+Read the tables as assertions about the harness, not as forecasts:
+
+1. **The reference scores exactly 0.0000 / 0.5000 on every contract**, and
+   still fails every contract, because being climatology is not beating it.
+2. **The same seasonal model lands differently on each hazard.** On the
+   flood contract it has slight skill and misses the AUC floor; on tornadoes
+   it discriminates well (AUC 0.82) and fails only on calibration, a 12-point
+   miss in one bin; on monthly tropical cyclones it *passes* — the season is
+   so sharp that knowing the region and the month clears every clause. Its
+   skill score there is +0.009, because at a 0.66% base rate the pooled
+   reference is already nearly right nearly everywhere. A passing contract
+   is permission to spend one test touch, not a claim of a forecast.
+3. **The persistence baseline is rejected on every contract**, for a different
+   clause each time. On the tornado contract it is the only model that gains
+   skill from last year's events; on tropical cyclones it has none.
+4. **The leaky oracle is rejected everywhere**, tripping all four canary
+   checks. Running the canary across base rates from 8% to 0.66% is what
+   exposed — and fixed — a check that had been calibrated to one hazard:
+   judged as a pooled rate, near-zero forecasts on a rare hazard "agree" with
+   the outcomes almost always and looked like a leak. The check is now per
+   outcome class.
+
+The first contract is the original Phase 0 series, and its numbers are
+unchanged by the move to contracts-as-data. Register a fourth with
+`readiness register` and the same table comes out for it.
 
 ---
 
@@ -288,7 +352,7 @@ readiness/
   engine/            proposable models: climatologies, persistence, the canary target
   agent/             orchestrator + subagent definitions
   cli.py             the `readiness` command
-contracts/           registered contracts, one JSON file each
+contracts/           registered contracts, one JSON file each; three examples ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
@@ -296,7 +360,7 @@ skills/              agent runbooks: verification protocol, experiment-card form
 plans/               scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
-tests/               224 tests, no network required
+tests/               250 tests, no network required
 ```
 
 ---

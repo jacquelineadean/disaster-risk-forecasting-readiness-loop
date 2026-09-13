@@ -630,13 +630,15 @@ def describe_registry(directory: pathlib.Path | None = None) -> str:
     if not known:
         return f"no contracts registered in {contracts_dir(directory)}"
     width = max(len(n) for n in known) + 2
+    hazard_w = max([len("hazard")] + [len(c.hazard) for c in known.values()]) + 2
+    scope_w = max([len("scope")] + [len(c.scope_key) for c in known.values()]) + 2
     lines = [
-        f"  {'name':<{width}}{'hazard':<18}{'scope':<14}{'period':<9}"
+        f"  {'name':<{width}}{'hazard':<{hazard_w}}{'scope':<{scope_w}}{'period':<9}"
         f"{'sha256':<18}description"
     ]
     for name, c in known.items():
         lines.append(
-            f"  {name:<{width}}{c.hazard:<18}{c.scope_key:<14}{c.period:<9}"
-            f"{c.digest():<18}{c.description}"
+            f"  {name:<{width}}{c.hazard:<{hazard_w}}{c.scope_key:<{scope_w}}"
+            f"{c.period:<9}{c.digest():<18}{c.description}"
         )
     return "\n".join(lines)

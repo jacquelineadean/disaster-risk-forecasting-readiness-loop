@@ -1,0 +1,38 @@
+{
+  "_contract": "d01b00aa1baedc98",
+  "_data_version": "32c8473f20ad3de0",
+  "climatology-pooled": {
+    "auc": 0.5,
+    "base_rate": 0.008177278401997503,
+    "brier_score": 0.008113492714416748,
+    "brier_score_reference": 0.008113492714416748,
+    "brier_skill_score": 0.0,
+    "contract_digest": "d01b00aa1baedc98",
+    "n_positive": 262,
+    "n_units": 32040,
+    "panel_digest": "ca590494d64af8db",
+    "reliability": 3.0821944830198175e-06,
+    "reliability_bins_sha256": "1de25c69ea7de73e",
+    "resolution": 0.0,
+    "sharpness": 0.0,
+    "train_digest": "9332bf99fc865573",
+    "uncertainty": 0.008110410519933728
+  },
+  "climatology-seasonal": {
+    "auc": 0.8484001486457335,
+    "base_rate": 0.008177278401997503,
+    "brier_score": 0.008038684974037025,
+    "brier_score_reference": 0.008113492714416748,
+    "brier_skill_score": 0.009220164855364699,
+    "contract_digest": "d01b00aa1baedc98",
+    "n_positive": 262,
+    "n_units": 32040,
+    "panel_digest": "ca590494d64af8db",
+    "reliability": 1.7550464217310045e-05,
+    "reliability_bins_sha256": "f4665e24af2c1a54",
+    "resolution": 4.9764026926895236e-05,
+    "sharpness": 0.017335172760947187,
+    "train_digest": "9332bf99fc865573",
+    "uncertainty": 0.008110410519933728
+  }
+}

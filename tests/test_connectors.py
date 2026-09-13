@@ -143,8 +143,10 @@ class TestParseYear(unittest.TestCase):
         self.assertEqual(len(grouped["01"]), 2)  # "1" and "01" are the same state
 
     def test_filters_to_requested_states(self):
-        grouped = storm_events.parse_year(self.data, ["48", "56"])
+        stats: dict = {}
+        grouped = storm_events.parse_year(self.data, ["48", "56"], stats)
         self.assertEqual(sorted(grouped), ["48", "56"])
+        self.assertEqual(stats["n_total"], 4)  # the national count, not the filtered one
 
     def test_schema_drift_is_an_error(self):
         buf = io.StringIO()
@@ -223,7 +225,11 @@ class TestSnapshotScopes(SnapshotCase):
         events = storm_events.load_events(out)
         self.assertEqual({e.state_fips for e in events}, {"22", "48", "56"})
         self.assertEqual(out.name, "all_extract.jsonl")
-        self.assertIn("events nationally", self.manifest.records["noaa/storm_events/2000"].notes)
+        self.assertIn("3 events nationally", self.manifest.records["noaa/storm_events/2000"].notes)
+
+    def test_state_scoped_pulls_still_record_the_national_count(self):
+        self.snapshot(["48"])
+        self.assertIn("3 events nationally", self.manifest.records["noaa/storm_events/2000"].notes)
 
     def test_a_second_state_reuses_kept_raw_files_without_downloading(self):
         self.snapshot(["48"], keep_raw=True)

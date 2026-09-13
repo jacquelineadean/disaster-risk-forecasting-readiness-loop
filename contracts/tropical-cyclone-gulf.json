@@ -1,0 +1,51 @@
+{
+  "name": "tropical-cyclone-gulf",
+  "version": "1.0.0",
+  "description": "Damaging tropical cyclones across the Gulf coast states, monthly, zone events expanded to counties.",
+  "hazard": "tropical_cyclone",
+  "event_types": [
+    "Hurricane",
+    "Hurricane (Typhoon)",
+    "Tropical Storm",
+    "Tropical Depression"
+  ],
+  "scope": {
+    "country": "US",
+    "states": [
+      "TX",
+      "LA",
+      "MS",
+      "AL",
+      "FL"
+    ]
+  },
+  "period": "month",
+  "damaging": {
+    "property_usd_min": 10000.0,
+    "count_casualties": true
+  },
+  "zone_policy": "expand",
+  "splits": {
+    "train": [
+      1996,
+      2015
+    ],
+    "validate": [
+      2016,
+      2020
+    ],
+    "test": [
+      2021,
+      2025
+    ]
+  },
+  "test_touch_budget": 1,
+  "reference_model": "climatology-pooled",
+  "thresholds": {
+    "min_brier_skill_score": 0.0,
+    "reliability_tolerance_pp": 0.05,
+    "reliability_min_bin_count": 30,
+    "min_auc": 0.7,
+    "n_reliability_bins": 10
+  }
+}
