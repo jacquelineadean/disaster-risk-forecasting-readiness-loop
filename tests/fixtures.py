@@ -60,12 +60,15 @@ def make_panel(
     years: tuple[int, ...] | None = None,
     seed: int = 20260805,
     seasonal: bool = True,
+    rare: bool = False,
 ) -> Panel:
     """A dense region x year x period panel with a seasonal, spatial signal.
 
     The middle of the year is wetter and low-numbered regions are wetter, so a
     seasonal climatology genuinely has something to find — otherwise tests of
-    "does the harness detect skill" would be testing noise.
+    "does the harness detect skill" would be testing noise. `rare` scales the
+    whole thing down to a base rate well under 1%, the regime of hazards such
+    as tropical cyclones at monthly resolution.
     """
     contract = contract or make_contract()
     ppy = contract.periods_per_year
@@ -74,17 +77,18 @@ def make_panel(
     rng = random.Random(seed)
     units: list[tuple[str, int, int]] = []
     labels: list[int] = []
+    scale = 0.02 if rare else 1.0
 
     for i in range(n_regions):
         region = region_id(i)
-        region_effect = 0.40 * 0.88**i if seasonal else 0.12
+        region_effect = (0.40 * 0.88**i if seasonal else 0.12) * scale
         for year in years:
             for period in range(1, ppy + 1):
                 # A cosine annual cycle peaking mid-year, whatever the period
                 # length: quarters see roughly 0.6x / 1.4x, months 0.4x / 1.6x.
                 phase = (period - 0.5) / ppy  # 0..1 through the year
                 season = (1.0 - 0.6 * math.cos(2 * math.pi * phase)) if seasonal else 1.0
-                p = max(0.01, min(0.95, region_effect * season))
+                p = max(0.0002 if rare else 0.01, min(0.95, region_effect * season))
                 units.append((region, year, period))
                 labels.append(1 if rng.random() < p else 0)
 
