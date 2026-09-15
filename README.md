@@ -4,6 +4,11 @@ An open-source, agentic system that forecasts natural-disaster risk from public
 data, **validates its own probabilities against history**, and iterates until
 they can be trusted — then turns them into emergency plans.
 
+**The website is published at
+[jacquelineadean.github.io/disaster-risk-forecasting-readiness-loop](https://jacquelineadean.github.io/disaster-risk-forecasting-readiness-loop/)** —
+the design, the walkthrough, every committed ledger, and a sandbox that runs
+this package in your browser. Nothing to install.
+
 The research briefing that specifies this is in [`report/index.html`](report/index.html)
 (open it, or `make serve`). Everything below is the implementation; for a
 step-by-step tour with screenshots and a recording of a real run, see
@@ -170,6 +175,8 @@ unchanged by the move to contracts-as-data. Register a fourth with
 
 ## The website
 
+**<https://jacquelineadean.github.io/disaster-risk-forecasting-readiness-loop/>**
+
 [`site/`](site/) is a static overview website: the system design, the
 walkthrough with its captured transcripts, every committed ledger with its
 reliability diagrams and a hash chain your browser re-verifies, and a
@@ -197,9 +204,12 @@ run the loop on it; the Gulf states are packed with tropical-cyclone rows only.
 The whole archive is about 1 MB.
 
 [`.github/workflows/site.yml`](.github/workflows/site.yml) builds and publishes
-the site with GitHub Pages on every push to `main` (enable it under Settings →
-Pages → Source: GitHub Actions). It pulls the pinned data once per data
-version and caches it.
+the site with GitHub Pages on every push to `main`. It pulls the pinned data
+once per data version and caches it. Publishing needs Pages switched on for the
+repository once, by hand — Settings → Pages → Source: "GitHub Actions" — which
+is the one step the workflow cannot take for itself: creating a Pages site
+needs admin rights, and is refused to the workflow's own token whatever its
+`permissions:` block asks for.
 
 ---
 
