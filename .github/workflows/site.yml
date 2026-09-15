@@ -6,7 +6,12 @@
 # first — once per data version, thanks to the cache keyed on the manifest —
 # and carries on without them if NOAA is unreachable (the site then says so).
 #
-# Enable it under Settings → Pages → Source: "GitHub Actions".
+# Pages must be switched on for the repository before any of this can publish:
+# Settings → Pages → Source: "GitHub Actions". That is a one-time click by
+# someone with admin rights. The workflow cannot do it for itself — creating a
+# Pages site is refused to GITHUB_TOKEN ("Resource not accessible by
+# integration"), with or without actions/configure-pages, and no permissions:
+# block here can grant it.
 
 name: site
 
