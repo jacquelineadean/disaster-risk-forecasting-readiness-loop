@@ -20,12 +20,15 @@ import unittest
 import zipfile
 from unittest import mock
 
-from readiness import contracts, data as data_mod
+from readiness import cite, contracts, data as data_mod
+from readiness.connectors.base import Manifest
+from readiness.connectors import usa_structures
 from readiness.agent import orchestrator
 from readiness.cli import build_parser
 from readiness.engine.features import FEATURE_SETS
 from readiness.engine.registry import REGISTRY
 from tests.fixtures import make_contract
+from tests.test_connectors import PAGES, FakeLayer
 from tests.test_orchestrator import synthetic_dataset
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -255,6 +258,128 @@ class TestBuildSite(unittest.TestCase):
             self.assertEqual(sum(tape["freq"]), panel["n_positive"])
             self.assertEqual(len(tape["counts"]), tape["n_periods"])
 
+    # --- Phase 2: the fleet, the briefs and the exposure pins ------------------
+
+    def test_fleet_json_has_one_ledger_only_row_per_registered_contract(self):
+        rows = {r["name"]: r for r in self._json("fleet.json")}
+        registry = contracts.registered()
+        self.assertEqual(set(rows), set(registry))
+        self.assertEqual(len(rows), 9)
+        ledgers = self._json("ledgers.json")
+        for name, c in registry.items():
+            row = rows[name]
+            self.assertEqual(row["national"], not c.states)
+            self.assertEqual(row["hazard"], c.hazard)
+            self.assertEqual(row["period"], c.period)
+            self.assertEqual(row["n_cards"], len(ledgers[name]["cards"]))
+            self.assertIsInstance(row["validate_passes"], list)
+            self.assertIn("test_card", row)
+            self.assertIsInstance(row["phase1_ok"], bool)
+            self.assertTrue(row["phase1_detail"])
+        self.assertEqual(sum(r["national"] for r in rows.values()), 6)
+        # contracts.json marks the same six, so the pages need not re-derive it.
+        marked = {c["name"] for c in self._json("contracts.json") if c["national"]}
+        self.assertEqual(marked, {n for n, r in rows.items() if r["national"]})
+
+    def test_briefs_json_lists_only_briefs_that_validate(self):
+        # None ship in the repository: every brief needs a passing test card.
+        shipped = self._json("briefs.json")
+        self.assertIsInstance(shipped, list)
+        for entry in shipped:
+            self.assertEqual(
+                set(entry),
+                {"fips", "period", "title", "contracts", "html", "generated_at", "inputs"},
+            )
+            self.assertTrue((self.out / entry["html"]).exists())
+        # With a briefs/ tree: the validating brief is listed with its HTML
+        # copied; the one with an uncited sentence is not, whatever its file says.
+        nws = cite.Claim("g1", "official alerting", None, cite.Source("guidance", "nws-ipaws"))
+        total = cite.Claim("n", "structures", 1234, cite.Source("manifest", "fema/x"), "{:,}")
+        prob = cite.Claim("p", "chance", 0.12, cite.Source("issued", "issued/hail-us/2026-Q4.json#2026-Q4"), "{:.0%}")
+        good = cite.Document(
+            "Adair County, OK — 2026-Q4", "county-brief",
+            [cite.Sentence.from_text("12% chance of at least one damaging hail event [c:p]."),
+             cite.Sentence.from_text("The county holds 1,234 structures [c:n]."),
+             cite.Sentence.from_text(f"{cite.NOT_A_WARNING_SENTENCE} [c:g1].")],
+            [prob, total, nws], "2026-09-16T00:00:00+00:00", {"contract": "hail-us"},
+        )
+        bad = cite.Document("Bad", "county-brief", [cite.Sentence("No citation here.")],
+                            [nws], "2026-09-16T00:00:00+00:00")
+        resolver = cite.DictResolver({
+            "issued": {"issued/hail-us/2026-Q4.json": {"2026-Q4"}}, "manifest": {"fema/x"},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            briefs = pathlib.Path(tmp) / "briefs"
+            (briefs / "40001").mkdir(parents=True)
+            (briefs / "40001" / "2026-Q4.json").write_text(cite.to_json(good))
+            (briefs / "40001" / "2026-Q4.html").write_text("<html>the committed page</html>")
+            (briefs / "40003").mkdir()
+            (briefs / "40003" / "2026-Q4.json").write_text(cite.to_json(bad))
+            out = pathlib.Path(tmp) / "generated"
+            self.build.build_briefs(out, contracts.registered(), briefs_dir=briefs,
+                                    resolver=resolver)
+            listed = json.loads((out / "briefs.json").read_text())
+            self.assertEqual([b["fips"] for b in listed], ["40001"])
+            self.assertEqual(listed[0]["period"], "2026-Q4")
+            self.assertEqual(listed[0]["contracts"], ["hail-us"])
+            self.assertEqual(listed[0]["html"], "briefs/40001/2026-Q4.html")
+            self.assertIn("the committed page", (out / listed[0]["html"]).read_text())
+            self.assertFalse((out / "briefs" / "40003").exists())
+
+    def test_the_brief_resolver_knows_the_ledgers_issued_files_and_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            issued = pathlib.Path(tmp) / "issued" / "tornado-ok"
+            issued.mkdir(parents=True)
+            (issued / "2026-Q4.json").write_text(json.dumps({"period": "2026-Q4"}))
+            r = self.build.brief_resolver(contracts.registered(), issued_dir=issued.parent)
+        # A committed card, by bare id and qualified by its contract.
+        self.assertIsNone(r.resolve(cite.Source("ledger", "exp-0001")))
+        self.assertIsNone(r.resolve(cite.Source("ledger", "tornado-ok/exp-0001#scorecard")))
+        self.assertIsNotNone(r.resolve(cite.Source("ledger", "exp-9999")))
+        self.assertIsNone(r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2026-Q4")))
+        self.assertIsNotNone(r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2027-Q1")))
+        self.assertIsNotNone(r.resolve(cite.Source("manifest", "not/a/key")))
+        self.assertIsNone(r.resolve(cite.Source("guidance", "nws-ipaws")))
+
+    def test_exposure_json_is_empty_until_a_state_is_pinned(self):
+        rows = self._json("exposure.json")
+        self.assertIsInstance(rows, list)
+        if not (data_mod.SNAPSHOT_DIR / "usa_structures").exists():
+            self.assertEqual(rows, [])
+        for row in rows:
+            self.assertEqual(
+                set(row), {"state_fips", "state", "n_counties", "total_structures",
+                           "vintage", "manifest_key", "digest"},
+            )
+        # A pinned synthetic state shows up as one row, coarser than the county.
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = pathlib.Path(tmp) / "snapshots"
+            snapshots.mkdir()
+            manifest = Manifest(path=snapshots / "manifest.json")
+            usa_structures.snapshot(["99"], snapshots, manifest, session=FakeLayer(PAGES),
+                                    page=3)
+            manifest.save()
+            out = pathlib.Path(tmp) / "generated"
+            self.build.build_exposure(out, snapshot_dir=snapshots)
+            rows = json.loads((out / "exposure.json").read_text())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["state_fips"], "99")
+        self.assertEqual(rows[0]["n_counties"], 2)
+        self.assertEqual(rows[0]["vintage"], 2023)
+        self.assertEqual(rows[0]["manifest_key"], "fema/usa_structures/99")
+        self.assertNotIn("rows", rows[0])
+
+    def test_every_page_links_the_briefs_page_in_the_shared_nav(self):
+        for page in sorted(SITE.glob("*.html")):
+            text = page.read_text(encoding="utf-8")
+            self.assertIn('<a data-page="briefs" href="briefs.html">', text, page.name)
+        briefs = (SITE / "briefs.html").read_text(encoding="utf-8")
+        self.assertIn('data-page="briefs"', briefs)
+        js = (SITE / "assets" / "briefs.js").read_text(encoding="utf-8")
+        for name in ("briefs.json", "fleet.json", "exposure.json"):
+            self.assertIn(f'"{name}"', js)
+        self.assertIn("readiness brief", js)  # the empty state says how one is produced
+
     def test_pages_share_one_top_bar_and_one_typeface(self):
         top = re.compile(r'<header class="top".*?</header>', re.S)
         font = re.compile(r'<link href="https://fonts\.googleapis\.com/css2\?[^"]*" rel="stylesheet">')
@@ -414,6 +539,30 @@ class TestSandboxModule(unittest.TestCase):
             self.assertEqual(code, 0, text)
             self.assertFalse((pathlib.Path(tmp) / "flood-zz"
                               / "test_touches.json").exists())
+
+    def test_phase2_writers_are_refused_and_fleet_status_runs(self):
+        # `issue` and `brief` write records the repository commits; `exposure
+        # snapshot` needs the network. Each is refused with the same shape as
+        # `snapshot`. `fleet --status` reads the packed ledgers and runs.
+        for argv in (("exposure", "snapshot", "--all-states"),
+                     ("issue", "logistic", "-c", "flood-zz", "--period", "2026-Q4"),
+                     ("brief", "--county", "40001", "--period", "2026-Q4")):
+            with self.subTest(command=" ".join(argv[:2])):
+                code, text = self.cli(*argv)
+                self.assertEqual(code, 2)
+                self.assertIn("is not available in the browser sandbox", text)
+        code, text = self.cli("fleet", "--status")
+        self.assertEqual(code, 0)
+        self.assertIn("flood-zz", text)
+
+    # INTEGRATOR: `verify --phase 2` (no -c) lands with the CLI cluster; this
+    # must run, not skip, after integration.
+    @unittest.skipUnless(parser_accepts("verify", "--phase", "2"),
+                         "the CLI in this tree has no `verify --phase 2`")
+    def test_verify_phase2_runs_in_the_browser(self):
+        code, text = self.cli("verify", "--phase", "2")
+        self.assertIn(code, (0, 1))
+        self.assertNotIn("is not available in the browser sandbox", text)
 
     def test_playground_test_refusal_names_promote(self):
         r = self.call("score_playground", contract="flood-zz",

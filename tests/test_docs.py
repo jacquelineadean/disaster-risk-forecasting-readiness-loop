@@ -13,7 +13,7 @@ import re
 import unittest
 from pathlib import Path
 
-from readiness import contracts
+from readiness import cite, contracts
 from readiness.cli import build_parser
 from readiness.engine.features import FEATURE_SETS
 from readiness.harness.features import STATIC, TRANSFORMS
@@ -23,6 +23,7 @@ README = REPO_ROOT / "README.md"
 HOW_IT_WORKS = REPO_ROOT / "docs" / "how-it-works.md"
 FEATURES_DOC = REPO_ROOT / "docs" / "features.md"
 BACKTEST_DOC = REPO_ROOT / "docs" / "backtest.md"
+BRIEF_DOC = REPO_ROOT / "docs" / "brief.md"
 
 # INTEGRATOR: the Phase 1 command surface. The subcommands and flags below are
 # implemented by the CLI cluster; the docs name them now. Until that parser is
@@ -39,8 +40,26 @@ PHASE1_FLAGS = (
     ("promote --spend-test-touch",
      ["promote", "m", "-c", "x", "--spend-test-touch"]),
 )
-#: Paths the README map names that arrive with the CLI cluster.
-PENDING_PATHS = {"readiness/backtest.py"}
+# INTEGRATOR: the Phase 2 command surface, implemented by the Phase 2 CLI
+# cluster (`readiness/issue.py`, `readiness/brief.py`, `exposure ...`). The
+# docs name it now; the parser-backed assertions skip until that parser is
+# merged and must run, not skip, afterwards.
+PHASE2_COMMANDS = {"exposure", "issue", "brief"}
+PHASE2_FLAGS = (
+    ("verify --phase 2", ["verify", "--phase", "2"]),
+    ("fleet --status", ["fleet", "--status"]),
+    ("contracts --names --national", ["contracts", "--names", "--national"]),
+    ("exposure snapshot --all-states", ["exposure", "snapshot", "--all-states"]),
+    ("exposure show --state", ["exposure", "show", "--state", "OK"]),
+    ("exposure spot-check --counts", ["exposure", "spot-check", "--counts", "x.csv"]),
+    ("issue --period --param",
+     ["issue", "m", "-c", "x", "--period", "2026-Q4", "--param", "l2=1"]),
+    ("brief --county --period --out",
+     ["brief", "--county", "40001", "--period", "2026-Q4", "--out", "d"]),
+    ("brief --state", ["brief", "--state", "OK", "--period", "2026-Q4"]),
+)
+#: Paths the README map names that arrive with the CLI clusters.
+PENDING_PATHS = {"readiness/backtest.py", "readiness/issue.py", "readiness/brief.py"}
 
 
 def parser_accepts(argv: list[str]) -> bool:
@@ -101,12 +120,12 @@ class TestReadmeCommandsExist(unittest.TestCase):
         available = parser_commands()
         missing = named - available
         self.assertEqual(
-            missing - PHASE1_COMMANDS, set(),
+            missing - PHASE1_COMMANDS - PHASE2_COMMANDS, set(),
             f"README's Commands block names subcommands the CLI does not have: {missing}",
         )
         if missing:
             self.skipTest(
-                f"Phase 1 subcommands not in this tree's parser yet: {sorted(missing)}"
+                f"Phase 1/2 subcommands not in this tree's parser yet: {sorted(missing)}"
             )
 
     def test_commands_block_names_the_phase1_surface(self):
@@ -133,6 +152,37 @@ class TestReadmeCommandsExist(unittest.TestCase):
 
     def test_phase1_flags_are_in_the_parser(self):
         for label, argv in PHASE1_FLAGS:
+            with self.subTest(flag=label):
+                if not parser_accepts(argv):
+                    self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
+
+    def test_commands_block_names_the_phase2_surface(self):
+        # Text-only, so it runs in every tree: the README documents exactly
+        # the Phase 2 command surface, period labels included.
+        block = re.search(r"## Commands\n\n```\n(.*?)```", README.read_text(), re.S).group(1)
+        self.assertRegex(block, r"(?m)^readiness fleet .*--status")
+        self.assertRegex(block, r"(?m)^readiness contracts .*--names")
+        for sub in ("snapshot", "show", "spot-check"):
+            self.assertRegex(block, rf"(?m)^readiness exposure {sub}\b")
+        self.assertRegex(block, r"(?m)^readiness exposure snapshot .*--all-states")
+        self.assertRegex(block, r"(?m)^readiness exposure spot-check .*--counts PATH")
+        self.assertRegex(block, r"(?m)^readiness issue MODEL .*--period YYYY-Qn\|YYYY-Mnn\|YYYY")
+        self.assertRegex(block, r"(?m)^readiness brief .*--county FIPS \| --state XX")
+        self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2")
+        issue = re.search(r"(?m)^readiness issue MODEL .*$", block).group(0)
+        self.assertNotIn("label", issue)  # no parameter through which one could arrive
+
+    def test_phase2_subcommands_are_in_the_parser(self):
+        missing = PHASE2_COMMANDS - parser_commands()
+        if missing:
+            self.skipTest(f"INTEGRATOR: parser lacks {sorted(missing)}")
+        # `verify --phase 2` takes no contract; `issue` has no label flag.
+        self.assertTrue(parser_accepts(["verify", "--phase", "2"]))
+        self.assertFalse(parser_accepts(
+            ["issue", "m", "-c", "x", "--period", "2026-Q4", "--labels", "f"]))
+
+    def test_phase2_flags_are_in_the_parser(self):
+        for label, argv in PHASE2_FLAGS:
             with self.subTest(flag=label):
                 if not parser_accepts(argv):
                     self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
@@ -219,6 +269,44 @@ class TestFeatureDocsCoverTheCode(unittest.TestCase):
         for phrase in ("committed files only", "ledger-head", "new contract",
                        "first", "readiness promote"):
             self.assertIn(phrase, text)
+
+
+class TestBriefDocStatesTheRules(unittest.TestCase):
+    """docs/brief.md names every violation code the validator can raise, the
+    sentence shapes and the things a brief never contains, so a reader of a
+    refusal can find the rule without reading readiness/cite.py."""
+
+    CODES = (cite.UNCITED, cite.UNKNOWN_CLAIM, cite.UNRESOLVED,
+             cite.NUMBER_WITHOUT_CLAIM, cite.FORBIDDEN_PHRASE)
+
+    def test_names_all_five_violation_codes(self):
+        text = BRIEF_DOC.read_text()
+        for code in self.CODES:
+            self.assertIn(f"`{code}`", text, f"docs/brief.md does not name {code}")
+        # The five above are the module's whole vocabulary.
+        constants = {n for n, v in vars(cite).items()
+                     if n.isupper() and isinstance(v, str) and v == n}
+        self.assertEqual(constants, set(self.CODES))
+
+    def test_states_the_shapes_guards_and_exclusions(self):
+        text = BRIEF_DOC.read_text()
+        for phrase in ("chance of at least one damaging", "This comes from",
+                       cite.NOT_A_WARNING_SENTENCE, "nws-ipaws",
+                       "passing", "digest", "cannot be issued yet",
+                       "below the county", "would touch", "will occur",
+                       "no parameter through which a label", "USA Structures",
+                       "readiness brief --county", "--state"):
+            self.assertIn(phrase, text, f"docs/brief.md lacks {phrase!r}")
+        for phrase in cite.FORBIDDEN_PHRASES:
+            self.assertIn(f'"{phrase}"', text, f"docs/brief.md lacks {phrase!r}")
+
+    def test_how_it_works_names_the_phase2_commands(self):
+        text = HOW_IT_WORKS.read_text()
+        for command in ("readiness fleet --national", "readiness fleet --status",
+                        "readiness exposure snapshot", "readiness exposure spot-check",
+                        "readiness issue", "readiness brief --county",
+                        "readiness brief --state", "readiness verify --phase 2"):
+            self.assertIn(command, text, f"how-it-works.md lacks {command!r}")
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):

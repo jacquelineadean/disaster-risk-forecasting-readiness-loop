@@ -77,6 +77,14 @@ NOT_IN_BROWSER = {
                "would be a spent budget with no card in the repository",
     "backtest": "the committed ledger and backtest report of a real-data run; "
                 "there is nothing to publish from a browser",
+    # Phase 2. `issue` refits a promoted model and writes the file a brief
+    # cites; `brief` writes the county document; both are records the
+    # repository commits, and neither can be produced from packed extracts.
+    "issue": "a passing test card, the pinned feature data for the target period and "
+             "a place to commit issued/<contract>/<period>.json",
+    "brief": "committed issued files and pinned USA Structures counts; a brief is "
+             "written only where it can be validated and committed",
+    "exposure snapshot": "a network connection to the USA Structures FeatureServer",
 }
 
 
@@ -85,6 +93,15 @@ def _refuse(command: str, needs: str | None = None) -> int:
           f"it needs {needs or NOT_IN_BROWSER[command]}.")
     return 2
 
+
+def _refused_command(argv: list[str]) -> str | None:
+    """The `NOT_IN_BROWSER` key `argv` names, if any: a subcommand, or a
+    subcommand plus its first word for the two-word ones (`exposure snapshot`)."""
+    for n in (2, 1):
+        key = " ".join(argv[:n])
+        if key in NOT_IN_BROWSER:
+            return key
+    return None
 
 def _promotes(argv: list[str]) -> bool:
     """True when this `loop` would spend the test touch.
@@ -144,8 +161,9 @@ def _features_in_browser(argv: list[str]) -> int:
 def run_cli(argv_json: str) -> int:
     """Run `readiness <argv>` exactly as the console script would."""
     argv = json.loads(argv_json)
-    if argv and argv[0] in NOT_IN_BROWSER:
-        return _refuse(argv[0])
+    refused = _refused_command(argv)
+    if refused:
+        return _refuse(refused)
     if _promotes(argv):
         return _refuse("loop --promote", NOT_IN_BROWSER["promote"])
     if argv and argv[0] == "features":

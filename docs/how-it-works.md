@@ -337,7 +337,92 @@ A failed first touch is published too, and the contract cannot exit Phase 1;
 the sanctioned next move is a new contract, never a relaxed threshold or a
 second touch.
 
-## 12. The research briefing
+## 12. Phase 2: the fleet, exposure and the brief
+
+Phase 2 changes nothing about the protocol; it runs it nine times and puts a
+paragraph at the end. Six national contracts are registered as data beside
+the three examples ("six so four can pass", plan §3), each with its own
+ledger and its own test-touch budget; the exposure layer is joined *after*
+the forecast, county by county; and the first human-facing output, the
+county brief, is written only when every one of its sentences cites
+something that exists. No transcript of it exists yet for the same reason as
+Phase 1: every step below a passing test card needs the real-data run. The
+commands, in the order `make phase2` runs them:
+
+**Run the fleet.** The same loop, over every national contract in turn,
+promoting the first validate pass of each. Sequential on purpose: the
+manifest the data plane writes after each pull is not safe to share between
+two runs, and one unpulled extract must not cost the other five their
+ledgers, so a contract whose data is missing is reported and skipped.
+
+```bash
+readiness fleet --national --queue phase2 --promote --features era5,terrain
+readiness fleet --status                 # where every contract stands, from the ledgers alone
+make backtest-all                        # every contract's report from its committed files
+```
+
+`fleet --status` prints one row per registered contract — cards, validate
+passes, the test card and its BSS, and whether `verify --phase 1` is met —
+without fitting anything; the website's briefs page shows the same rows.
+
+**Pin and spot-check the exposure.** USA Structures (FEMA / ORNL) is pulled
+as *counts* grouped by county and occupancy class, one paged statistics
+query per state, never as footprints; the county is the finest key that
+exists anywhere in the extract, the table or the brief.
+
+```bash
+readiness exposure snapshot --all-states           # or --states OK,LA,TX
+readiness exposure show --state OK                 # CountyExposure rows from the pinned extracts
+readiness exposure spot-check                      # ours / assessor for every row of exposure_expected/assessor_counts.csv
+```
+
+The spot-check divides our pinned total for each county by an assessor's
+count that a person collected (with the URL and the date), prints every
+ratio, and exits 1 unless at least ten counties from at least three states
+fall inside `EXPOSURE_SPOTCHECK_RATIO`. A row outside the band is printed
+and does not count; it is never edited to fit. The CSV ships header-only.
+
+**Issue.** For a contract with a passing test card, refit the promoted model
+through `TrainingView` on the training years, check that the training and
+feature digests match the card, build the target period's features under
+the same firewall, and write a probability per county.
+
+```bash
+readiness issue logistic -c tornado-us --period 2026-Q4 --features era5,terrain --param feature_sets=era5-antecedent
+```
+
+Exit 2 with the reason on any refusal: no passing test card for that model
+and those arguments, a digest that does not match, or a period the pinned
+series do not reach yet ("period cannot be issued yet: data through YYYY-MM
+needed"). There is no parameter through which a label could arrive.
+
+**Brief.** One document per county from every issued file that covers it,
+validated by `readiness.cite` before it is written ([brief.md](brief.md)).
+
+```bash
+readiness brief --county 40109 --period 2026-Q4
+readiness brief --state OK --period 2026-Q4
+```
+
+Exit 1, listing the violations, when a sentence is uncited, a citation does
+not resolve, a number is not a cited value or a forbidden phrase appears;
+nothing is written then.
+
+**Verify.** The Phase 2 check takes no contract:
+
+```bash
+readiness verify --phase 2
+```
+
+It exits 0 only if at least four national contracts meet the Phase 1
+criteria; the spot-check has ten in-band counties from three states; and
+each passing contract has an issued file for the same period, validated by
+that contract's first test card, from which one brief builds with zero
+violations and no sub-county key. `make phase2` chains the fleet, the
+backtests, the exposure snapshot and spot-check, an issue per passing
+contract, the briefs for the spot-checked states, and this check.
+
+## 13. The research briefing
 
 The design the implementation follows is in [`report/index.html`](../report/index.html)
 (`make serve` to read it locally). Its second section is the argument for

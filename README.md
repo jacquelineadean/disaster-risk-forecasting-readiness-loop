@@ -16,7 +16,7 @@ step-by-step tour with screenshots and a recording of a real run, see
 [website](#the-website), which walks through the design and runs the real
 code in your browser.
 
-**Status: Phase 0 complete, Phase 1 built; the Phase 1 exit needs the
+**Status: Phase 0 complete; Phases 1 and 2 built; their exits need the
 real-data run.** The eval plane is built and its Phase 0 exit criteria are
 met on real NOAA data. The whole loop is *contract-driven*: the hazard, the
 geography, the forecast period, the damage definition, the locked splits and
@@ -31,6 +31,20 @@ data, through
 is met only when a test card **passes and is published**. Until that run, no
 test touch has been spent. Why the harness came before any model:
 [Harness before model](#harness-before-model).
+
+Phase 2 runs the same protocol over nine registered contracts — three
+examples and six national ones, "six so four can pass" — and puts the first
+human-facing output at the end of it: `readiness fleet` walks the contracts
+in turn with one ledger and one touch budget each; `readiness exposure`
+pins FEMA / ORNL USA Structures counts per county, with no sub-county field
+by construction, and spot-checks ten sampled counties against assessor
+counts a person collected; `readiness issue` refits a promoted model and
+writes a probability per county for a period the pinned data has reached;
+and `readiness brief` writes a county paragraph whose every sentence cites
+a card, an issued file, a pinned extract or a named guidance document, and
+which is written only when `readiness.cite` finds no violation
+([docs/brief.md](docs/brief.md)). Its exit — four hazards passing
+nationally, ten spot-checked counties — needs the same real-data run.
 
 ---
 
@@ -406,6 +420,40 @@ timeless must be on the harness's short allow-list of physical geometry
 vocabulary and what the harness proves versus trusts, is in
 [docs/features.md](docs/features.md).
 
+### Phase 2: the fleet, exposure and the brief
+
+The fleet ([`readiness/fleet.py`](readiness/fleet.py)) is the loop over
+every registered contract, sequential on purpose — the manifest the data
+plane writes is not safe to share between two runs — and tolerant of a
+contract whose data is missing, which is reported and skipped so one
+unpulled extract does not cost the other five their ledgers. `fleet
+--status` reads the ledgers, touch files and backtest reports back through
+the same `verify.phase1` the exit check uses, and fits nothing.
+
+Exposure ([`readiness/exposure/`](readiness/exposure/),
+[`readiness/connectors/usa_structures.py`](readiness/connectors/usa_structures.py))
+is a join, never a covariate: the connector asks the USA Structures
+FeatureServer for *counts* grouped by county and occupancy class and never
+downloads a footprint; `CountyExposure` has six fields and none in which a
+tract, parcel, point or address could travel; and the layer declares its
+edit year as `derived_through`, so the firewall refuses it as a feature
+under every current contract. The spot-check
+([`exposure_expected/`](exposure_expected/)) divides our county total by an
+assessor's count collected by a person, prints every ratio, and counts only
+in-band rows toward the ten the exit needs.
+
+Issuance and the brief (`readiness/issue.py`, `readiness/brief.py`,
+[`readiness/cite.py`](readiness/cite.py)) close the loop with a document.
+`issue` requires a passing, canary-clear test card for the model and its
+arguments, refits through `TrainingView` and refuses if the training or
+feature digest differs from the card, and refuses a period the pinned
+series do not reach; it has no parameter through which a label could
+arrive. `cite.validate` is the rule set every human-facing document passes:
+every sentence cites, every citation resolves, every number is a cited
+value, no warning language. The brief names nothing below the county and is
+written only when the list of violations is empty. The guidance documents a
+sentence may cite are registered in [`plans/guidance.json`](plans/guidance.json).
+
 ---
 
 ## Data
@@ -419,6 +467,7 @@ clone reproduces the exact data version without carrying the bytes.
 | ground truth | NOAA Storm Events, 1996– | the validation target, every hazard |
 | region universe | Census national county file | the panel denominator, any state or all |
 | zone-county crosswalk | NWS zone-county correlation file | joins zone-coded events (heat, tropical cyclones, winter storms, wildfire, …) to counties, pinned only for contracts registered with `--zone-policy expand` |
+| exposure | FEMA / ORNL USA Structures, county counts by occupancy class | the Phase 2 join, pinned per state by `readiness exposure snapshot`; refused as a feature; never below the county |
 
 Each Storm Events year file is national, so one download serves every state
 and every hazard: it is checksummed, split into one compact extract per state
@@ -431,6 +480,12 @@ Disasters product in May 2025 with no updates beyond CY2024. Hence the pinning,
 and hence `--keep-raw` for mirroring what licences allow. Per-layer licences and
 attribution: [`DATA-LICENSES.md`](DATA-LICENSES.md).
 
+Exposure outputs — the `readiness exposure` tables, the issued files' joins
+and the county briefs — are a separate artefact from the probability
+outputs, so that an exposure layer under a share-alike licence could never
+reach the forecast; today's layer (USA Structures) is public domain and the
+brief carries its attribution line.
+
 A cached file with no manifest record counts as *unpinned* and is re-fetched
 rather than used. An experiment that cannot name its data version is not an
 experiment.
@@ -440,7 +495,7 @@ experiment.
 ## Commands
 
 ```
-readiness contracts         list the registered contracts
+readiness contracts         list the registered contracts  [--names] [--national]
 readiness contract          print one contract and its hash        [-c NAME]
 readiness register NAME     pre-register a new contract from options
 readiness hazards           list the hazard catalogue
@@ -450,11 +505,17 @@ readiness panel             build the labelled panel, print coverage   [-c NAME]
 readiness features          load the feature sources, print admission verdicts and the audit  [-c NAME] [--features era5,terrain,nri,climada]
 readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features ...] [--param k=v]*
 readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1] [--features ...] [--promote] [--backend local|claude]
+readiness fleet             the loop over many contracts in turn, or their status  [--national] [--queue phase2] [--features ...] [--promote] [--status]
 readiness promote MODEL     the one atomic test touch: spend the budget and write the test card  [-c NAME] --spend-test-touch
 readiness backtest          write experiments/<name>/backtest.html from committed files only  [-c NAME] [-o PATH]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
 readiness ledger            show and verify the experiment ledger  [-c NAME] [--show] [--id ID]
-readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1] [--replay] [--bless]
+readiness exposure snapshot pull and pin USA Structures county counts per state  [--states A,B | --all-states] [--layer-url URL]
+readiness exposure show     print CountyExposure rows from the pinned extracts  [--county FIPS | --state XX]
+readiness exposure spot-check  ours / assessor for every row of exposure_expected/assessor_counts.csv; exit 1 below ten in-band counties from three states  [--counts PATH]
+readiness issue MODEL       refit the promoted model, write issued/<contract>/<period>.json; exit 2 on a refusal  -c NAME --period YYYY-Qn|YYYY-Mnn|YYYY [--features ...] [--param k=v]*
+readiness brief             one cited, validated brief per county; exit 1 listing the violations  (--county FIPS | --state XX) --period YYYY-Qn [--out DIR]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2] [--replay] [--bless]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]
@@ -508,10 +569,16 @@ readiness/
   contracts.py       the contract schema, validation, digest and registry. Do not edit while iterating.
   config.py          harness-wide policy: the hazard catalogue, record start, canary ceilings
   data.py            builds a contract's dataset: snapshot, panel, provenance; input_keys/pinned
-  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only)
+  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only), phase2
   backtest.py        the Phase 1 report, rendered from committed files only
+  fleet.py           the loop over every registered contract in turn, and --status from the ledgers
+  issue.py           refit the promoted model, write the issued probabilities per county; parse_period/period_label
+  brief.py           the county brief: one cited paragraph per hazard, validated before it is written
+  cite.py            the citation rules every human-facing document passes (five violation codes)
+  exposure/          USA Structures county counts: occupancy.py (classes), table.py (county-only), spotcheck.py
   connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server,
-                     gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources)
+                     gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources),
+                     usa_structures.py (county counts, never footprints)
   harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger,
                      features.py (the feature channel and its temporal firewall)
   engine/            proposable models: climatologies, persistence, the canary target,
@@ -519,17 +586,20 @@ readiness/
   agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
-contracts/           registered contracts, one JSON file each; three examples ship
+contracts/           registered contracts, one JSON file each; three examples and six national ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
+exposure_expected/   assessor_counts.csv, the person-collected half of the exposure spot-check (ships header-only)
 docs/                how-it-works.md (the walkthrough), contracts.md (the reference), features.md (the
-                     firewall), backtest.md (the report), plan.md and plan-design-annex.md, media/
+                     firewall), backtest.md (the report), brief.md (the county brief), plan.md and
+                     plan-design-annex.md, media/
 skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
 tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media),
                      climada/ (run_event_set.py, the GPL tool that writes a pinned layer, never imported)
-site/                the overview website: pages, and the browser sandbox that runs the package
-plans/               scenario library — the Phase 3 seed
+site/                the overview website: pages (briefs.html lists the fleet and the validated briefs), and the
+                     browser sandbox that runs the package
+plans/               guidance.json (the documents a brief may cite), scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
 tests/               unittest suite, no network required
@@ -552,9 +622,18 @@ redesign:
   touch — whether any candidate clears the contract on Louisiana or Oklahoma
   2021–2025 is not knowable offline. *Exit: BSS > 0 on untouched test years
   with reliability within ±5 pts, published with the ledger.*
-- **Phase 2 — multi-hazard, national, with exposure.** One registered contract
-  per peril against the same harness; join to USA Structures so outputs become
-  human.
+- **Phase 2 — multi-hazard, national, with exposure.** *Built:* six
+  national contracts registered as data, `readiness fleet` with one ledger
+  and one touch budget per contract, the USA Structures connector and the
+  county-only exposure table with its spot-check, `readiness issue` with its
+  three guards, `readiness cite` and the county brief, `verify --phase 2`.
+  *Remaining:* the real-data run (`make phase2`) — which four hazards pass
+  is not knowable offline, and the zone-coded ones (heat, winter storm) risk
+  crosswalk drift; the USA Structures layer URL and field vocabulary are
+  unconfirmed until the first pull; and the ten assessor counts are
+  collected by a person, with URLs, into `exposure_expected/`. *Exit: at
+  least four hazards pass the contract nationally; exposure joins
+  spot-validated against county assessor counts in ten sampled counties.*
 - **Phase 3 — the planning thought-partner.** Scenario stress-tests of a
   facility's emergency plan against the validated risk layer. Case studies
   become regression tests. Seeded in [`plans/`](plans/).

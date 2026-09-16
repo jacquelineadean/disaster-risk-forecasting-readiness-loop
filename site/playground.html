@@ -23,6 +23,7 @@
       <a data-page="design" href="design.html">System design</a>
       <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
       <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="briefs" href="briefs.html">Briefs</a>
       <a data-page="playground" href="playground.html">Sandbox</a>
       <a data-report href="generated/report/index.html">Research briefing</a>
       <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
@@ -78,8 +79,10 @@
             <button class="btn small secondary" data-needs-sandbox data-cmd="features -c {c}">features (nothing packed)</button>
             <button class="btn small secondary" data-needs-sandbox data-cmd="loop -c {c} --queue phase1 --quiet">loop --queue phase1</button>
             <button class="btn small secondary" data-needs-sandbox data-cmd="promote logistic -c {c} --spend-test-touch">promote (refused)</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="fleet --status">fleet --status</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="brief --county 40001 --period 2026-Q4">brief (refused)</button>
           </div>
-          <p class="small mb0">The loop writes into a fresh experiments tree, so the ledger starts empty like a new clone's; switch to the committed tree in the terminal's toolbar to append to a copy of the real ledgers instead. Scoring against <code>test</code> is refused outright and points to <code>readiness promote</code>, the one atomic test touch; <code>promote</code> and <code>backtest</code> are refused in the browser altogether, because a test touch spent in a tab would be a spent budget with no card in the repository. <code>features</code> reports that the archive packs no feature sources, and <code>loop --queue phase1</code> skips the feature candidates and runs the history-only logistic model.</p>
+          <p class="small mb0">The loop writes into a fresh experiments tree, so the ledger starts empty like a new clone's; switch to the committed tree in the terminal's toolbar to append to a copy of the real ledgers instead. Scoring against <code>test</code> is refused outright and points to <code>readiness promote</code>, the one atomic test touch; <code>promote</code> and <code>backtest</code> are refused in the browser altogether, because a test touch spent in a tab would be a spent budget with no card in the repository. <code>features</code> reports that the archive packs no feature sources, and <code>loop --queue phase1</code> skips the feature candidates and runs the history-only logistic model. <code>fleet --status</code> reads the packed ledgers; <code>exposure snapshot</code>, <code>issue</code> and <code>brief</code> are refused, because each writes a record the repository commits.</p>
         </div>
       </details>
 

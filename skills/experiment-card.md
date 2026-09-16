@@ -69,7 +69,7 @@ And one that did not work — equally valuable:
 | `scorecard` | every metric and the reliability bins; and, for a Phase 1 card, `feature_digest`, `feature_columns` and `feature_audit` (below) |
 | `verdict` | per-clause contract result, naming the contract |
 | `canary` | leakage screen findings |
-| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range, the manifest keys the panel was built from, `harness_digest`, and `model_kwargs`; and, only when feature sources were loaded, `feature_version` and `feature_inputs` (below) |
+| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range, the manifest keys the panel was built from, `harness_digest`, `wall_clock_s` and `model_kwargs` (below); and, only when feature sources were loaded, `feature_version` and `feature_inputs` (below) |
 | `contract_digest` | which contract this was judged under |
 | `prev_hash` / `card_hash` | the chain |
 
@@ -93,6 +93,14 @@ the `scorecard`, split by which one already carries the matching shape:
   source's admission verdict, the poisoned-cutoff bound, coverage per
   column, and `clean`. A test card whose audit is not clean fails `verify
   --phase 1`, whatever its scores say.
+- **`harness_digest`** — the guarded code as it stood at scoring time, so a
+  guarded agent run can check every card it produced against the harness
+  it began with.
+- **`wall_clock_s`** — how long the fit and the screen took, in seconds, to
+  three decimals. Provenance, not a criterion: the annex budgets a national
+  card in minutes, and the only way to know what a fleet queue costs is to
+  write down what each card cost. Nothing hashes or judges it, and a card
+  with a different `wall_clock_s` is the same experiment.
 
 The scorecard also carries the frame's `feature_digest`, and the canary's
 fifth finding records whether the model's declared digest matched it (that
