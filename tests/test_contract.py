@@ -91,14 +91,38 @@ class TestVerdict(unittest.TestCase):
         # A bin with 3 observations cannot fail a 5-point tolerance meaningfully.
         bins = list(card().reliability_bins)
         bins[3] = dict(
-            bins[3], count=3, observed_frequency=bins[3]["mean_forecast"] + 0.40
+            bins[3],
+            count=3,
+            populated=False,
+            observed_frequency=bins[3]["mean_forecast"] + 0.40,
         )
         self.assertTrue(
             contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT).passed
         )
 
+    def test_populated_is_read_from_the_card_not_recomputed(self):
+        # The flag is written at scoring time from the contract's minimum bin
+        # count. The verdict must judge the card it was handed: a bin the card
+        # calls thin is not judged whatever its count says, and a bin the card
+        # calls populated is judged even at n=3.
+        bins = list(card().reliability_bins)
+        bins[3] = dict(
+            bins[3],
+            count=1000,
+            populated=False,
+            observed_frequency=bins[3]["mean_forecast"] + 0.40,
+        )
+        self.assertTrue(
+            contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT).passed
+        )
+        bins[3] = dict(bins[3], count=3, populated=True)
+        verdict = contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT)
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertFalse(rel.passed)
+        self.assertIn("n=3", rel.detail)
+
     def test_no_populated_bins_fails_rather_than_vacuously_passing(self):
-        bins = tuple(dict(b, count=1) for b in card().reliability_bins)
+        bins = tuple(dict(b, count=1, populated=False) for b in card().reliability_bins)
         verdict = contract_mod.evaluate(card(reliability_bins=bins), CONTRACT)
         self.assertFalse(verdict.passed)
         rel = next(c for c in verdict.checks if c.name == "reliability")
@@ -117,6 +141,32 @@ class TestVerdict(unittest.TestCase):
         prov = next(c for c in verdict.checks if c.name == "contract provenance")
         self.assertFalse(prov.passed)
         self.assertIn("contract changed", prov.detail)
+
+
+class TestHoldoutSplit(unittest.TestCase):
+    """A card scored on the training years may be printed but never PASS."""
+
+    def test_a_train_card_fails_on_the_holdout_check_alone(self):
+        verdict = contract_mod.evaluate(card(split="train"), CONTRACT)
+        self.assertFalse(verdict.passed)
+        failed = [c.name for c in verdict.checks if not c.passed]
+        self.assertEqual(failed, ["holdout split"])
+        self.assertIn("not a holdout", verdict.checks[-1].detail)
+
+    def test_validate_and_test_cards_pass(self):
+        for split in contract_mod.HOLDOUT_SPLITS:
+            with self.subTest(split=split):
+                self.assertTrue(contract_mod.evaluate(card(split=split), CONTRACT).passed)
+
+    def test_the_check_is_appended_after_the_original_four(self):
+        # Committed cards print their checks in this order; the new clause
+        # must not reorder them.
+        names = [c.name for c in contract_mod.evaluate(card(), CONTRACT).checks]
+        self.assertEqual(
+            names,
+            ["brier skill score", "reliability", "auc", "contract provenance",
+             "holdout split"],
+        )
 
 
 class TestAgainstRealModels(unittest.TestCase):
@@ -148,6 +198,13 @@ class TestAgainstRealModels(unittest.TestCase):
         self.assertEqual(card.contract, self.c.name)
         self.assertEqual(card.contract_digest, self.c.digest())
         self.assertIn(self.c.name, card.format())
+
+    def test_a_model_scored_on_its_own_training_years_cannot_pass(self):
+        card = scoring.score(ClimatologySeasonal(), self.panel, self.c, "train")
+        verdict = contract_mod.evaluate(card, self.c)
+        self.assertFalse(verdict.passed)
+        holdout = next(ch for ch in verdict.checks if ch.name == "holdout split")
+        self.assertFalse(holdout.passed)
 
     def test_the_same_model_scores_under_a_monthly_contract(self):
         monthly = make_contract(period="month")

@@ -15,7 +15,6 @@ dataset.
 
 from __future__ import annotations
 
-import io
 import json
 import math
 import os
@@ -38,7 +37,7 @@ from readiness import cli as _cli  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness.connectors.base import ConnectorError  # noqa: E402
 from readiness.contracts import ContractError  # noqa: E402
-from readiness.engine import build_model, needs_panel  # noqa: E402
+from readiness.engine import build_model  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
 from readiness.harness import contract as contract_mod  # noqa: E402
 from readiness.harness import scoring  # noqa: E402
@@ -90,12 +89,7 @@ def run_cli(argv_json: str) -> int:
 
 
 def _state_fips() -> dict[str, str]:
-    from readiness.connectors import census
-
-    cache = data_mod.SNAPSHOT_DIR / "census" / "national_county2020.txt"
-    if not cache.exists():
-        return {}
-    return {c.state: c.fips[:2] for c in census.parse(cache.read_bytes())}
+    return data_mod.state_fips()
 
 
 def _packed_types() -> dict[str, list[str] | None]:
@@ -269,8 +263,7 @@ def score_playground(raw: str) -> str:
         c = ds.contract
 
         def build():
-            panel = ds.panel if needs_panel(model_name) else None
-            return build_model(model_name, panel=panel, **params)
+            return build_model(model_name, canary_panel=ds.panel, **params)
 
         key = (name, model_name, json.dumps(params, sort_keys=True), split)
         if key not in _BASE_CARDS:

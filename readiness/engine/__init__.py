@@ -14,11 +14,7 @@ drive, extend, and calibrate rather than reinvent"). Phase 0 ships climatologies
 only, on purpose.
 """
 
-from readiness.engine.registry import (
-    REGISTRY,
-    build_model,
-    describe_registry,
-    needs_panel,
-)
+from readiness.engine.base import FittedModel
+from readiness.engine.registry import REGISTRY, build_model, describe_registry
 
-__all__ = ["REGISTRY", "build_model", "describe_registry", "needs_panel"]
+__all__ = ["REGISTRY", "FittedModel", "build_model", "describe_registry"]

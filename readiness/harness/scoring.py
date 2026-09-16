@@ -125,21 +125,30 @@ def _resolve(contract: Contract, split: Split | str) -> Split:
     return get_split(contract, split) if isinstance(split, str) else split
 
 
-def score(
-    model: Model,
-    panel: Panel,
-    contract: Contract,
-    split: Split | str,
-    *,
-    reference_probs: Sequence[float] | None = None,
-) -> Scorecard:
-    """Fit `model` on the contract's training split and score it against `split`.
+@dataclass(frozen=True)
+class _Run:
+    """One fit/predict pass, with the labels fetched only after it finished.
 
-    `reference_probs` lets a caller supply an explicit reference forecast; by
-    default the harness uses its own constant climatology, which is what the
-    contract names.
+    Everything a scorecard or a canary needs comes from here, so a model is
+    fitted exactly once per screening and the card and the canary arrays are
+    guaranteed to describe the same forecasts.
     """
-    split = _resolve(contract, split)
+
+    split: Split
+    view: TrainingView
+    train_panel: Panel
+    eval_panel: Panel
+    probs: list[float]
+    outcomes: list[int]
+
+
+def _fit_predict(model: Model, panel: Panel, contract: Contract, split: Split) -> _Run:
+    """The fixed sequence: training view, fit, bare request, predict, *then* labels.
+
+    This is the one place the sequence is written down. `score`, `predictions_for`
+    and `screen` all go through it, so the "no model ever sees a holdout label"
+    invariant is audited by reading this function and nothing else.
+    """
     train_split = contract.splits.train
     train_panel = split_panel(panel, train_split)
     eval_panel = split_panel(panel, split)
@@ -157,10 +166,14 @@ def score(
 
     # Labels are fetched only now — after predict() has returned.
     outcomes = list(eval_panel.labels)
+    return _Run(split, view, train_panel, eval_panel, probs, outcomes)
 
-    if reference_probs is None:
-        p_ref = _reference_probability(train_panel)
-        reference_probs = [p_ref] * len(outcomes)
+
+def _scorecard(model: Model, contract: Contract, run: _Run) -> Scorecard:
+    """Every number on the card, from one run's forecasts and outcomes."""
+    probs, outcomes = run.probs, run.outcomes
+    p_ref = _reference_probability(run.train_panel)
+    reference_probs = [p_ref] * len(outcomes)
 
     bs = metrics.brier_score(probs, outcomes)
     bs_ref = metrics.brier_score(reference_probs, outcomes)
@@ -172,7 +185,7 @@ def score(
         version=model.version,
         contract=contract.name,
         contract_digest=contract.digest(),
-        split=split.name,
+        split=run.split.name,
         n_units=len(outcomes),
         n_positive=sum(outcomes),
         base_rate=metrics.base_rate(outcomes),
@@ -195,9 +208,23 @@ def score(
             }
             for b in table
         ),
-        panel_digest=eval_panel.digest(),
-        train_digest=view.digest,
+        panel_digest=run.eval_panel.digest(),
+        train_digest=run.view.digest,
     )
+
+
+def score(
+    model: Model, panel: Panel, contract: Contract, split: Split | str
+) -> Scorecard:
+    """Fit `model` on the contract's training split and score it against `split`.
+
+    The reference forecast is always the harness's own constant climatology —
+    the one the contract names. There is deliberately no way to pass another:
+    a caller-supplied reference would make the skill score measure whatever
+    the caller chose.
+    """
+    split = _resolve(contract, split)
+    return _scorecard(model, contract, _fit_predict(model, panel, contract, split))
 
 
 def predictions_for(
@@ -205,38 +232,31 @@ def predictions_for(
 ) -> tuple[list[Unit], list[float], list[int]]:
     """Same fit/predict sequence as `score`, exposing the raw arrays.
 
-    Used by the canary, which needs to inspect the forecasts themselves rather
-    than the summary statistics.
+    Used by the reproducibility guard, which pins the forecasts themselves
+    rather than the summary statistics.
     """
-    split = _resolve(contract, split)
-    train_split = contract.splits.train
-    train_panel = split_panel(panel, train_split)
-    eval_panel = split_panel(panel, split)
-    view = TrainingView(train_panel, train_split)
-    model.fit(view)
-    request = PredictionRequest.from_panel(eval_panel, split)
-    probs = list(model.predict(request))
-    return list(eval_panel.units), probs, list(eval_panel.labels)
+    run = _fit_predict(model, panel, contract, _resolve(contract, split))
+    return list(run.eval_panel.units), run.probs, run.outcomes
 
 
 def screen(model: Model, panel: Panel, contract: Contract, split: Split | str):
-    """Score a model and run the leakage canary over the same fit/predict path.
+    """Score a model and run the leakage canary over the same forecasts.
 
     Returns `(scorecard, canary_report)`. Every command that scores anything
-    goes through here so that a scorecard is never produced without its canary.
+    goes through here so that a scorecard is never produced without its canary,
+    and the model is fitted once: the card and the canary describe one set of
+    probabilities, not two runs that are merely assumed to agree.
     """
     from readiness.harness import canary as canary_mod
 
-    split = _resolve(contract, split)
-    card = score(model, panel, contract, split)
-    _units, probs, outcomes = predictions_for(model, panel, contract, split)
-    view = TrainingView(split_panel(panel, contract.splits.train), contract.splits.train)
+    run = _fit_predict(model, panel, contract, _resolve(contract, split))
+    card = _scorecard(model, contract, run)
     report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
+        probs=run.probs,
+        outcomes=run.outcomes,
         brier_skill_score=card.brier_skill_score,
         auc=card.auc,
-        view=view,
+        view=run.view,
         declared_train_digest=getattr(model, "training_digest", None),
     )
     return card, report

@@ -12,8 +12,10 @@ from readiness.engine.baseline import (
     ClimatologyPooled,
     ClimatologySeasonal,
     LeakyOracle,
+    PersistenceLastYear,
 )
 from readiness.harness import canary, scoring
+from readiness.harness.splits import TrainingView, split_panel
 from tests.fixtures import make_contract, make_panel
 
 
@@ -108,14 +110,54 @@ class TestCanaryClearsHonestModels(unittest.TestCase):
 
 
 class TestCanaryChecks(unittest.TestCase):
-    def test_missing_declaration_is_reported_but_not_a_rejection(self):
+    def view(self):
+        c = make_contract()
+        panel = make_panel(contract=c, n_regions=4)
+        return TrainingView(split_panel(panel, c.splits.train), c.splits.train)
+
+    def provenance(self, **kw):
         report = canary.run(
-            probs=[0.2, 0.3], outcomes=[0, 1], brier_skill_score=0.05, auc=0.6
+            probs=[0.2, 0.3], outcomes=[0, 1], brier_skill_score=0.05, auc=0.6, **kw
         )
-        provenance = next(f for f in report.findings if f.check == "train provenance")
+        return report, next(f for f in report.findings if f.check == "train provenance")
+
+    def test_no_view_means_the_check_is_skipped_not_tripped(self):
+        # The harness supplied nothing to compare against, so there is no
+        # finding to make either way.
+        report, provenance = self.provenance()
         self.assertFalse(provenance.tripped)
         self.assertIn("skipped", provenance.detail)
         self.assertFalse(report.rejected)
+
+    def test_an_undeclared_digest_trips_when_a_view_was_supplied(self):
+        # Silence is not innocence: a model that was handed a training view
+        # and declares nothing about it is rejected, not waved through.
+        report, provenance = self.provenance(view=self.view())
+        self.assertTrue(provenance.tripped)
+        self.assertIn("declared no training digest", provenance.detail)
+        self.assertTrue(report.rejected)
+
+    def test_a_matching_digest_is_clear_and_a_mismatch_trips(self):
+        view = self.view()
+        report, provenance = self.provenance(view=view, declared_train_digest=view.digest)
+        self.assertFalse(provenance.tripped)
+        self.assertFalse(report.rejected)
+        report, provenance = self.provenance(view=view, declared_train_digest="0" * 16)
+        self.assertTrue(provenance.tripped)
+        self.assertTrue(report.rejected)
+
+    def test_every_baseline_declares_its_digest(self):
+        # The base class sets it from the view; a baseline that bypassed the
+        # base class would now be rejected by the check above.
+        c = make_contract()
+        panel = make_panel(contract=c, n_regions=6)
+        for model in (ClimatologyPooled(), ClimatologySeasonal(), PersistenceLastYear()):
+            with self.subTest(model=model.name):
+                _card, report = scoring.screen(model, panel, c, "validate")
+                provenance = next(
+                    f for f in report.findings if f.check == "train provenance"
+                )
+                self.assertFalse(provenance.tripped, provenance.detail)
 
     def test_implausible_auc_alone_trips(self):
         report = canary.run(

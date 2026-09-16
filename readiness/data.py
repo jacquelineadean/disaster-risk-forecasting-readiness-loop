@@ -19,7 +19,7 @@ from typing import Callable
 from readiness.connectors import census, nws_zones, storm_events
 from readiness.connectors.base import Manifest
 from readiness.contracts import Contract
-from readiness.harness.labels import Diagnostics, Panel, build_panel, diagnose
+from readiness.harness.labels import Diagnostics, Panel, panel_and_diagnostics
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 SNAPSHOT_DIR = REPO_ROOT / "snapshots"
@@ -30,6 +30,72 @@ EXPECTED_DIR = REPO_ROOT / "harness_expected"
 #: Point every command at another experiments tree — for CI, or for a demo
 #: that must not append to the committed ledgers.
 EXPERIMENTS_DIR_ENV = "READINESS_EXPERIMENTS_DIR"
+
+#: Manifest key of the Census county file. Must match what `census.load` pins.
+CENSUS_KEY = "census/national_county2020"
+
+
+def storm_events_key(year: int) -> str:
+    """Manifest key of one Storm Events year file, as `storm_events.snapshot` pins it."""
+    return f"noaa/storm_events/{year}"
+
+
+def input_keys(contract: Contract) -> list[str]:
+    """The manifest keys a contract's panel is built from — its data version.
+
+    The data version names exactly the pinned inputs the panel was built from,
+    so pinning a source for one contract (another state's extract, the zone
+    crosswalk) does not move another contract's fingerprints. This list is the
+    single statement of which inputs those are; `build` hashes over it, the
+    card records it, and `pinned` checks it.
+    """
+    keys = [CENSUS_KEY] + [storm_events_key(y) for y in contract.all_years()]
+    if contract.zone_policy == "expand":
+        keys.append(nws_zones.MANIFEST_KEY)
+    return keys
+
+
+def state_fips(snapshot_dir: pathlib.Path = SNAPSHOT_DIR) -> dict[str, str]:
+    """Postal code -> 2-digit state FIPS from the pinned county file; empty if absent."""
+    cache = snapshot_dir / "census" / "national_county2020.txt"
+    if not cache.exists():
+        return {}
+    return {c.state: c.fips[:2] for c in census.parse(cache.read_bytes())}
+
+
+def _extract_parts(contract: Contract, fips_of: dict[str, str]) -> list[str] | None:
+    """Extract prefixes `build` reads; None when a state is not in the county file."""
+    if not contract.states:
+        return [storm_events.NATIONAL]
+    parts = [fips_of.get(state) for state in contract.states]
+    return None if None in parts else [p for p in parts if p is not None]
+
+
+def pinned(contract: Contract, snapshot_dir: pathlib.Path = SNAPSHOT_DIR) -> bool:
+    """Whether `build` can run for this contract without fetching anything.
+
+    True only when every input named by `input_keys` is both recorded in the
+    manifest *and* present on disk in the layout the connectors read: bytes
+    with no record are unpinned and would be re-fetched, and a record with no
+    bytes is a download waiting to happen. Either way the answer is no.
+    """
+    manifest = Manifest.load(snapshot_dir / "manifest.json")
+    if any(key not in manifest.records for key in input_keys(contract)):
+        return False
+    fips_of = state_fips(snapshot_dir)
+    if not fips_of:
+        return False  # no county file, no region universe
+    parts = _extract_parts(contract, fips_of)
+    if parts is None:
+        return False
+    extracts = snapshot_dir / "storm_events"
+    for year in contract.all_years():
+        for part in parts:
+            if not (extracts / f"{part}_{year}.jsonl").exists():
+                return False
+    if contract.zone_policy == "expand":
+        return (snapshot_dir / "nws" / "zone_county.dbx").exists()
+    return True
 
 
 def experiments_root() -> pathlib.Path:
@@ -95,6 +161,10 @@ class Dataset:
             "period": self.contract.period,
             "n_regions": len(self.regions),
             "years": [self.panel.years[0], self.panel.years[-1]],
+            # Which manifest keys `data_version` was hashed over. New cards
+            # only: this lives inside `data_snapshot`, so committed cards keep
+            # their hashes.
+            "inputs": input_keys(self.contract),
         }
 
 
@@ -145,29 +215,25 @@ def build(
     events = storm_events.load_events(extract)
     progress(f"storm events: {len(events):,} events loaded for {contract.scope_label}")
 
-    # The data version names exactly the pinned inputs this panel was built
-    # from, so pinning a source for one contract does not move another's.
-    used = ["census/national_county2020"] + [f"noaa/storm_events/{y}" for y in years]
-
     crosswalk = None
     if contract.zone_policy == "expand":
         progress("nws zones: resolving zone-county crosswalk")
         crosswalk = nws_zones.load(snapshot_dir / "nws", manifest, refresh=refresh)
         manifest.save()
-        used.append(nws_zones.MANIFEST_KEY)
         progress(
             f"nws zones: {len(crosswalk):,} zones in {crosswalk.n_states} states "
             f"(edition {crosswalk.edition})"
         )
 
     region_ids = [c.fips for c in regions]
-    panel = build_panel(events, region_ids, years, contract, crosswalk)
-    diagnostics = diagnose(events, region_ids, years, contract, crosswalk)
+    panel, diagnostics = panel_and_diagnostics(
+        events, region_ids, years, contract, crosswalk
+    )
     return Dataset(
         contract=contract,
         panel=panel,
         regions=tuple(regions),
-        data_version=manifest.digest(used),
+        data_version=manifest.digest(input_keys(contract)),
         manifest=manifest,
         diagnostics=diagnostics,
     )

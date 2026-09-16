@@ -74,9 +74,9 @@ def run(
 ) -> CanaryReport:
     """Screen one model's output for signs it saw the answers.
 
-    `view` and `declared_train_digest` enable the provenance check: a model that
-    reports which data it fitted on can be verified against what the harness
-    actually handed it.
+    `view` is what the harness handed the model; `declared_train_digest` is
+    what the model says it fitted on. With a view, the two must match, and a
+    model that declares nothing is treated as a mismatch.
     """
     findings: list[CanaryFinding] = []
 
@@ -134,28 +134,37 @@ def run(
         detail = "no near-binary forecasts issued"
     findings.append(CanaryFinding("outcome agreement", agree_trip, detail))
 
-    # 4. Training provenance. If the model declares what it fitted on, it must
-    #    match what the harness exposed.
-    if declared_train_digest is None or view is None:
-        findings.append(
-            CanaryFinding(
-                "train provenance",
-                False,
-                "model declared no training digest; check skipped",
-            )
-        )
-    else:
-        mismatch = declared_train_digest != view.digest
-        findings.append(
-            CanaryFinding(
-                "train provenance",
-                mismatch,
-                f"model claims sha256:{declared_train_digest}, "
-                f"harness exposed sha256:{view.digest}"
-                + ("  <- mismatch" if mismatch else "  (match)"),
-            )
-        )
+    # 4. Training provenance. The model must declare what it fitted on, and
+    #    it must match what the harness exposed. A model that declares nothing
+    #    trips the check rather than skipping it: silence is the cheapest way
+    #    to hide a mismatch, and every model built on `engine.base.FittedModel`
+    #    declares its digest for free, so an undeclared one is either not
+    #    fitted through the training view or written to avoid saying so. The
+    #    check is skipped only when the harness itself supplied no view, i.e.
+    #    when there is nothing to compare against.
+    findings.append(_provenance(view, declared_train_digest))
 
     return CanaryReport(
         rejected=any(f.tripped for f in findings), findings=tuple(findings)
+    )
+
+
+def _provenance(view: TrainingView | None, declared: str | None) -> CanaryFinding:
+    if view is None:
+        return CanaryFinding(
+            "train provenance", False, "harness supplied no training view; check skipped"
+        )
+    if declared is None:
+        return CanaryFinding(
+            "train provenance",
+            True,
+            f"model declared no training digest; harness exposed sha256:{view.digest}"
+            "  <- undeclared",
+        )
+    mismatch = declared != view.digest
+    return CanaryFinding(
+        "train provenance",
+        mismatch,
+        f"model claims sha256:{declared}, harness exposed sha256:{view.digest}"
+        + ("  <- mismatch" if mismatch else "  (match)"),
     )

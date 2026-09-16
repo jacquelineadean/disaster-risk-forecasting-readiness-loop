@@ -7,6 +7,7 @@ from readiness.harness.labels import (
     county_fips,
     diagnose,
     is_damaging,
+    panel_and_diagnostics,
     parse_damage,
 )
 from tests.fixtures import make_contract, make_event
@@ -200,6 +201,38 @@ class TestDiagnostics(unittest.TestCase):
         self.assertEqual(d.n_positive_units, 1)
         self.assertNotIn("WARNING", d.format())
 
+    def test_the_panels_positives_are_the_diagnostics_positive_units(self):
+        # One walk feeds both, so the number the diagnostics print is the
+        # number of ones in the panel a model is scored against.
+        c = make_contract()
+        events = [
+            make_event(year=2010, month=8, county="99003", damage=50_000),
+            make_event(year=2010, month=9, county="99003", damage=50_000),   # same cell
+            make_event(year=2011, month=1, county="99001", deaths=1),
+            make_event(year=2010, month=8, county="99003", damage=0),
+            make_event(year=2010, month=2, county="98001", damage=1e6),
+            make_event(year=1999, month=2, county="99003", damage=1e6),
+        ]
+        regions, years = ["99001", "99003"], [2010, 2011]
+        panel = build_panel(events, regions, years, c)
+        d = diagnose(events, regions, years, c)
+        self.assertEqual(sum(panel.labels), d.n_positive_units)
+        self.assertEqual(d.n_positive_units, 2)
+        self.assertEqual(d.n_damaging, 3)
+        together = panel_and_diagnostics(events, regions, years, c)
+        self.assertEqual(together[0].digest(), panel.digest())
+        self.assertEqual(together[1], d)
+
+    def test_one_pass_survives_an_iterator_of_events(self):
+        # The two-copy version walked the iterable twice; a generator would
+        # have arrived empty at the second walk and produced diagnostics for
+        # an empty event table.
+        c = make_contract()
+        events = iter([make_event(year=2010, month=8, county="99003", damage=50_000)])
+        panel, d = panel_and_diagnostics(events, ["99003"], [2010], c)
+        self.assertEqual(sum(panel.labels), 1)
+        self.assertEqual(d.n_positive_units, 1)
+
     def test_warns_when_a_hazard_is_mostly_zone_coded(self):
         c = make_contract(hazard="heat")
         events = [
@@ -275,6 +308,7 @@ class TestZonePolicy(unittest.TestCase):
         self.assertEqual(d.n_zone_unmapped, 1)
         self.assertEqual(d.n_damaging, 2)
         self.assertEqual(d.n_positive_units, 3)
+        self.assertEqual(sum(panel.labels), d.n_positive_units)
         self.assertEqual(d.crosswalk_edition, "test")
         self.assertIn("expanded via NWS crosswalk", d.format())
         self.assertIn("unmapped", d.format())

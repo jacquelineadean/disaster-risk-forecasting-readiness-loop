@@ -3,7 +3,10 @@
 Keeping construction behind a registry means an agent (or a CLI user) never
 imports engine classes directly and never gets to pass a panel into a
 constructor — which is exactly how `LeakyOracle` cheats. The oracle is
-registered but flagged, and building it requires explicitly passing the panel.
+registered and flagged as the canary target, and only a canary target ever
+receives the `canary_panel` a caller passes: a forecaster requested with one
+never sees it, and the target requested without one is refused. Call sites
+pass the dataset's panel once and stop caring which model they are building.
 """
 
 from __future__ import annotations
@@ -25,12 +28,12 @@ class ModelSpec:
         factory: Callable[..., object],
         description: str,
         *,
-        needs_panel: bool = False,
         is_canary_target: bool = False,
     ) -> None:
         self.factory = factory
         self.description = description
-        self.needs_panel = needs_panel
+        #: A canary target is not a forecaster: it is built with the full
+        #: panel so the harness has something to reject.
         self.is_canary_target = is_canary_target
 
 
@@ -50,32 +53,33 @@ REGISTRY: dict[str, ModelSpec] = {
     "leaky-oracle": ModelSpec(
         LeakyOracle,
         "reads the outcomes; exists only to be rejected by the canary",
-        needs_panel=True,
         is_canary_target=True,
     ),
 }
 
 
-def needs_panel(name: str) -> bool:
-    spec = REGISTRY.get(name)
-    return bool(spec and spec.needs_panel)
+def build_model(name: str, *, canary_panel: Panel | None = None, **kwargs):
+    """Construct a registered model by name.
 
-
-def build_model(name: str, *, panel: Panel | None = None, **kwargs):
+    `canary_panel` is handed to the model only when the registry marks it as a
+    canary target. Any other model silently never receives it, so a call site
+    can pass the dataset's panel unconditionally without opening a channel by
+    which a forecaster could be handed the outcomes it is scored on.
+    """
     try:
         spec = REGISTRY[name]
     except KeyError:
         raise KeyError(
             f"unknown model {name!r}; known: {sorted(REGISTRY)}"
         ) from None
-    if spec.needs_panel:
-        if panel is None:
-            raise ValueError(
-                f"{name} requires an explicit panel — it is a canary target, "
-                "not a forecaster, and the harness will reject its output"
-            )
-        return spec.factory(panel, **kwargs)
-    return spec.factory(**kwargs)
+    if not spec.is_canary_target:
+        return spec.factory(**kwargs)
+    if canary_panel is None:
+        raise ValueError(
+            f"{name} requires an explicit canary_panel — it is a canary target, "
+            "not a forecaster, and the harness will reject its output"
+        )
+    return spec.factory(canary_panel, **kwargs)
 
 
 def describe_registry() -> str:

@@ -34,7 +34,7 @@ import sys
 from readiness import config, contracts, data as data_mod
 from readiness.connectors.base import ConnectorError
 from readiness.contracts import Contract, ContractError
-from readiness.engine import build_model, describe_registry, needs_panel
+from readiness.engine import build_model, describe_registry
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring, splits
 from readiness.harness.ledger import Ledger
@@ -204,7 +204,7 @@ def cmd_score(args) -> int:
     c = _contract(args)
     ds = _dataset(args, c)
     split = splits.get_split(c, args.split)
-    model = build_model(args.model, panel=ds.panel if needs_panel(args.model) else None)
+    model = build_model(args.model, canary_panel=ds.panel)
     where = data_mod.paths(c)
 
     if split.name == "test":
@@ -219,6 +219,14 @@ def cmd_score(args) -> int:
                 f"{model.name}@{model.version} it cannot be spent again."
             )
             return 2
+        # Paid before the scores exist, not after they are printed: a run
+        # interrupted between the two would otherwise have scored the one-shot
+        # holdout for free, and "touched once" is only a budget if it is
+        # charged before the answer is seen.
+        spent = budget.spend(model.name, model.version)
+        _p()
+        _p(f"test touch {spent}/{c.test_touch_budget} spent for "
+           f"{model.name}@{model.version}")
 
     _rule(f"score  {model.name}@{model.version}  on {split}  ({c.name})")
     card, report = scoring.screen(model, ds.panel, c, split)
@@ -227,14 +235,6 @@ def cmd_score(args) -> int:
     _p(contract_mod.evaluate(card, c).format())
     _p()
     _p(report.format())
-
-    if split.name == "test" and args.spend_test_touch:
-        spent = splits.TouchBudget(where.touch_budget, c.test_touch_budget).spend(
-            model.name, model.version
-        )
-        _p()
-        _p(f"test touch {spent}/{c.test_touch_budget} spent for "
-           f"{model.name}@{model.version}")
     # Exit non-zero only when the canary rejects: a contract failure is a
     # legitimate experimental outcome, not a tool error.
     return 1 if report.rejected else 0
@@ -244,8 +244,11 @@ def cmd_loop(args) -> int:
     from readiness.agent import orchestrator
 
     c = _contract(args)
+    # `--quiet` silences the loop's running commentary (and the data plane's
+    # progress underneath it); the result and the ledger path still print.
+    progress = (lambda _m: None) if args.quiet else _p
     if args.backend == "claude":
-        orchestrator.run_claude(c, split_name=args.split, progress=_p)
+        orchestrator.run_claude(c, split_name=args.split, progress=progress)
         return 0
 
     _rule(f"experimental loop  ({c.name}, {args.backend} backend, split={args.split})")
@@ -253,7 +256,7 @@ def cmd_loop(args) -> int:
         c,
         split_name=args.split,
         include_canary=not args.no_canary,
-        progress=_p,
+        progress=progress,
     )
     _p()
     _p(result.format())
@@ -272,7 +275,7 @@ def cmd_canary(args) -> int:
     _p("exit criterion is that the harness rejects it.")
     _p()
 
-    model = build_model("leaky-oracle", panel=ds.panel)
+    model = build_model("leaky-oracle", canary_panel=ds.panel)
     card, report = scoring.screen(model, ds.panel, c, split)
     _p(card.format())
     _p()
@@ -366,7 +369,7 @@ def cmd_verify(args) -> int:
             _p("[ok]   climatology baselines reproduce bit-for-bit")
 
     # --- criterion 2: the canary rejects a leaked model ---------------------
-    oracle = build_model("leaky-oracle", panel=ds.panel)
+    oracle = build_model("leaky-oracle", canary_panel=ds.panel)
     _ocard, report = scoring.screen(oracle, ds.panel, c, split)
     if report.rejected:
         tripped = [f.check for f in report.findings if f.tripped]

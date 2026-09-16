@@ -53,7 +53,6 @@ sys.path.insert(0, str(ROOT))
 from readiness import __version__, config, contracts as contracts_mod  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness.agent import orchestrator  # noqa: E402
-from readiness.connectors import census  # noqa: E402
 from readiness.connectors.base import ConnectorError, Manifest  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
 from readiness.harness.ledger import Ledger  # noqa: E402
@@ -158,7 +157,6 @@ def build_models(out: pathlib.Path) -> None:
                 {
                     "name": name,
                     "description": spec.description,
-                    "needs_panel": spec.needs_panel,
                     "is_canary_target": spec.is_canary_target,
                 }
                 for name, spec in REGISTRY.items()
@@ -231,25 +229,6 @@ def build_expected(
     log(f"expected.json: fingerprints for {sorted(expected)}")
 
 
-def _pinned_locally(c: contracts_mod.Contract, snapshot_dir: pathlib.Path,
-                    fips_of: dict[str, str]) -> bool:
-    """True when every file `data_mod.build` would read is already on disk."""
-    if not (snapshot_dir / "census" / "national_county2020.txt").exists():
-        return False
-    if not c.states:
-        return False  # a national extract is not something the site packs
-    for state in c.states:
-        fips = fips_of.get(state)
-        if fips is None:
-            return False
-        for year in c.all_years():
-            if not (snapshot_dir / "storm_events" / f"{fips}_{year}.jsonl").exists():
-                return False
-    if c.zone_policy == "expand":
-        return (snapshot_dir / "nws" / "zone_county.dbx").exists()
-    return True
-
-
 def build_panels(
     out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
 ) -> dict[str, data_mod.Dataset]:
@@ -260,11 +239,12 @@ def build_panels(
     from readiness.harness import splits
 
     snapshot_dir = data_mod.SNAPSHOT_DIR
-    fips_of = _state_fips_map(snapshot_dir)
     panels: dict[str, dict | None] = {}
     datasets: dict[str, data_mod.Dataset] = {}
     for name, c in registry.items():
-        if not _pinned_locally(c, snapshot_dir, fips_of):
+        # `data_mod.pinned` is the package's own answer to "would build()
+        # download anything?"; the site never re-derives the layout itself.
+        if not data_mod.pinned(c, snapshot_dir):
             panels[name] = None
             log(f"panels.json: {name}: pinned data not present locally, skipped")
             continue
@@ -412,13 +392,6 @@ def _package_files() -> list[pathlib.Path]:
     )
 
 
-def _state_fips_map(snapshot_dir: pathlib.Path) -> dict[str, str]:
-    cache = snapshot_dir / "census" / "national_county2020.txt"
-    if not cache.exists():
-        return {}
-    return {c.state: c.fips[:2] for c in census.parse(cache.read_bytes())}
-
-
 def _filter_rows(text: str, keep: set[str]) -> tuple[str, int]:
     kept = []
     for line in text.splitlines():
@@ -439,7 +412,7 @@ def _generated_at(manifest_path: pathlib.Path) -> str | None:
 def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) -> None:
     snapshot_dir = data_mod.SNAPSHOT_DIR
     manifest = Manifest.load(snapshot_dir / "manifest.json")
-    fips_of = _state_fips_map(snapshot_dir)
+    fips_of = data_mod.state_fips(snapshot_dir)
 
     # Which states each contract needs, and with which event types.
     #   full         every event type: a visitor can register any hazard there
@@ -542,12 +515,8 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
             snapshot_dir / "nws" / "zone_county.dbx"
         ).exists():
             coverage = "missing"
-        used = ["census/national_county2020"]
-        used += [f"noaa/storm_events/{y}" for y in c.all_years()]
-        if needs_crosswalk:
-            used.append("nws/zone_county")
         try:
-            data_version = manifest.digest(used) if manifest else None
+            data_version = manifest.digest(data_mod.input_keys(c)) if manifest else None
         except ConnectorError:
             data_version = None
         expected_path = data_mod.paths(c).expected

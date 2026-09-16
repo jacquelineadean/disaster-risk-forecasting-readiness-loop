@@ -30,7 +30,7 @@ from typing import Callable, Sequence
 
 from readiness import data as data_mod
 from readiness.contracts import Contract, Split
-from readiness.engine import build_model, needs_panel
+from readiness.engine import build_model
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
 from readiness.harness.ledger import ExperimentCard, Ledger, utc_now
@@ -140,11 +140,9 @@ def run_experiment(
     """
     contract = dataset.contract
     panel = dataset.panel
-    model = build_model(
-        candidate.model,
-        panel=panel if needs_panel(candidate.model) else None,
-        **candidate.kwargs,
-    )
+    # Only a registered canary target ever receives the panel; the registry
+    # keeps a forecaster from ever being handed its own outcomes.
+    model = build_model(candidate.model, canary_panel=panel, **candidate.kwargs)
 
     if split.name == "test":
         if touch_budget is None:

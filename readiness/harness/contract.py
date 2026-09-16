@@ -13,6 +13,11 @@ from readiness.contracts import Contract
 from readiness.harness.scoring import Scorecard
 
 
+#: The splits a card may PASS on. Appended as the fifth check so the printed
+#: order of the four original checks is unchanged on every committed card.
+HOLDOUT_SPLITS = ("validate", "test")
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -62,12 +67,11 @@ def evaluate(card: Scorecard, contract: Contract) -> Verdict:
 
     # 2. Calibration, in every populated bin. Thin bins are reported but not
     #    judged — a bin with 4 observations cannot fail a 5-point tolerance
-    #    meaningfully.
-    populated = [
-        b
-        for b in card.reliability_bins
-        if b["count"] >= contract.reliability_min_bin_count
-    ]
+    #    meaningfully. Which bins count as populated was decided when the card
+    #    was scored (`scoring.py` writes the flag from the contract's minimum
+    #    bin count); the verdict reads that flag rather than re-deriving it, so
+    #    the rule exists in one place and the card judged is the card printed.
+    populated = [b for b in card.reliability_bins if b["populated"]]
     worst: tuple[float, dict] | None = None
     for b in populated:
         dev = abs(b["observed_frequency"] - b["mean_forecast"])
@@ -117,6 +121,19 @@ def evaluate(card: Scorecard, contract: Contract) -> Verdict:
             f"card carries sha256:{card.contract_digest}, "
             f"current contract sha256:{contract.digest()}"
             + ("" if same_contract else "  <- contract changed since this run"),
+        )
+    )
+
+    # 5. The card must be a holdout score. A model scored on its own training
+    #    years measures memory, not forecasting; such a card may be printed for
+    #    inspection but may never PASS the contract.
+    holdout = card.split in HOLDOUT_SPLITS
+    checks.append(
+        Check(
+            "holdout split",
+            holdout,
+            f"scored on {card.split!r}"
+            + ("" if holdout else "  <- not a holdout; expected validate or test"),
         )
     )
 
