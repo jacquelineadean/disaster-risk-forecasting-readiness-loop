@@ -24,11 +24,14 @@ matter of giving the agent more models to propose, not a rewrite.
 
 from __future__ import annotations
 
+import asyncio
 import pathlib
 from dataclasses import dataclass, field
+from textwrap import indent
 from typing import Callable, Sequence
 
 from readiness import data as data_mod
+from readiness.agent import guard
 from readiness.contracts import Contract, Split
 from readiness.engine import build_model
 from readiness.harness import contract as contract_mod
@@ -249,9 +252,30 @@ def run_local(
 # Claude Agent SDK backend
 # ---------------------------------------------------------------------------
 
+#: What the agent is told it may not edit. The first entries are what the
+#: guard hashes; the rest are the data and (from Phase 1) feature channels,
+#: which decide what the models see rather than how they are judged.
+FORBIDDEN_EDITS: tuple[str, ...] = (
+    "readiness/harness/",
+    "readiness/contracts.py",
+    "readiness/config.py",
+    "readiness/verify.py",
+    "readiness/agent/guard.py",
+    "readiness/connectors/",
+    "contracts/",
+    "any module named `features` (the feature channel, Phase 1)",
+)
+
 
 def system_prompt(contract: Contract) -> str:
+    """The orchestrator's standing brief, built from the contract itself.
+
+    The vocabulary (hazard, geography, period, sources) comes from the
+    contract's own `describe()` rather than being written here, so the same
+    prompt serves a non-US contract the day one is registered.
+    """
     c = contract
+    forbidden = "\n".join(f"    {path}" for path in FORBIDDEN_EDITS)
     return f"""\
 You are the orchestrator of an open-source disaster-risk forecasting loop.
 
@@ -260,13 +284,20 @@ Your cycle is: gather context -> take action -> verify work -> repeat.
 You are running against the registered contract `{c.name}`
 (sha256:{c.digest()}). Its forecast unit is: at least one damaging {c.hazard}
 event in a given region during a given {c.period}, in {c.scope_label}.
+The contract, as the harness reads it:
+
+{indent(c.describe(), "    ")}
+
 Read it in full with `readiness contract -c {c.name}` before doing anything.
 
 RULES YOU CANNOT NEGOTIATE:
   * You may propose any model in readiness.engine. You may not modify anything
-    under readiness/harness/, readiness/contracts.py, readiness/config.py or
-    contracts/. Those files define how you are judged; editing them is not
-    iteration, it is cheating.
+    under
+{forbidden}
+    Those files define how you are judged and where your data comes from;
+    editing them is not iteration, it is cheating. An integrity guard hashes
+    the harness, the contracts and the guard itself before and after the run;
+    any change fails the run and discards its cards.
   * You never see holdout labels. Ask for them and the answer is no.
   * The validate split ({c.validate_years[0]}-{c.validate_years[-1]})
     is yours to iterate against. The test split
@@ -291,7 +322,9 @@ def run_claude(
 
     Requires `pip install 'readiness-loop[agent]'` and an ANTHROPIC_API_KEY.
     The harness is unchanged: the agent's tools call the very same functions the
-    local backend calls.
+    local backend calls. Because the agent holds Bash, `readiness.agent.guard`
+    hashes the guarded paths before the run and again after; any change raises
+    `HarnessTampered` and the run's cards are to be discarded.
     """
     try:
         from claude_agent_sdk import ClaudeAgentOptions, query  # type: ignore
@@ -322,10 +355,22 @@ def run_claude(
         "the ledger at the end."
     )
 
-    import asyncio
-
     async def _go() -> None:
         async for message in query(prompt=prompt, options=options):
             progress(str(message))
 
-    asyncio.run(_go())
+    _run_guarded(lambda: asyncio.run(_go()))
+
+
+def _run_guarded(run: Callable[[], None], root: pathlib.Path = guard.REPO_ROOT) -> None:
+    """Run the agent between two integrity snapshots of the guarded paths.
+
+    The check also runs when the agent raises: a run that crashed halfway can
+    still have edited the harness first, and that is the finding that matters
+    most, so `HarnessTampered` takes precedence over the agent's own error.
+    """
+    before = guard.snapshot(root)
+    try:
+        run()
+    finally:
+        guard.check(before, root)

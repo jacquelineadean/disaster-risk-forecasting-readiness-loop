@@ -10,10 +10,11 @@ import tempfile
 import unittest
 
 from readiness import data as data_mod
-from readiness.agent import orchestrator
+from readiness.agent import orchestrator, subagents
 from readiness.connectors.base import Manifest
 from readiness.harness.labels import diagnose
 from readiness.harness.ledger import Ledger
+from readiness.harness.splits import SplitViolation, TouchBudget, get_split
 from tests.fixtures import make_contract, make_panel
 
 
@@ -114,6 +115,93 @@ class TestLocalLoop(unittest.TestCase):
         self.assertIn("flood-zz", text)
         self.assertIn(c.digest(), text)
         self.assertIn("contracts/", text)
+
+    def test_system_prompt_forbids_every_guarded_path_and_names_the_guard(self):
+        text = orchestrator.system_prompt(make_contract(name="flood-zz"))
+        for path in ("readiness/connectors/", "readiness/verify.py",
+                     "readiness/agent/guard.py", "readiness/harness/", "features"):
+            self.assertIn(path, text)
+        self.assertIn("guard hashes", text)
+
+    def test_prompts_speak_the_contracts_vocabulary(self):
+        c = make_contract(name="heat-yy", hazard="heat", period="month",
+                          scope={"states": ["YY"]})
+        text = orchestrator.system_prompt(c)
+        for line in c.describe().splitlines():
+            self.assertIn(line.strip(), text)
+        agents = subagents.subagents_for(c)
+        analyst = agents["hazard-analyst-heat"]["prompt"]
+        self.assertIn("month", analyst)
+        self.assertIn(c.scope_label, analyst)
+        steward = agents["data-steward"]["prompt"]
+        self.assertIn("heat", steward)
+        self.assertIn("snapshots/manifest.json", steward)
+        # The system prompt quotes describe(), whose zone line may say "county";
+        # the hand-written parts of the subagent prompts must not.
+        for prompt in (text, analyst, steward):
+            self.assertNotIn("Storm Events", prompt)
+        for prompt in (analyst, steward):
+            self.assertNotIn("county", prompt.lower())
+            self.assertNotIn("fips", prompt.lower())
+
+    def test_no_subagent_holds_a_write_tool(self):
+        for name, spec in subagents.subagents_for(make_contract()).items():
+            with self.subTest(agent=name):
+                self.assertFalse({"Write", "Edit"} & set(spec["tools"]))
+
+
+class TestTestSplit(unittest.TestCase):
+    """The one path `run_local` never takes: scoring a candidate on test.
+
+    The touch budget lives on disk, so a second run of the same model version
+    must be refused before anything is scored, and a run with no budget at all
+    must not be able to score test by accident.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.contract = make_contract(name="flood-zz")
+        self.dataset = synthetic_dataset(self.contract, self.dir)
+        self.where = data_mod.paths(self.contract, experiments_dir=self.dir)
+        self.split = get_split(self.contract, "test")
+        self.candidate = orchestrator.BASELINE_QUEUE[1]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def budget(self) -> TouchBudget:
+        return TouchBudget(self.where.touch_budget, self.contract.test_touch_budget)
+
+    def score(self, budget):
+        return orchestrator.run_experiment(
+            self.candidate, self.dataset, self.split, Ledger(self.where.ledger),
+            touch_budget=budget,
+        )
+
+    def test_scoring_on_test_spends_exactly_one_touch_and_writes_a_test_card(self):
+        card = self.score(self.budget())
+        self.assertEqual(card.split, "test")
+        self.assertEqual(card.model, "climatology-seasonal")
+        on_disk = self.budget()
+        self.assertEqual(on_disk.count(card.model, card.version), 1)
+        self.assertEqual(on_disk.as_dict(), {f"{card.model}@{card.version}": 1})
+        ledger = Ledger(self.where.ledger)
+        self.assertEqual(len(ledger), 1)
+        self.assertTrue(ledger.verify().valid)
+
+    def test_a_second_touch_of_the_same_version_is_refused_before_scoring(self):
+        self.score(self.budget())
+        with self.assertRaises(SplitViolation):
+            self.score(self.budget())
+        self.assertEqual(len(Ledger(self.where.ledger)), 1)
+        self.assertEqual(self.budget().count("climatology-seasonal", "1.0.0"), 1)
+
+    def test_test_split_without_a_budget_is_refused(self):
+        with self.assertRaises(RuntimeError):
+            self.score(None)
+        self.assertFalse(self.where.ledger.exists())
+        self.assertFalse(self.where.touch_budget.exists())
 
 
 if __name__ == "__main__":

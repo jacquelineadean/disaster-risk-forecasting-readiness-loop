@@ -397,6 +397,11 @@ on a language model cannot have a bit-for-bit criterion.
 the subagents from report §4 (a hazard analyst for the contract's hazard, a
 calibration critic, a data steward). Needs `pip install 'readiness-loop[agent]'`
 and an API key. The harness is unchanged; no subagent is granted a write tool.
+Because Bash is a write channel whatever the prompt says, `readiness.agent.guard`
+hashes `readiness/harness/`, `readiness/contracts.py`, `readiness/config.py`,
+`readiness/verify.py`, the guard itself and `contracts/` before the run and
+again after it. Any byte that moved fails the run with the list of paths, and
+the cards it wrote are not to be trusted or committed.
 
 ### MCP
 

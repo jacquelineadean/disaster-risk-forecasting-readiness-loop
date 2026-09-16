@@ -25,9 +25,18 @@ from readiness.contracts import Contract
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "Bash"]
 
 
-def hazard_analyst(hazard: str, contract_name: str | None = None) -> dict:
-    """One peril, one context window, returns fitted parameters and scores only."""
+def hazard_analyst(
+    hazard: str, contract_name: str | None = None, contract: Contract | None = None
+) -> dict:
+    """One peril, one context window, returns fitted parameters and scores only.
+
+    The prompt's vocabulary comes from the contract when one is given (its
+    period and geography) so the analyst is told what it is forecasting in the
+    contract's own terms rather than in the terms of one country's data.
+    """
     which = f" (contract `{contract_name}`)" if contract_name else ""
+    period = contract.period if contract else "period"
+    where = f" in {contract.scope_label}" if contract else ""
     return {
         "description": (
             f"Fits and scores candidate {hazard} risk models against the locked "
@@ -36,7 +45,9 @@ def hazard_analyst(hazard: str, contract_name: str | None = None) -> dict:
         "prompt": (
             f"You are the {hazard} hazard analyst{which}.\n\n"
             f"Propose candidate models for P(at least one damaging {hazard} event "
-            "| region, period), fit them through the harness, and report back.\n\n"
+            f"| region, {period}){where}, fit them through the harness, and report "
+            "back. The regions and the event source are whatever the contract "
+            "declares; read `readiness contract` rather than assuming them.\n\n"
             "Return ONLY: the model name, its parameters, and the scorecard "
             "numbers (Brier, BSS, AUC, reliability bins). Do not return prose "
             "about your process — the orchestrator has a limited context window "
@@ -77,37 +88,51 @@ CALIBRATION_CRITIC = {
     "tools": ["Read", "Grep", "Glob"],
 }
 
-DATA_STEWARD = {
-    "description": (
-        "Watches for schema drift, stale sources, and upstream data that has "
-        "moved or been retired."
-    ),
-    "prompt": (
-        "You are the data steward.\n\n"
-        "Check snapshots/manifest.json against the live sources. Report:\n"
-        "  * any pinned file whose upstream sha256 has changed (the manifest "
-        "records this as a note; experiments run before the change are not "
-        "comparable to those run after)\n"
-        "  * any source that has stopped updating, moved, or been retired\n"
-        "  * any Storm Events column this project reads that has disappeared or "
-        "changed meaning\n\n"
-        "Report §7 is the standing brief here: NOAA retired the Billion-Dollar "
-        "Disasters product in May 2025 with no updates beyond CY2024. Core "
-        "series can stop. Your job is that we find out from you rather than from "
-        "a silently wrong number.\n\n"
-        "Do not modify snapshots. Report and stop."
-    ),
-    "tools": ["Read", "Grep", "Glob", "WebFetch"],
-}
+
+def data_steward(contract: Contract | None = None) -> dict:
+    """Watches the pinned sources for drift, whatever those sources are.
+
+    The sources are named by `snapshots/manifest.json`, not by this prompt, so
+    a contract whose ground truth is not a US product gets the same steward.
+    The NOAA retirement stays as the worked example of a series stopping.
+    """
+    hazard = contract.hazard if contract else "the contract's hazard"
+    return {
+        "description": (
+            "Watches for schema drift, stale sources, and upstream data that has "
+            "moved or been retired."
+        ),
+        "prompt": (
+            "You are the data steward.\n\n"
+            "Check the sources in snapshots/manifest.json against their upstream. "
+            "Report:\n"
+            "  * any pinned file whose upstream sha256 has changed (the manifest "
+            "records this as a note; experiments run before the change are not "
+            "comparable to those run after)\n"
+            "  * any source that has stopped updating, moved, or been retired\n"
+            f"  * any field this project reads for {hazard} events or regions "
+            "that has disappeared or changed meaning\n\n"
+            "Report §7 is the standing brief here, and the example: NOAA retired "
+            "the Billion-Dollar Disasters product in May 2025 with no updates "
+            "beyond CY2024. Core series can stop. Your job is that we find out "
+            "from you rather than from a silently wrong number.\n\n"
+            "Do not modify snapshots. Report and stop."
+        ),
+        "tools": ["Read", "Grep", "Glob", "WebFetch"],
+    }
+
+
+#: The contract-free steward, kept for callers that want the generic brief.
+DATA_STEWARD = data_steward()
 
 
 def subagents_for(contract: Contract) -> dict[str, dict]:
     """The subagents a loop against one contract gets."""
     key = f"hazard-analyst-{contract.hazard.replace('_', '-')}"
     return {
-        key: hazard_analyst(contract.hazard, contract.name),
+        key: hazard_analyst(contract.hazard, contract.name, contract),
         "calibration-critic": CALIBRATION_CRITIC,
-        "data-steward": DATA_STEWARD,
+        "data-steward": data_steward(contract),
     }
 
 
