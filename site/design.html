@@ -160,7 +160,7 @@ if leaked:
       <h3>Nothing in the harness calls a language model.</h3>
       <p>Verification has to be rules-based to be worth anything. If an LLM wants these numbers it reads them downstream, from the ledger. The verdict is mechanical: there is no judgement call, no "close enough", and no LLM in the path. If the numbers clear the contract's thresholds the model passes; otherwise it does not, and the failing checks say why.</p>
       <p>The same discipline shapes the two loop backends. The <code>local</code> backend walks a fixed queue of candidates with no model calls at all — that is what CI runs and what the bit-for-bit criterion is checked against, because a loop whose control flow depends on a language model cannot have a bit-for-bit criterion. The <code>claude</code> backend runs the same loop with an Agent SDK orchestrator; every number on every card still comes from <code>readiness.harness</code>, and no subagent is granted a write tool.</p>
-      <p class="mb0">The test-touch budget is persisted to disk, not held in memory — a budget that resets when you restart the process is not a budget — and scoring against <code>test</code> additionally requires an explicit <code>--spend-test-touch</code> flag.</p>
+      <p class="mb0">The test-touch budget is persisted to disk, not held in memory — a budget that resets when you restart the process is not a budget — and the test split can only be scored through <code>readiness promote</code>, which requires an explicit <code>--spend-test-touch</code> flag and writes the test card in the same step.</p>
     </div>
   </div>
 </div></section>
@@ -356,7 +356,8 @@ readiness hazards           list the hazard catalogue
 readiness models            list proposable models
 readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
 readiness panel             build the labelled panel, print coverage   [-c NAME]
-readiness score MODEL       fit and score one model  [-c NAME] [--split, --spend-test-touch]
+readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features, --param]
+readiness promote MODEL     the one test touch: score on test and write the card  [-c NAME] --spend-test-touch
 readiness loop              run the full experimental loop  [-c NAME] [--backend local|claude]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
 readiness ledger            show and verify the experiment ledger  [-c NAME]
