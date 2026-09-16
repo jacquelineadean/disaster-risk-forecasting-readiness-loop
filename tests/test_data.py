@@ -15,7 +15,7 @@ from unittest import mock
 
 from readiness import data as data_mod
 from readiness.connectors import census, nws_zones, storm_events
-from readiness.connectors.base import Manifest, SourceRecord
+from readiness.connectors.base import Manifest, SourceRecord, sha256_bytes
 from readiness.harness.labels import diagnose
 from tests.fixtures import STATE_FIPS, make_contract, make_panel
 
@@ -54,9 +54,9 @@ def storm_row(**over) -> dict:
     return row
 
 
-def record(source: str) -> SourceRecord:
+def record(source: str, sha256: str = "0" * 64) -> SourceRecord:
     return SourceRecord(
-        source=source, url=f"https://example.invalid/{source}", sha256="0" * 64,
+        source=source, url=f"https://example.invalid/{source}", sha256=sha256,
         bytes=1, fetched_at="2026-01-01T00:00:00+00:00", license="public domain",
     )
 
@@ -68,7 +68,9 @@ def write_snapshot(root: pathlib.Path, contract, rows_by_year: dict[int, list[di
     extracts = root / "storm_events"
     extracts.mkdir()
     manifest = Manifest(path=root / "manifest.json")
-    manifest.add(data_mod.CENSUS_KEY, record("census"))
+    # The loaders reuse a cached file only when its bytes hash to the record,
+    # so the county file's record must carry the real digest of what was written.
+    manifest.add(data_mod.CENSUS_KEY, record("census", sha256_bytes(CENSUS_TEXT.encode())))
     for year in contract.all_years():
         storm_events._write_extract(
             extracts / f"{STATE_FIPS}_{year}.jsonl", rows_by_year.get(year, [])
