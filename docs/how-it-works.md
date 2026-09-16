@@ -226,8 +226,8 @@ seasonal model lands differently on each:
 </tr>
 </table>
 
-- On **inland flooding** it has slight skill (+0.017) and misses the AUC
-  floor.
+- On **inland flooding** it has slight skill (+0.017) but fails both
+  reliability and the AUC floor.
 - On **tornadoes** it discriminates well and fails only on calibration.
 - On **monthly tropical cyclones** it *passes*: the season is so sharp that
   region plus month clears every clause. Its skill score is +0.009, because

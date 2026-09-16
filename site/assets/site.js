@@ -129,7 +129,7 @@
     const x = (y) => pad + ((y - y0) / (y1 - y0)) * (width - 2 * pad);
     const seg = (name, [a, b], cls) => {
       const w = x(b + 1) - x(a);
-      return `<rect class="${cls}" x="${x(a).toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" stroke="var(--rule)"/>` +
+      return `<rect class="${cls}" x="${x(a).toFixed(1)}" y="${barY}" width="${w.toFixed(1)}" height="${barH}" stroke="var(--hair)"/>` +
         `<text class="label" x="${(x(a) + w / 2).toFixed(1)}" y="${barY + 17}" text-anchor="middle">${name}</text>` +
         `<text class="sub" x="${x(a).toFixed(1)}" y="${barY + barH + 16}">${a}</text>` +
         `<text class="sub" x="${x(b + 1).toFixed(1)}" y="${barY + barH + 16}" text-anchor="end">${b}</text>`;

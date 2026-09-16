@@ -20,6 +20,7 @@ The machine-readable version — with a sha256 for every file actually pulled �
 |---|---|---|---|---|
 | Hazard ground truth | NOAA NCEI Storm Events Database | US Government work, public domain (17 U.S.C. §105) | no | cite NOAA NCEI |
 | County universe | US Census Bureau, national county file (2020) | US Government work, public domain | no | cite the Census Bureau |
+| Zone-county crosswalk | NWS zone-county correlation file | US Government work, public domain (17 U.S.C. §105) | no | cite NOAA NWS; pinned only when a contract's `zone_policy` is `expand` |
 
 Neither layer imposes a share-alike obligation, so **the Phase 0 derived panel
 carries no inherited licence constraint**. This project's own code is Apache-2.0.

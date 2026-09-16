@@ -1,7 +1,6 @@
 # experiments/
 
-One directory per registered contract, created the first time `readiness loop`
-or `readiness score --split test` runs against it:
+One directory per registered contract:
 
 ```
 experiments/<contract>/ledger.jsonl              the append-only experiment ledger
@@ -9,8 +8,17 @@ experiments/<contract>/ledger.jsonl.anchor.json  head hash + card count, against
 experiments/<contract>/test_touches.json         how often each model version touched TEST
 ```
 
-All three are meant to be committed. A ledger without its anchor cannot rule
-out tail truncation; a touch budget that is not committed is not a budget.
+`ledger.jsonl` and its anchor are created the first time `readiness loop` runs
+against the contract. `test_touches.json` is created later, and only then: it
+appears the first time a model version actually spends a test touch (`readiness
+score --split test --spend-test-touch`), not on every loop run against the
+validate split, and not just because `--split test` was passed without
+`--spend-test-touch`. A contract that has never touched TEST has no
+`test_touches.json` at all, and that absence is itself the record.
+
+All three, once present, are meant to be committed. A ledger without its
+anchor cannot rule out tail truncation; a touch budget that is not committed
+is not a budget.
 
 To run the loop, or spend a test touch, without appending to these committed
 files — a scratch experiment, a fourth contract not ready to commit, or CI —

@@ -31,6 +31,10 @@ forecasting model yet, on purpose — see
 No dependencies. Python 3.10+.
 
 ```bash
+make install   # pip install -e ., so the `readiness` entry point exists
+```
+
+```bash
 readiness register flood-xx --hazard inland_flood --state XX   # pre-register a contract
 ```
 
@@ -129,7 +133,7 @@ is seen running across hazards, scopes, periods and zone policies:
 
 | contract | hazard | scope | period | zone events | panel |
 |---|---|---|---|---|---|
-| `inland-flood-la` | inland flood | one state (64 parishes) | quarter | dropped (county-coded hazard) | 7,680 units, base rate 8.0% |
+| `inland-flood-la` | inland flood | one state (64 parishes) | quarter | dropped (inland_flood is mixed-coded; Flash Flood is county-coded, Flood mostly so) | 7,680 units, base rate 8.0% |
 | `tornado-ok` | tornado | one state (77 counties) | quarter | dropped (county-coded hazard) | 9,240 units, base rate 6.8% |
 | `tropical-cyclone-gulf` | tropical cyclone | five states (534 counties) | month | expanded via the NWS crosswalk | 192,240 units, base rate 0.66% |
 
@@ -162,20 +166,27 @@ Read the tables as assertions about the harness, not as forecasts:
 1. **The reference scores exactly 0.0000 / 0.5000 on every contract**, and
    still fails every contract, because being climatology is not beating it.
 2. **The same seasonal model lands differently on each hazard.** On the
-   flood contract it has slight skill and misses the AUC floor; on tornadoes
-   it discriminates well (AUC 0.82) and fails only on calibration — its worst
-   populated bin ([0.2, 0.3), n=90) forecasts 0.245 against an observed 0.322,
-   a 7.7-point miss where the contract allows 5; on monthly tropical cyclones
-   it *passes* — the season is
-   so sharp that knowing the region and the month clears every clause. Its
-   skill score there is +0.009, because at a 0.66% base rate the pooled
-   reference is already nearly right nearly everywhere. A passing contract
-   is permission to spend one test touch, not a claim of a forecast.
-3. **The persistence baseline is rejected on every contract**, for a different
-   clause each time. It issues the last training year's outcome as a fixed
-   level for every holdout year, so on the tornado contract that fixed level
-   still carries a little skill (BSS +0.0114); on tropical cyclones it has
-   none.
+   flood contract it has slight skill (+0.0169) but fails both reliability
+   (worst populated bin [0.2, 0.3), n=55, deviates 10.3 points against a
+   5-point tolerance) and the AUC floor (0.5957); on tornadoes it discriminates
+   well (AUC 0.82) and fails only on calibration — its worst populated bin
+   ([0.2, 0.3), n=90) forecasts 0.245 against an observed 0.322, a 7.7-point
+   miss where the contract allows 5; on monthly tropical cyclones it *passes*
+   — the season is so sharp that knowing the region and the month clears
+   every clause. Its skill score there is +0.009, because at a 0.66% base
+   rate the pooled reference is already nearly right nearly everywhere. A
+   passing contract is permission to spend one test touch, not a claim of a
+   forecast.
+3. **The persistence baseline is FAILED, not rejected, on every contract** —
+   only the leakage canary rejects; the contract fails things. It issues the
+   last training year's outcome as a fixed level for every holdout year, so
+   it never discriminates well enough to clear the AUC floor anywhere (0.50
+   on flood and tropical cyclones, 0.54 on tornadoes). On the flood contract
+   that fixed level also has negative skill (BSS -0.0526) and misses
+   reliability; on tropical cyclones it has negative skill too (-0.0588) but
+   passes reliability; on tornadoes it is the one contract where the fixed
+   level carries a little real skill (BSS +0.0114) and clears reliability —
+   AUC alone still fails it.
 4. **The leaky oracle is rejected everywhere**, tripping all four canary
    checks. Running the canary across base rates from 8% to 0.66% is what
    exposed — and fixed — a check that had been calibrated to one hazard:
@@ -272,6 +283,7 @@ hazard          inland_flood  ['Flood', 'Flash Flood']
 geography       US, XX
 forecast unit   region x quarter
 damaging event  property >= $10,000 or any casualty
+zone events     dropped (do not join to counties)
 train           1996-2015  (20y)
 validate        2016-2020  (5y)
 test            2021-2025  (5y, 1 touch)
@@ -302,10 +314,16 @@ listing its event types.
 One caveat the catalogue makes explicit: Storm Events codes convective hazards
 against counties and most broad-scale hazards — heat, tropical cyclones,
 winter storms, wildfire — against NWS forecast zones. Zone-coded rows do not
-join to a county universe, and the label builder drops them. `readiness panel`
-reports exactly how many events went where, and warns when a hazard is mostly
-zone-coded, so a thin panel is explained rather than mistaken for a rare
-hazard. Joining zones to counties is the next step on the data plane.
+join to a county universe on their own, and by default (`zone_policy: drop`)
+the label builder discards them. The join exists:
+[`readiness/connectors/nws_zones.py`](readiness/connectors/nws_zones.py) pins
+the NWS zone-county correlation file, and a contract registered with
+`--zone-policy expand` has the label builder map each zone-coded event to
+every county in its NWS zone instead of dropping it — `tropical-cyclone-gulf`
+is registered this way. `readiness panel` reports exactly how many events went
+where under either policy — dropped, expanded, unmapped — and warns when a
+hazard is mostly zone-coded and still set to `drop`, so a thin panel is
+explained rather than mistaken for a rare hazard.
 
 ### The ledger
 
@@ -344,6 +362,7 @@ clone reproduces the exact data version without carrying the bytes.
 |---|---|---|
 | ground truth | NOAA Storm Events, 1996– | the validation target, every hazard |
 | region universe | Census national county file | the panel denominator, any state or all |
+| zone-county crosswalk | NWS zone-county correlation file | joins zone-coded events (heat, tropical cyclones, winter storms, wildfire, …) to counties, pinned only for contracts registered with `--zone-policy expand` |
 
 Each Storm Events year file is national, so one download serves every state
 and every hazard: it is checksummed, split into one compact extract per state
@@ -375,7 +394,7 @@ readiness panel             build the labelled panel, print coverage   [-c NAME]
 readiness score MODEL       fit and score one model  [-c NAME] [--split, --spend-test-touch]
 readiness loop              run the full experimental loop  [-c NAME] [--backend local|claude]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
-readiness ledger            show and verify the experiment ledger  [-c NAME]
+readiness ledger            show and verify the experiment ledger  [-c NAME] [--show] [--id ID]
 readiness verify            check the Phase 0 exit criteria  [-c NAME] [--bless]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
@@ -385,6 +404,9 @@ readiness mcp               run the read-only MCP data server on stdio  [-c NAME
 `-c/--contract` takes a registered name or a path to a contract JSON. If it is
 omitted the CLI uses `$READINESS_CONTRACT`, then the sole registered contract
 if there is exactly one; with several registered it refuses and lists them.
+
+`readiness ledger --id exp-0002` prints that one card on its own; `--id`
+implies `--show`, so it is sufficient by itself.
 
 ### The agent backends
 
@@ -423,18 +445,21 @@ There is no tool that returns a holdout outcome, and a test asserts it.
 readiness/
   contracts.py       the contract schema, validation, digest and registry. Do not edit while iterating.
   config.py          harness-wide policy: the hazard catalogue, record start, canary ceilings
-  connectors/        data plane: base (pinning, HTTP), census, storm_events, mcp_server
+  data.py            builds a contract's dataset: snapshot, panel, provenance; input_keys/pinned
+  verify.py          the Phase 0 exit criteria as a library: reproducibility fingerprint, canary check
+  connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server
   harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
   engine/            proposable models: climatologies, persistence, the canary target
-  agent/             orchestrator + subagent definitions
+  agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
 contracts/           registered contracts, one JSON file each; three examples ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
-docs/                how-it-works.md (the walkthrough), contracts.md (the reference), media/
-skills/              agent runbooks: verification protocol, experiment-card format
+docs/                how-it-works.md (the walkthrough), contracts.md (the reference), plan.md and
+                     plan-design-annex.md (the refactor plan and its design annex), media/
+skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
 tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media)
 site/                the overview website: pages, and the browser sandbox that runs the package
 plans/               scenario library — the Phase 3 seed

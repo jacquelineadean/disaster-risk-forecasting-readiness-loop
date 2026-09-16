@@ -143,6 +143,85 @@ class TestVerdict(unittest.TestCase):
         self.assertIn("contract changed", prov.detail)
 
 
+class TestCheckAndVerdictShapes(unittest.TestCase):
+    """format() and to_dict(): the printed and the serialised shape of a verdict."""
+
+    def test_check_format_marks_pass_and_fail(self):
+        passed = contract_mod.Check("auc", True, "0.9 vs required >= 0.7")
+        failed = contract_mod.Check("auc", False, "0.5 vs required >= 0.7")
+        self.assertEqual(
+            passed.format(), "  [PASS] auc                      0.9 vs required >= 0.7"
+        )
+        self.assertIn("[FAIL]", failed.format())
+        self.assertIn("auc", failed.format())
+        self.assertIn(failed.detail, failed.format())
+
+    def test_verdict_format_leads_with_the_contract_and_the_pass_fail_head(self):
+        verdict = contract_mod.evaluate(card(), CONTRACT)
+        text = verdict.format()
+        lines = text.splitlines()
+        self.assertIn(CONTRACT.name, lines[0])
+        self.assertIn(f"sha256:{CONTRACT.digest()}", lines[0])
+        self.assertTrue(lines[0].endswith("PASS"))
+        # One line per check, in the same order as verdict.checks.
+        self.assertEqual(len(lines), 1 + len(verdict.checks))
+        for line, check in zip(lines[1:], verdict.checks):
+            self.assertEqual(line, check.format())
+
+    def test_verdict_format_head_says_fail_when_any_check_fails(self):
+        verdict = contract_mod.evaluate(card(auc=0.0), CONTRACT)
+        self.assertTrue(verdict.format().splitlines()[0].endswith("FAIL"))
+
+    def test_verdict_to_dict_round_trips_every_field_including_nested_checks(self):
+        verdict = contract_mod.evaluate(card(), CONTRACT)
+        d = verdict.to_dict()
+        self.assertEqual(
+            set(d),
+            {"passed", "checks", "contract", "contract_version", "contract_digest"},
+        )
+        self.assertEqual(d["passed"], verdict.passed)
+        self.assertEqual(d["contract"], CONTRACT.name)
+        self.assertEqual(d["contract_version"], CONTRACT.version)
+        self.assertEqual(d["contract_digest"], CONTRACT.digest())
+        self.assertIsInstance(d["checks"], tuple)
+        self.assertEqual(len(d["checks"]), len(verdict.checks))
+        for entry, check in zip(d["checks"], verdict.checks):
+            self.assertEqual(entry, {
+                "name": check.name, "passed": check.passed, "detail": check.detail
+            })
+
+
+class TestReliabilityToleranceBoundary(unittest.TestCase):
+    """The reliability clause is `dev <= tolerance`: the tolerance value itself passes."""
+
+    def _card_with_deviation(self, dev: float) -> scoring.Scorecard:
+        bins = list(card().reliability_bins)
+        bins[3] = dict(bins[3], observed_frequency=bins[3]["mean_forecast"] + dev)
+        return card(reliability_bins=tuple(bins))
+
+    def test_deviation_exactly_at_tolerance_passes(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(self._card_with_deviation(tolerance), CONTRACT)
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertTrue(rel.passed, rel.detail)
+
+    def test_deviation_just_above_tolerance_fails(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(
+            self._card_with_deviation(tolerance + 1e-9), CONTRACT
+        )
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertFalse(rel.passed, rel.detail)
+
+    def test_deviation_just_below_tolerance_passes(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(
+            self._card_with_deviation(tolerance - 1e-9), CONTRACT
+        )
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertTrue(rel.passed, rel.detail)
+
+
 class TestHoldoutSplit(unittest.TestCase):
     """A card scored on the training years may be printed but never PASS."""
 

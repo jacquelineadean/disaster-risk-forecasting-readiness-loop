@@ -367,7 +367,32 @@ def tamper(raw: str) -> str:
         text = where.ledger.read_text(encoding="utf-8")
         lines = [line for line in text.splitlines() if line.strip()]
 
-        if action == "edit" and len(lines) > 1:
+        # Each action needs a minimum number of cards to make sense against;
+        # a ledger shorter than that cannot be tampered with the way the demo
+        # describes, and must say so rather than silently do nothing and
+        # report success.
+        needs = {"edit": 2, "swap": 3, "delete-middle": 3, "truncate": 1, "forge": 1}
+        minimum = needs.get(action, 0)
+        if len(lines) < minimum:
+            status = ledger.verify()
+            return json.dumps(
+                {
+                    "contract": c.name,
+                    "action": action,
+                    "description": (
+                        f"could not apply — {c.name}'s ledger has only "
+                        f"{len(lines)} card(s), and {action!r} needs at least "
+                        f"{minimum}. Run the loop again first. The ledger was "
+                        "not touched."
+                    ),
+                    "applied": False,
+                    "valid": status.valid,
+                    "status": status.format(),
+                    "forged": False,
+                }
+            )
+
+        if action == "edit":
             import re
 
             def bump(m: "re.Match[str]") -> str:
@@ -376,11 +401,11 @@ def tamper(raw: str) -> str:
             lines[1] = re.sub(
                 r'"brier_skill_score":(-?[0-9.eE+-]+)', bump, lines[1], count=1
             )
-        elif action == "swap" and len(lines) > 2:
+        elif action == "swap":
             lines[1], lines[2] = lines[2], lines[1]
-        elif action == "delete-middle" and len(lines) > 2:
+        elif action == "delete-middle":
             del lines[2]
-        elif action in ("truncate", "forge") and lines:
+        elif action in ("truncate", "forge"):
             lines.pop()
         elif action == "no-anchor":
             if ledger.anchor_path.exists():
@@ -395,6 +420,7 @@ def tamper(raw: str) -> str:
                 "contract": c.name,
                 "action": action,
                 "description": TAMPER_ACTIONS[action],
+                "applied": True,
                 "valid": status.valid,
                 "status": status.format(),
                 "forged": action == "forge",

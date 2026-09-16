@@ -77,7 +77,7 @@ And one that did not work — equally valuable:
 ```bash
 readiness ledger -c <contract>              # summary table + chain verification
 readiness ledger -c <contract> --show       # full cards
-readiness ledger -c <contract> --id exp-0002
+readiness ledger -c <contract> --id exp-0002  # one card; --id implies --show
 ```
 
 If `verify()` reports a broken chain, stop. Every score above the break is
