@@ -18,8 +18,12 @@ Seven readers, one per subsystem, read every line of their subsystem and its
 tests and returned a module map, the invariants they saw enforced, and
 findings with quoted evidence. Every finding was then given to two skeptics
 (one for "is it real", one for "is it worth doing in a refactor that must keep
-the ledgers bit-for-bit"); a finding survives only if neither refuted it. The
-raw count was 116 findings; the ones adopted are listed in §1 by cluster.
+the ledgers bit-for-bit"); a finding survives only if neither refuted it. Of
+116 raw findings, 76 survived and 40 were refuted. The adopted ones are listed
+in §1 by cluster. A few refuted findings were adopted anyway because the fix
+was cheap and made a later phase simpler (the engine base class, the single
+`build_model` gate, the reliability flag reuse); a few confirmed ones were
+declined, with the reason, at the end of §1.
 
 Two facts constrain everything below:
 
@@ -106,6 +110,33 @@ fix can move a committed number (it never does; the guard proves it).
 | README says 260 tests (277), misstates the tornado calibration miss (12 points; the ledger says 7.7), and runs the quickstart against the committed ledgers without naming `READINESS_EXPERIMENTS_DIR`; skills say every scored run writes a card (`score` does not) | corrected |
 | no CI runs the test suite | `.github/workflows/test.yml`: the suite on 3.10 and 3.12, no network; `real-data.yml`: manual, restores the pinned-data cache and runs `verify` for a contract and phase |
 
+### R7. The low-severity sweep
+
+Confirmed low-severity findings worth carrying, done as one pass after R1–R6:
+
+- `Ledger.append` writes the card and the anchor in two steps; a crash between
+  them reads as truncation. The anchor is written atomically (temp file and
+  rename) and the card line is flushed first.
+- Card status (REJECTED / PASS / FAIL) is derived in three places and the
+  card-to-JSON line is copied in three modules: both become methods on
+  `ExperimentCard` (methods, not fields, so hashes are untouched).
+- `readiness ledger --id` is ignored without `--show`; `dashboard --all` with
+  `-c` or `-o` is silently partial; a JSON-RPC message that is valid JSON but
+  not an object kills the MCP server; `Contract.from_spec` lets a `TypeError`
+  or `ValueError` escape as a traceback; `make clean-derived` deletes the
+  tracked report; `tests/test_labels.py` calls `unittest.main()` before its
+  last class. All fixed.
+- README: the flood contract's seasonal model fails reliability as well as
+  the AUC floor; persistence is *failed*, not *rejected*; `inland_flood` is
+  mixed-coded; the zone join exists (`connectors/nws_zones.py`) and is a third
+  pinned layer; the repository map and skills list are completed; the install
+  step precedes the `readiness` entry point. `experiments/README.md` and
+  `harness_expected/README.md` say exactly what their files record.
+- The site's register form and the playground re-state the contract defaults
+  and the models' parameters in JavaScript; the build exports
+  `contracts.DEFAULTS` and each model's parameter schema (added to
+  `ModelSpec` for Phase 1's models) and the JavaScript reads them.
+
 ### Declined or deferred, with the reason
 
 - *Ledger card hashes include a wall-clock timestamp, so `loop` is not
@@ -119,6 +150,12 @@ fix can move a committed number (it never does; the guard proves it).
 - *`readiness.engine` transitively imports `readiness.contracts` through
   `harness.labels`.* The rule is about the judge and the canary; the type
   import is harmless and the boundary test checks direct imports.
+- *The scope digest is order-sensitive: the same states in another order is a
+  different contract.* Normalising the order would change the committed
+  five-state contract's digest. Duplicates are rejected; order is documented
+  as significant.
+- *`utc_now()` is defined three times.* Each plane keeps its own to avoid an
+  import from the harness into the connectors or back.
 - Everything filed as a Phase 1–4 blocker (feature channel, generic region and
   ground-truth sources, national scope in the site packer, hazard taxonomy) is
   handled in its phase below, not in R.
