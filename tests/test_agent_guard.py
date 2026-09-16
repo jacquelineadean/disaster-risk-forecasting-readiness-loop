@@ -195,7 +195,10 @@ class TestCardCheck(unittest.TestCase):
 
     def test_a_card_scored_under_the_starting_harness_passes(self):
         expected = guard.tree_digest(self.root)
-        run = lambda: self.ledger.append(self.card(guard.tree_digest(self.root)))
+
+        def run():
+            self.ledger.append(self.card(guard.tree_digest(self.root)))
+
         orchestrator._run_guarded(run, root=self.root, ledger=self.ledger)
         self.assertEqual(list(self.ledger.read())[0].data_snapshot["harness_digest"], expected)
 
@@ -214,7 +217,9 @@ class TestCardCheck(unittest.TestCase):
         self.assertIn("ledger card exp-0001", cm.exception.paths[0])
 
     def test_a_card_with_no_digest_is_refused(self):
-        run = lambda: self.ledger.append(self.card(None))
+        def run():
+            self.ledger.append(self.card(None))
+
         with self.assertRaises(guard.HarnessTampered) as cm:
             orchestrator._run_guarded(run, root=self.root, ledger=self.ledger)
         self.assertIn("unknown", cm.exception.paths[0])
