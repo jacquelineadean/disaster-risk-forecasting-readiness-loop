@@ -104,12 +104,12 @@
   RL.verdictTag = function (card) {
     const v = RL.verdictOf(card);
     const cls = v === "REJECTED" ? "reject" : v === "PASS" ? "pass" : "fail";
-    return `<span class="tag ${cls}">${v}</span>`;
+    return `<span class="pill ${cls}">${v}</span>`;
   };
   RL.checksList = (checks) =>
-    `<ul class="checks">${(checks || []).map((c) => `<li><span class="tag ${c.passed ? "pass" : "fail"}">${c.passed ? "PASS" : "FAIL"}</span><span><strong>${RL.esc(c.name)}</strong> — ${RL.esc(c.detail)}</span></li>`).join("")}</ul>`;
+    `<ul class="checks">${(checks || []).map((c) => `<li><span class="pill ${c.passed ? "pass" : "fail"}">${c.passed ? "PASS" : "FAIL"}</span><span><strong>${RL.esc(c.name)}</strong> — ${RL.esc(c.detail)}</span></li>`).join("")}</ul>`;
   RL.findingsList = (findings) =>
-    `<ul class="checks">${(findings || []).map((f) => `<li><span class="tag ${f.tripped ? "tripped" : "clear"}">${f.tripped ? "TRIPPED" : "clear"}</span><span><strong>${RL.esc(f.check)}</strong> — ${RL.esc(f.detail)}</span></li>`).join("")}</ul>`;
+    `<ul class="checks">${(findings || []).map((f) => `<li><span class="pill ${f.tripped ? "tripped" : "clear"}">${f.tripped ? "TRIPPED" : "clear"}</span><span><strong>${RL.esc(f.check)}</strong> — ${RL.esc(f.detail)}</span></li>`).join("")}</ul>`;
 
   RL.summaryTable = function (cards, opts = {}) {
     const rows = cards.map((c) => {
@@ -183,6 +183,42 @@
     ? `ledger chain intact: ${st.n_cards} card(s)`
     : `ledger chain BROKEN at card index ${st.broken_at}: ${st.reason}\n  history has been edited or reordered; the scores above this point cannot be trusted`;
 
+  // --- the panel as tiles: one per region, shaded by how often it saw an event ---
+  // tapes.json (tools/build_site.py) carries each contract's labels as a bit
+  // string, period-major: bit p * n_regions + r is region r in period p.
+  RL.decodeBits = function (b64) {
+    const bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  };
+  RL.tapeBit = (bytes, i) => (bytes[i >> 3] >> (7 - (i & 7))) & 1;
+  RL.tapeLayout = function (n, w, h, pad = 0) {
+    const iw = Math.max(1, w - 2 * pad), ih = Math.max(1, h - 2 * pad);
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n * iw / ih)));
+    const rows = Math.max(1, Math.ceil(n / cols));
+    const cell = Math.min(iw / cols, ih / rows);
+    const x0 = pad + (iw - cols * cell) / 2, y0 = pad + (ih - rows * cell) / 2;
+    return { cols, rows, cell, gap: cell * 0.18, x0, y0, at: (i) => [x0 + (i % cols) * cell, y0 + Math.floor(i / cols) * cell] };
+  };
+  const hex = (c) => [parseInt(c.slice(1, 3), 16), parseInt(c.slice(3, 5), 16), parseInt(c.slice(5, 7), 16)];
+  RL.mix = function (a, b, t) {
+    const A = typeof a === "string" ? hex(a) : a, B = typeof b === "string" ? hex(b) : b;
+    const k = Math.min(1, Math.max(0, t));
+    return `rgb(${A.map((v, i) => Math.round(v + (B[i] - v) * k)).join(",")})`;
+  };
+  RL.tapeSVG = function (tape, w = 320, h = 150) {
+    const L = RL.tapeLayout(tape.n_regions, w, h, 10);
+    const max = Math.max(1, ...tape.freq);
+    const side = Math.max(1, L.cell - L.gap), r = Math.min(3, side * 0.22);
+    const unit = tape.period === "quarter" ? "quarters" : tape.period === "month" ? "months" : "years";
+    const rects = tape.freq.map((f, i) => {
+      const [x, y] = L.at(i);
+      const name = tape.regions[i] ? tape.regions[i].name : String(i);
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${side.toFixed(1)}" height="${side.toFixed(1)}" rx="${r.toFixed(1)}" fill="${RL.mix("#e9edf2", "#2b5aa8", Math.sqrt(f / max))}"><title>${RL.esc(name)}: ${f} of ${tape.n_periods} ${unit}</title></rect>`;
+    });
+    return `<svg class="tape" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${RL.esc(tape.contract)}: one tile per region, shaded by how often it recorded a damaging event">${rects.join("")}</svg>`;
+  };
+
   // --- deep links into the sandbox ---------------------------------------------
   RL.sandboxLink = (argv, extra = "") => `playground.html?cmd=${encodeURIComponent(argv)}${extra}`;
   RL.runLink = (argv, label) =>
@@ -191,9 +227,45 @@
   // --- page boot: active nav, build stamp ------------------------------------
   document.addEventListener("DOMContentLoaded", () => {
     const page = document.body.dataset.page;
-    document.querySelectorAll("nav.site a[data-page]").forEach((a) => {
+    document.querySelectorAll(".top__nav a[data-page]").forEach((a) => {
       if (a.dataset.page === page) a.classList.add("active");
     });
+    // the top bar: a shadow once scrolled, a menu on narrow screens
+    const top = document.querySelector(".top");
+    if (top) {
+      const onScroll = () => top.classList.toggle("is-scrolled", window.scrollY > 8);
+      onScroll();
+      window.addEventListener("scroll", onScroll, { passive: true });
+      const menu = top.querySelector(".top__menu");
+      if (menu) {
+        menu.addEventListener("click", () => {
+          const open = top.classList.toggle("is-open");
+          menu.setAttribute("aria-expanded", String(open));
+        });
+        top.querySelectorAll(".top__nav a").forEach((a) => a.addEventListener("click", () => {
+          top.classList.remove("is-open"); menu.setAttribute("aria-expanded", "false");
+        }));
+      }
+    }
+    // the jump bar: the link of the section that is under the bar reads as active
+    const jump = document.querySelector(".jumpbar");
+    if (jump) {
+      const links = Array.from(jump.querySelectorAll("a[href^='#']"));
+      const targets = links.map((a) => document.getElementById(decodeURIComponent(a.hash.slice(1)))).filter(Boolean);
+      if (targets.length) {
+        const offset = () => (top ? top.offsetHeight : 0) + jump.offsetHeight + 24;
+        let ticking = false;
+        const update = () => {
+          ticking = false;
+          let cur = null;
+          for (const el of targets) if (el.getBoundingClientRect().top - offset() <= 0) cur = el;
+          if (!cur && window.scrollY < 40) cur = null;
+          links.forEach((a) => a.classList.toggle("active", !!cur && a.hash === "#" + cur.id));
+        };
+        window.addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+        update();
+      }
+    }
     const stamp = document.querySelector("[data-built]");
     if (stamp) {
       RL.fetchJSON("build.json").then((b) => {

@@ -193,8 +193,13 @@ make site          # generate site/generated/ from the registry, ledgers, finger
 make serve-site    # http://localhost:8138
 ```
 
+The look is a quiet research microsite: one reading column on white, one
+typeface, whitespace instead of rules, and pictures that are the data — the
+tile maps on the overview and the animated hero are the contracts' own
+labelled panels, one tile per county, drawn from `generated/tapes.json`.
+
 `tools/build_site.py` writes nothing by hand: contracts, digests, ledgers,
-hazard catalogue, model registry and transcripts are read from the same
+hazard catalogue, model registry, panels and transcripts are read from the same
 modules the CLI uses, and the sandbox archive packs whatever pinned extracts
 are in `snapshots/` (run `make snapshot CONTRACT=<name>` first; without them
 the sandbox still registers and validates contracts, it just cannot build a

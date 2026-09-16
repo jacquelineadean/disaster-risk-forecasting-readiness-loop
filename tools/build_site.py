@@ -14,6 +14,8 @@ modules the CLI uses, into `site/generated/`:
     expected.json      the blessed baseline fingerprints, one per contract
     panels.json        each contract's labelled panel: size, splits, event coverage
                        (only for contracts whose pinned data is present locally)
+    tapes.json         the same panels as bit strings, period-major, for the tile
+                       maps and the animated hero (only with the pinned data)
     transcripts.json   the walkthrough transcripts captured by tools/demo/capture.py
     media/             the recordings and screenshots the walkthrough embeds
     report/index.html  the research briefing, so the site is self-contained
@@ -35,6 +37,7 @@ contract's event types only, to keep the download small.
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as _dt
 import io
 import json
@@ -247,13 +250,19 @@ def _pinned_locally(c: contracts_mod.Contract, snapshot_dir: pathlib.Path,
     return True
 
 
-def build_panels(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) -> None:
-    """Panel statistics per contract, built from pinned data only; never downloads."""
+def build_panels(
+    out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
+) -> dict[str, data_mod.Dataset]:
+    """Panel statistics per contract, built from pinned data only; never downloads.
+
+    Returns the datasets it built, so the tapes can be cut from the same panels.
+    """
     from readiness.harness import splits
 
     snapshot_dir = data_mod.SNAPSHOT_DIR
     fips_of = _state_fips_map(snapshot_dir)
     panels: dict[str, dict | None] = {}
+    datasets: dict[str, data_mod.Dataset] = {}
     for name, c in registry.items():
         if not _pinned_locally(c, snapshot_dir, fips_of):
             panels[name] = None
@@ -265,6 +274,7 @@ def build_panels(out: pathlib.Path, registry: dict[str, contracts_mod.Contract])
             panels[name] = None
             log(f"panels.json: {name}: could not build ({exc})")
             continue
+        datasets[name] = ds
         panel, d = ds.panel, ds.diagnostics
         by_split = {}
         for split in c.splits:
@@ -304,6 +314,59 @@ def build_panels(out: pathlib.Path, registry: dict[str, contracts_mod.Contract])
         }
         log(f"panels.json: {name}: {panel.summary()}")
     dump(out / "panels.json", panels)
+    return datasets
+
+
+def build_tapes(
+    out: pathlib.Path, registry: dict[str, contracts_mod.Contract],
+    datasets: dict[str, data_mod.Dataset],
+) -> None:
+    """Each built panel as a bit string, period-major: bit p * n_regions + r is
+    region r (in FIPS order) in period p (in time order). The site draws one tile
+    per region from it — shaded by frequency on the contract cards, lit frame by
+    frame in the hero — so the pictures are the panels, not illustrations."""
+    tapes: dict[str, dict] = {}
+    for name, ds in datasets.items():
+        c = registry[name]
+        panel = ds.panel
+        regions = [county.fips for county in ds.regions]
+        rindex = {fips: i for i, fips in enumerate(regions)}
+        periods = sorted({(year, period) for _region, year, period in panel.units})
+        pindex = {yp: i for i, yp in enumerate(periods)}
+        n_regions, n_periods = len(regions), len(periods)
+        buf = bytearray((n_regions * n_periods + 7) // 8)
+        counts = [0] * n_periods
+        freq = [0] * n_regions
+        for (region, year, period), label in zip(panel.units, panel.labels):
+            if not label:
+                continue
+            p, r = pindex[(year, period)], rindex[region]
+            i = p * n_regions + r
+            buf[i >> 3] |= 0x80 >> (i & 7)
+            counts[p] += 1
+            freq[r] += 1
+        tapes[name] = {
+            "contract": name,
+            "hazard": c.hazard,
+            "period": c.period,
+            "periods_per_year": c.periods_per_year,
+            "years": [periods[0][0], periods[-1][0]],
+            "n_periods": n_periods,
+            "n_regions": n_regions,
+            "regions": [{"fips": r.fips, "name": r.name} for r in ds.regions],
+            "splits": {
+                "train": [c.train_years[0], c.train_years[-1]],
+                "validate": [c.validate_years[0], c.validate_years[-1]],
+                "test": [c.test_years[0], c.test_years[-1]],
+            },
+            "base_rate": panel.base_rate,
+            "n_positive": sum(panel.labels),
+            "counts": counts,
+            "freq": freq,
+            "bits": base64.b64encode(bytes(buf)).decode("ascii"),
+        }
+        log(f"tapes.json: {name}: {n_regions} regions x {n_periods} periods")
+    dump(out / "tapes.json", tapes)
 
 
 def build_transcripts(out: pathlib.Path) -> None:
@@ -439,7 +502,8 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
                 years.append(int(p.stem.split("_")[1]))
                 if keep is None:
                     add(p)
-                    rows += sum(1 for line in p.open(encoding="utf-8") if line.strip())
+                    with p.open(encoding="utf-8") as fh:
+                        rows += sum(1 for line in fh if line.strip())
                 else:
                     text, n = _filter_rows(p.read_text(encoding="utf-8"), keep)
                     rows += n
@@ -544,7 +608,8 @@ def build(out: pathlib.Path, *, sandbox: bool = True) -> None:
     build_models(out)
     build_ledgers(out, registry)
     build_expected(out, registry)
-    build_panels(out, registry)
+    datasets = build_panels(out, registry)
+    build_tapes(out, registry, datasets)
     build_transcripts(out)
     copy_media(out)
     if sandbox:

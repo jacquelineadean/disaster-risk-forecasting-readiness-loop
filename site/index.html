@@ -9,101 +9,86 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="assets/site.css">
 </head>
 <body data-page="index">
 
-<div class="mast"><div class="bar">
-  <a class="brand" href="index.html">The Readiness Loop<span>Phase 0 · any hazard</span></a>
-  <nav class="site">
-    <a data-page="index" href="index.html">Overview</a>
-    <a data-page="design" href="design.html">System design</a>
-    <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
-    <a data-page="ledgers" href="ledgers.html">Ledgers</a>
-    <a data-page="playground" href="playground.html">Sandbox</a>
-    <a data-report href="generated/report/index.html">Research briefing</a>
-    <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
-  </nav>
-</div></div>
-
-<header class="hero">
-  <div class="meta">
-    <span class="k">Open source · Apache-2.0</span>
-    <span>Decision support. Never a warning channel.</span>
-  </div>
-  <h1>A forecaster that has to earn its numbers.</h1>
-  <p class="lede">An open-source, agentic system that forecasts natural-disaster risk from public data, <strong>validates its own probabilities against history</strong>, and iterates until they can be trusted — then turns them into emergency plans.</p>
-  <div class="cols">
-    <div class="main">
-      <p style="margin-top:22px">The whole loop is <em>contract-driven</em>. The hazard, the geography, the forecast period, what counts as a damaging event, the locked splits and the acceptance thresholds are all declared in a registered contract, and one harness runs against any of them. Phase&nbsp;0 — <em>harness before model</em> — is complete: the eval plane is built, and its exit criteria are met on real NOAA data for three contracts that differ in every dimension a contract controls.</p>
-      <div class="cta">
-        <a class="btn" href="playground.html?cmd=loop%20-c%20tornado-ok">Run the loop in your browser</a>
-        <a class="btn secondary" href="walkthrough.html">Read the walkthrough</a>
-        <a class="btn secondary" href="design.html">How it is built</a>
-      </div>
-    </div>
-    <aside class="note" style="margin-top:22px">
-      <strong>What is on this site</strong><br>
-      A tour of the design, the real command-line walkthrough with captured transcripts, the committed experiment ledgers with their reliability diagrams, and a sandbox that loads the actual <code>readiness</code> package into your browser and runs it against the pinned data. Nothing here is a mock-up.
-    </aside>
+<header class="top" id="top">
+  <div class="top__bar">
+    <a class="brand" href="index.html">The Readiness Loop<span class="brand__tag">Phase 0</span></a>
+    <button class="top__menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="site-nav"><i></i><i></i><i></i></button>
+    <nav class="top__nav" id="site-nav" aria-label="Site">
+      <a data-page="index" href="index.html">Overview</a>
+      <a data-page="design" href="design.html">System design</a>
+      <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+      <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="playground" href="playground.html">Sandbox</a>
+      <a data-report href="generated/report/index.html">Research briefing</a>
+      <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+    </nav>
   </div>
 </header>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">The forecast unit</span><span class="line"></span></div>
+<section class="hero hero--bleed" id="hero">
+  <canvas class="hero__media" id="hero-canvas" aria-hidden="true"></canvas>
+  <div class="hero__scrim"></div>
+  <div class="hero__inner">
+    <p class="eyebrow">Open source · Apache-2.0 · decision support, never a warning channel</p>
+    <h1>A forecaster that has to earn its numbers.</h1>
+    <p class="hero__sub">An open-source, agentic system that forecasts natural-disaster risk from public data, <strong>validates its own probabilities against history</strong>, and iterates until they can be trusted — then turns them into emergency plans.</p>
+    <div class="hero__ctas">
+      <a class="btn" href="playground.html?cmd=loop%20-c%20tornado-ok">Run the loop in your browser</a>
+      <a class="btn secondary" href="walkthrough.html">Read the walkthrough</a>
+      <a class="btn secondary" href="design.html">How it is built</a>
+    </div>
+  </div>
+  <p class="hero__legend" id="hero-legend" hidden></p>
+  <button class="hero__pause" id="hero-pause" type="button" aria-label="Pause the animation" hidden>
+    <svg class="i-pause" viewBox="0 0 14 14" aria-hidden="true"><rect x="2" y="1" width="3.5" height="12" rx="1"/><rect x="8.5" y="1" width="3.5" height="12" rx="1"/></svg>
+    <svg class="i-play" viewBox="0 0 14 14" aria-hidden="true"><path d="M3 1.5v11l9-5.5z"/></svg>
+  </button>
+</section>
+
+<section class="section" id="unit"><div class="col">
+  <p class="eyebrow">The forecast unit</p>
   <h2>Small enough to audit, every part of it a contract term.</h2>
   <div class="cols">
     <div class="main">
-      <div class="callout"><p class="unit"><strong>P</strong>(at least one damaging event of hazard <em>H</em> in region <em>R</em> during period <em>T</em>)</p></div>
+      <div class="unit"><p><strong>P</strong>(at least one damaging event of hazard <em>H</em> in region <em>R</em> during period <em>T</em>)</p></div>
       <p>"Damaging" is fixed per contract — by default, property damage of $10,000 or more, or any injury or death, per NOAA Storm Events. Regions are US counties; the period is a month, a quarter or a year. For one state, twenty training years and a quarterly period, that is a few thousand labelled region-quarters: dense enough to calibrate against, small enough to reason about.</p>
+      <p>The whole loop is <em>contract-driven</em>. The hazard, the geography, the forecast period, what counts as a damaging event, the locked splits and the acceptance thresholds are all declared in a registered contract, and one harness runs against any of them. Phase&nbsp;0 — <em>harness before model</em> — is complete: the eval plane is built, and its exit criteria are met on real NOAA data for three contracts that differ in every dimension a contract controls.</p>
       <p>Region-period probabilities are decision support for readiness. They must never be phrased as predictions of specific events, and nothing here is for deciding whether to act on a hazard that is imminent — that is the National Weather Service and IPAWS.</p>
     </div>
-    <aside class="note"><strong>Why so small</strong><br>A forecast you can check against thirty years of a public record is a forecast you can be wrong about in public. The eval plane exists to make that cheap.</aside>
+    <aside class="aside"><strong>Why so small</strong><br>A forecast you can check against thirty years of a public record is a forecast you can be wrong about in public. The eval plane exists to make that cheap.</aside>
   </div>
 </div></section>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">What a run does</span><span class="line"></span></div>
+<section class="section" id="loop"><div class="col">
+  <p class="eyebrow">What a run does</p>
   <h2>Gather context, take action, verify work, repeat — against a contract.</h2>
-  <div class="diagram">
-    <svg viewBox="0 0 1040 150" width="1040" height="150" role="img" aria-label="contract to data plane to labelled panel to models to harness to ledger">
-      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#1c1a16"/></marker></defs>
-      <g>
-        <rect class="box accent" x="8" y="26" width="150" height="56"/><text class="label" x="83" y="49" text-anchor="middle">contract (JSON)</text><text class="mono" x="83" y="68" text-anchor="middle">sha256 of the criteria</text>
-        <text class="sub" x="83" y="106" text-anchor="middle">hazard · scope · period</text><text class="sub" x="83" y="122" text-anchor="middle">damage · splits · thresholds</text>
-        <path class="arrow" d="M158 54 H182"/>
-        <rect class="box" x="184" y="26" width="150" height="56"/><text class="label" x="259" y="49" text-anchor="middle">data plane</text><text class="mono" x="259" y="68" text-anchor="middle">fetch · checksum · pin</text>
-        <text class="sub" x="259" y="106" text-anchor="middle">Storm Events + Census</text><text class="sub" x="259" y="122" text-anchor="middle">+ NWS zones</text>
-        <path class="arrow" d="M334 54 H358"/>
-        <rect class="box" x="360" y="26" width="150" height="56"/><text class="label" x="435" y="49" text-anchor="middle">labelled panel</text><text class="mono" x="435" y="68" text-anchor="middle">region × period → 0/1</text>
-        <text class="sub" x="435" y="106" text-anchor="middle">dense: the Census</text><text class="sub" x="435" y="122" text-anchor="middle">supplies the zeros</text>
-        <path class="arrow" d="M510 54 H534"/>
-        <rect class="box" x="536" y="26" width="150" height="56"/><text class="label" x="611" y="49" text-anchor="middle">models</text><text class="mono" x="611" y="68" text-anchor="middle">propose</text>
-        <text class="sub" x="611" y="106" text-anchor="middle">training years only,</text><text class="sub" x="611" y="122" text-anchor="middle">through TrainingView</text>
-        <path class="arrow" d="M686 54 H710"/>
-        <rect class="box harness" x="712" y="26" width="150" height="56"/><text class="label" x="787" y="49" text-anchor="middle">harness</text><text class="mono" x="787" y="68" text-anchor="middle">score · screen · judge</text>
-        <text class="sub" x="787" y="106" text-anchor="middle">Brier, BSS, reliability,</text><text class="sub" x="787" y="122" text-anchor="middle">AUC, canary, verdict</text>
-        <path class="arrow" d="M862 54 H886"/>
-        <rect class="box" x="888" y="26" width="144" height="56"/><text class="label" x="960" y="49" text-anchor="middle">ledger</text><text class="mono" x="960" y="68" text-anchor="middle">hash-chained</text>
-        <text class="sub" x="960" y="106" text-anchor="middle">one per contract,</text><text class="sub" x="960" y="122" text-anchor="middle">anchored, committed</text>
-      </g>
-    </svg>
+  <div class="flow wide" role="img" aria-label="contract to data plane to labelled panel to models to harness to ledger">
+    <div class="flow__step is-contract"><b>contract</b><code>sha256 of the criteria</code><span>hazard · scope · period · damage · splits · thresholds, as JSON</span></div>
+    <div class="flow__step"><b>data plane</b><code>fetch · checksum · pin</code><span>Storm Events + Census + NWS zones</span></div>
+    <div class="flow__step"><b>labelled panel</b><code>region × period → 0/1</code><span>dense: the Census supplies the zeros</span></div>
+    <div class="flow__step"><b>models</b><code>propose</code><span>training years only, through TrainingView</span></div>
+    <div class="flow__step is-harness"><b>harness</b><code>score · screen · judge</code><span>Brier, BSS, reliability, AUC, canary, verdict</span></div>
+    <div class="flow__step"><b>ledger</b><code>hash-chained</code><span>one per contract, anchored, committed</span></div>
   </div>
-  <div class="grid-4 mt16">
+  <div class="cards cards--4 wide">
     <div class="card"><h4 class="mt0">gather context</h4><p class="mb0">Read the contract and its hash. Build the labelled panel from pinned data and report where every event went. Read the ledger of what has already been tried.</p></div>
     <div class="card"><h4 class="mt0">take action</h4><p class="mb0">Propose a candidate model from the engine's registry. It is fitted through a view of the training years only and asked to predict bare units.</p></div>
     <div class="card"><h4 class="mt0">verify work</h4><p class="mb0">Labels are fetched only after <code>predict()</code> returns. The scorecard is judged against the contract's clauses and screened by the leakage canary.</p></div>
     <div class="card"><h4 class="mt0">repeat</h4><p class="mb0">Every experiment is a sealed card in the contract's ledger — including the failures. The loop stops when a candidate passes on <code>validate</code>, or when the queue is exhausted.</p></div>
   </div>
-  <p class="mt16"><code>make loop CONTRACT=tornado-ok</code> runs this end to end with no language model in the control flow. The same loop runs with a Claude Agent SDK orchestrator and three read-only subagents; the harness is identical either way.</p>
+  <p class="mt24"><code>make loop CONTRACT=tornado-ok</code> runs this end to end with no language model in the control flow. The same loop runs with a Claude Agent SDK orchestrator and three read-only subagents; the harness is identical either way.</p>
 </div></section>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">Examples</span><span class="line"></span><span class="n">from the committed ledgers</span></div>
+<section class="section" id="examples"><div class="col">
+  <p class="eyebrow">Examples<span class="n">from the committed ledgers</span></p>
   <h2>Three contracts, one harness.</h2>
-  <p class="mt16">The registered examples were chosen to differ in hazard, scope, period and zone policy, so the same harness is seen running across all of them. Each has been run through the loop, blessed and verified; the ledgers below are read straight from the repository.</p>
-  <div id="contracts" class="grid-3 mt16"><div class="card"><p class="muted mb0">Loading the registry…</p></div></div>
+  <p>The registered examples were chosen to differ in hazard, scope, period and zone policy, so the same harness is seen running across all of them. Each has been run through the loop, blessed and verified; the cards below are read straight from the repository. The tile maps are the panels themselves: one tile per county, shaded by how often it recorded a damaging event.</p>
+  <div id="contracts" class="cards cards--3 wide"><div class="card"><p class="muted mb0">Loading the registry…</p></div></div>
   <div class="cols">
     <div class="main">
       <h3>Read the tables as assertions about the harness, not as forecasts</h3>
@@ -114,12 +99,12 @@
         <li><strong>The leaky oracle is rejected everywhere</strong>, tripping all four canary checks. Running the canary across base rates from 8% down to 0.66% is what exposed — and fixed — a check that had been calibrated to one hazard.</li>
       </ol>
     </div>
-    <aside class="note"><strong>Register a fourth</strong><br><code>readiness register hail-ks --hazard hail --state KS</code> and the same table comes out for it. The <a href="playground.html#demo-register">sandbox</a> lets you do this in the browser, validation errors and all.</aside>
+    <aside class="aside"><strong>Register a fourth</strong><br><code>readiness register hail-ks --hazard hail --state KS</code> and the same table comes out for it. The <a href="playground.html#demo-register">sandbox</a> lets you do this in the browser, validation errors and all.</aside>
   </div>
 </div></section>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">Why there is no model yet</span><span class="line"></span></div>
+<section class="section" id="harness-first"><div class="col">
+  <p class="eyebrow">Why there is no model yet</p>
   <h2>Harness before model.</h2>
   <div class="cols">
     <div class="main">
@@ -128,40 +113,42 @@
       <div id="verify-transcript"></div>
       <p>The blessed fingerprints live in <code>harness_expected/</code>, one file per contract, and record every scorecard number the two climatology baselines produce on the validate split, plus the data version and contract digest they were produced under. If any of it moves, the criterion fails — which is the point. The <a href="playground.html#demo-verify">sandbox</a> recomputes them in your browser and compares.</p>
     </div>
-    <aside class="note"><strong>Two invariants</strong><br>No model ever receives a holdout label: <code>TrainingView</code> is the only channel a model gets data through. And nothing in the harness calls a language model: verification is rules-based or it is worth nothing. Most of the <a href="design.html">design</a> follows from these two.</aside>
+    <aside class="aside"><strong>Two invariants</strong><br>No model ever receives a holdout label: <code>TrainingView</code> is the only channel a model gets data through. And nothing in the harness calls a language model: verification is rules-based or it is worth nothing. Most of the <a href="design.html">design</a> follows from these two.</aside>
   </div>
 </div></section>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">Try it</span><span class="line"></span><span class="n">real code, in the browser</span></div>
+<section class="section" id="demos"><div class="col">
+  <p class="eyebrow">Try it<span class="n">real code, in the browser</span></p>
   <h2>Working demos.</h2>
-  <p class="mt16">The sandbox loads the <code>readiness</code> package into a Python runtime in your browser (Pyodide), together with the registered contracts, the committed ledgers, the blessed fingerprints and the pinned data for the example contracts. Every button runs the same functions the command line runs; the output is the CLI's own.</p>
-  <div class="grid-3 mt16">
-    <a class="card" href="playground.html?cmd=loop%20-c%20tornado-ok" style="text-decoration:none;color:inherit"><h3>Run the loop</h3><p class="mb0 muted">Watch <code>readiness loop</code> gather context, score four candidates, reject the leaked one, and write a sealed ledger — on real Oklahoma tornado data.</p></a>
-    <a class="card" href="playground.html#demo-register" style="text-decoration:none;color:inherit"><h3>Register a contract</h3><p class="mb0 muted">Pre-register a hazard, a scope and thresholds; watch validation refuse overlapping splits; see the digest change when a criterion moves.</p></a>
-    <a class="card" href="playground.html#demo-calibrate" style="text-decoration:none;color:inherit"><h3>Calibration playground</h3><p class="mb0 muted">Recalibrate a model's forecasts with two sliders and re-score them with the real harness. See which clause fails and when the canary trips.</p></a>
-    <a class="card" href="playground.html#demo-tamper" style="text-decoration:none;color:inherit"><h3>Tamper with a ledger</h3><p class="mb0 muted">Edit a card, delete one from the middle, truncate the tail. Then run <code>readiness ledger</code> and read where the chain breaks.</p></a>
-    <a class="card" href="playground.html#demo-verify" style="text-decoration:none;color:inherit"><h3>Bit-for-bit</h3><p class="mb0 muted">Recompute the baseline fingerprints in WebAssembly and compare them, field by field, to the ones blessed from a clean clone.</p></a>
-    <a class="card" href="ledgers.html" style="text-decoration:none;color:inherit"><h3>Read the ledgers</h3><p class="mb0 muted">Every committed experiment card, its reliability diagram, its verdict and its canary findings — and the hash chain, verified in your browser.</p></a>
+  <p>The sandbox loads the <code>readiness</code> package into a Python runtime in your browser (Pyodide), together with the registered contracts, the committed ledgers, the blessed fingerprints and the pinned data for the example contracts. Every button runs the same functions the command line runs; the output is the CLI's own.</p>
+  <div class="cards cards--3 wide">
+    <a class="card" href="playground.html?cmd=loop%20-c%20tornado-ok"><p class="eyebrow">Demo 01</p><h3>Run the loop</h3><p class="mb0">Watch <code>readiness loop</code> gather context, score four candidates, reject the leaked one, and write a sealed ledger — on real Oklahoma tornado data.</p></a>
+    <a class="card" href="playground.html#demo-register"><p class="eyebrow">Demo 02</p><h3>Register a contract</h3><p class="mb0">Pre-register a hazard, a scope and thresholds; watch validation refuse overlapping splits; see the digest change when a criterion moves.</p></a>
+    <a class="card" href="playground.html#demo-calibrate"><p class="eyebrow">Demo 03</p><h3>Calibration playground</h3><p class="mb0">Recalibrate a model's forecasts with two sliders and re-score them with the real harness. See which clause fails and when the canary trips.</p></a>
+    <a class="card" href="playground.html#demo-tamper"><p class="eyebrow">Demo 04</p><h3>Tamper with a ledger</h3><p class="mb0">Edit a card, delete one from the middle, truncate the tail. Then run <code>readiness ledger</code> and read where the chain breaks.</p></a>
+    <a class="card" href="playground.html#demo-verify"><p class="eyebrow">Demo 05</p><h3>Bit-for-bit</h3><p class="mb0">Recompute the baseline fingerprints in WebAssembly and compare them, field by field, to the ones blessed from a clean clone.</p></a>
+    <a class="card" href="ledgers.html"><p class="eyebrow">Demo 06</p><h3>Read the ledgers</h3><p class="mb0">Every committed experiment card, its reliability diagram, its verdict and its canary findings — and the hash chain, verified in your browser.</p></a>
   </div>
 </div></section>
 
-<section class="block"><div class="wrap">
-  <div class="eyebrow-row"><span class="eyebrow">What this is not</span><span class="line"></span></div>
-  <div class="warnbox"><strong>This is decision support. It is never a warning channel.</strong> Official alerts come from the National Weather Service and IPAWS. Region-period probabilities must never be phrased as predictions of specific events, and no output here should be used to decide whether to act on a hazard that is imminent. The full set of risks the design commits to carrying — overfitting the loop, biased and drifting ground truth, LLM prose in life-safety documents, licensing hygiene, and the harm that publishing address-level risk can do to the people it is meant to help — is in <a data-report="#risks" href="generated/report/index.html">§7 of the research briefing</a>.</div>
+<section class="section" id="not"><div class="col">
+  <p class="eyebrow">What this is not</p>
+  <div class="notice notice--caution"><p><strong>This is decision support. It is never a warning channel.</strong> Official alerts come from the National Weather Service and IPAWS. Region-period probabilities must never be phrased as predictions of specific events, and no output here should be used to decide whether to act on a hazard that is imminent. The full set of risks the design commits to carrying — overfitting the loop, biased and drifting ground truth, LLM prose in life-safety documents, licensing hygiene, and the harm that publishing address-level risk can do to the people it is meant to help — is in <a data-report="#risks" href="generated/report/index.html">§7 of the research briefing</a>.</p></div>
 </div></section>
 
 <footer class="site">
-  <p>Ground truth: NOAA NCEI Storm Events. Region universe: US Census Bureau. Zone crosswalk: NOAA NWS. All US Government works, public domain — see <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/DATA-LICENSES.md">DATA-LICENSES.md</a>.</p>
-  <p><span data-built>…</span></p>
+  <p class="credits">Ground truth: NOAA NCEI Storm Events. Region universe: US Census Bureau. Zone crosswalk: NOAA NWS. All US Government works, public domain — see <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/DATA-LICENSES.md">DATA-LICENSES.md</a>.</p>
+  <p class="links"><span data-built>…</span></p>
 </footer>
 
 <script src="assets/site.js"></script>
+<script src="assets/hero.js"></script>
 <script>
 (async function () {
-  const [contracts, ledgers, panels, transcripts] = await Promise.all([
+  const [contracts, ledgers, panels, transcripts, tapes] = await Promise.all([
     RL.fetchJSON("contracts.json"), RL.fetchJSON("ledgers.json"),
     RL.fetchJSON("panels.json").catch(() => ({})), RL.fetchJSON("transcripts.json").catch(() => null),
+    RL.fetchJSON("tapes.json").catch(() => ({})),
   ]);
   const host = document.getElementById("contracts");
   host.innerHTML = contracts.map((c) => {
@@ -172,11 +159,15 @@
     const years = c.splits.test[1] - c.splits.train[0] + 1;
     const units = panel ? panel.n_units : (nRegions ? nRegions * years * c.periods_per_year : null);
     const rows = cards.map((k) => `<tr><td><code>${RL.esc(k.model)}</code></td><td class="num">${RL.fmt.signed4(k.scorecard.brier_skill_score)}</td><td class="num">${RL.fmt.f4(k.scorecard.auc)}</td><td>${RL.verdictTag(k)}</td></tr>`).join("");
+    const seasonal = cards.find((k) => k.model === "climatology-seasonal");
+    const media = tapes[c.name] ? RL.tapeSVG(tapes[c.name], 320, 150)
+      : seasonal ? RL.reliabilitySVG(seasonal.scorecard.reliability_bins, c.thresholds.reliability_tolerance_pp, 220) : "";
     return `<div class="card">
+      ${media ? `<div class="card__media">${media}</div>` : ""}
+      <p class="eyebrow">${RL.esc(c.hazard)}<span class="n">${RL.esc(c.hazard_coding || "custom")}-coded</span></p>
       <h3><a href="ledgers.html#${RL.esc(c.name)}">${RL.esc(c.name)}</a></h3>
       <p class="small">${RL.esc(c.description)}</p>
       <dl class="kv">
-        <dt>hazard</dt><dd>${RL.esc(c.hazard)} <span class="muted">(${RL.esc(c.hazard_coding || "custom")}-coded)</span></dd>
         <dt>scope</dt><dd>${RL.esc(c.scope_label)}${nRegions ? ` · ${RL.fmt.int(nRegions)} counties` : ""}</dd>
         <dt>period</dt><dd>${RL.esc(c.period)}</dd>
         <dt>zone events</dt><dd>${c.zone_policy === "expand" ? "expanded via the NWS crosswalk" : "dropped"}</dd>
