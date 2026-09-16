@@ -17,11 +17,11 @@ import pathlib
 import unittest
 
 from readiness import contracts
-from readiness.cli import _REPRO_FIELDS
 from readiness.engine import build_model
 from readiness.harness import scoring
 from readiness.harness.ledger import ExperimentCard, Ledger
 from readiness.harness.splits import TrainingView, split_panel
+from readiness.verify import REPRO_FIELDS
 from tests.fixtures import make_contract, make_panel
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -69,7 +69,7 @@ def fingerprint(contract_kwargs: dict, panel_kwargs: dict) -> dict:
     out["train_digest"] = view.digest
     for name in ("climatology-pooled", "climatology-seasonal", "persistence-last-year"):
         card = scoring.score(build_model(name), p, c, "validate")
-        d = {f: getattr(card, f) for f in _REPRO_FIELDS}
+        d = {f: getattr(card, f) for f in REPRO_FIELDS}
         d["reliability_bins_rounded_sha256"] = rounded_hash(card.reliability_bins)
         _u, probs, _o = scoring.predictions_for(build_model(name), p, c, "validate")
         d["probs_rounded_sha256"] = rounded_hash(probs)
@@ -84,7 +84,7 @@ class TestSyntheticFingerprints(unittest.TestCase):
         cls.blessed = json.loads(EXPECTED.read_text())
 
     def test_repro_fields_are_frozen(self):
-        self.assertEqual(list(_REPRO_FIELDS), self.blessed["_repro_fields"])
+        self.assertEqual(list(REPRO_FIELDS), self.blessed["_repro_fields"])
 
     def test_synthetic_baselines_reproduce(self):
         for key, (ckw, pkw) in FIXTURES.items():
@@ -135,7 +135,7 @@ class TestCommittedArtefacts(unittest.TestCase):
             blessed = json.loads((ROOT / "harness_expected" / f"{name}.json").read_text())
             for model in ("climatology-pooled", "climatology-seasonal"):
                 self.assertEqual(
-                    set(blessed[model]), set(_REPRO_FIELDS) | {"reliability_bins_sha256"}, f"{name}/{model}"
+                    set(blessed[model]), set(REPRO_FIELDS) | {"reliability_bins_sha256"}, f"{name}/{model}"
                 )
 
 

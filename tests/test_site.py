@@ -15,7 +15,6 @@ import json
 import os
 import pathlib
 import re
-import sys
 import tempfile
 import unittest
 import zipfile
@@ -68,7 +67,7 @@ class TestBuildSite(unittest.TestCase):
         ledgers = self._json("ledgers.json")
         for name, c in contracts.registered().items():
             where = data_mod.paths(c)
-            lines = [l for l in where.ledger.read_text().splitlines() if l.strip()]
+            lines = [x for x in where.ledger.read_text().splitlines() if x.strip()]
             self.assertEqual(len(ledgers[name]["cards"]), len(lines))
             for card, raw in zip(ledgers[name]["cards"], lines):
                 self.assertEqual(card["raw"], raw)
@@ -204,7 +203,7 @@ class TestSandboxModule(unittest.TestCase):
         cls.env.start()
         cls.cwd = os.getcwd()
         cls.sb = _load("sandbox", SITE / "assets" / "sandbox.py")
-        cls.sb._DATASETS["flood-zz"] = synthetic_dataset(cls.contract, root)
+        cls.sb._DATASETS[cls.contract.digest()] = synthetic_dataset(cls.contract, root)
 
     @classmethod
     def tearDownClass(cls):
@@ -260,10 +259,43 @@ class TestSandboxModule(unittest.TestCase):
         self.assertTrue(oracle["canary"]["rejected"])
         self.assertTrue(oracle["verdict"]["passed"])
 
+    def test_playground_refuses_every_split_but_validate(self):
+        # The test split is a budgeted one-shot holdout and the browser has no
+        # budget; the training split is not a holdout. Neither may be scored.
+        for split in ("test", "train", "holdout"):
+            with self.subTest(split=split):
+                r = self.call("score_playground", contract="flood-zz",
+                              model="climatology-pooled", split=split)
+                self.assertEqual(set(r), {"error"})
+                self.assertIn("SplitViolation", r["error"])
+                self.assertIn("validate split only", r["error"])
+        self.assertNotIn("error", self.call("score_playground", contract="flood-zz",
+                                            model="climatology-pooled", split="validate"))
+
+    def test_caches_go_stale_when_the_criteria_change_under_the_same_name(self):
+        path = self.contracts_dir / "flood-zz.json"
+        original = path.read_text()
+        try:
+            # `register --force` with a changed criterion: same name, new digest.
+            make_contract(name="flood-zz", period="month").save(self.contracts_dir,
+                                                                 force=True)
+            r = self.call("score_playground", contract="flood-zz",
+                          model="climatology-pooled")
+            self.assertIn("error", r)
+            self.assertIn("cannot build the panel for flood-zz", r["error"])
+            self.assertNotIn(contracts.load("flood-zz").digest(), self.sb._DATASETS)
+            fp = self.call("fingerprints", contract="flood-zz")
+            self.assertIn("cannot build the panel", fp["error"])
+        finally:
+            path.write_text(original)
+        self.assertNotIn("error", self.call("score_playground", contract="flood-zz",
+                                            model="climatology-pooled"))
+
     def test_tamper_breaks_the_chain_and_restore_mends_it(self):
         state = self.call("ledger_state", contract="flood-zz")
         self.assertFalse(state["exists"])
-        orchestrator.run_local(self.contract, dataset=self.sb._DATASETS["flood-zz"],
+        orchestrator.run_local(self.contract,
+                               dataset=self.sb._DATASETS[self.contract.digest()],
                                progress=lambda _m: None)
         self.assertTrue(self.call("ledger_state", contract="flood-zz")["valid"])
         for action in ("edit", "swap", "delete-middle", "truncate", "no-anchor"):

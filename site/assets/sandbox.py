@@ -32,7 +32,7 @@ os.chdir(REPO)
 os.environ.setdefault("READINESS_EXPERIMENTS_DIR", str(SANDBOX / "experiments"))
 (SANDBOX / "experiments").mkdir(parents=True, exist_ok=True)
 
-from readiness import __version__, config, contracts, dashboard  # noqa: E402
+from readiness import __version__, config, contracts, dashboard, verify  # noqa: E402
 from readiness import cli as _cli  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness.connectors.base import ConnectorError  # noqa: E402
@@ -176,15 +176,19 @@ def set_tree(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# datasets, cached per contract for the guided demos
+# datasets, cached per contract digest for the guided demos
 # ---------------------------------------------------------------------------
 
+#: Keyed by contract digest, not name: `register --force` keeps the name and
+#: changes the criteria, and a panel built under the old criteria must not be
+#: served for the new ones. The digest is a function of exactly the fields
+#: the panel depends on.
 _DATASETS: dict[str, data_mod.Dataset] = {}
 
 
-def _dataset(name: str) -> data_mod.Dataset:
-    if name not in _DATASETS:
-        c = contracts.load(name)
+def _dataset(c: contracts.Contract) -> data_mod.Dataset:
+    key = c.digest()
+    if key not in _DATASETS:
         gap = _data_gap(c, _state_fips())
         if gap is not None:
             raise ConnectorError(
@@ -192,8 +196,8 @@ def _dataset(name: str) -> data_mod.Dataset:
                 "contract registers and reads here; building its panel needs "
                 "`readiness snapshot` on a machine with a network connection."
             )
-        _DATASETS[name] = data_mod.build(c)
-    return _DATASETS[name]
+        _DATASETS[key] = data_mod.build(c)
+    return _DATASETS[key]
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +250,14 @@ class Recalibrated:
         ]
 
 
+#: Base (unrecalibrated) scorecards, keyed by contract digest like the datasets.
 _BASE_CARDS: dict[tuple, dict] = {}
+
+#: The only split the browser may score. The test split is a one-shot holdout
+#: whose touches are budgeted on disk by `readiness score`; the playground has
+#: no budget, so it has no business there, and the training split is not a
+#: holdout at all.
+PLAYGROUND_SPLIT = "validate"
 
 
 def score_playground(raw: str) -> str:
@@ -258,14 +269,21 @@ def score_playground(raw: str) -> str:
         params = {k: v for k, v in (a.get("params") or {}).items() if v is not None}
         scale = float(a.get("scale", 1.0))
         shift = float(a.get("shift", 0.0))
-        split = a.get("split", "validate")
-        ds = _dataset(name)
-        c = ds.contract
+        split = a.get("split", PLAYGROUND_SPLIT)
+        if split != PLAYGROUND_SPLIT:
+            raise SplitViolation(
+                f"the playground scores the {PLAYGROUND_SPLIT} split only; "
+                f"{split!r} is refused. The test split is spent through "
+                "`readiness score --split test --spend-test-touch`, which charges "
+                "the touch budget first."
+            )
+        c = contracts.load(name)
+        ds = _dataset(c)
 
         def build():
             return build_model(model_name, canary_panel=ds.panel, **params)
 
-        key = (name, model_name, json.dumps(params, sort_keys=True), split)
+        key = (c.name, c.digest(), model_name, json.dumps(params, sort_keys=True), split)
         if key not in _BASE_CARDS:
             base_card = scoring.score(build(), ds.panel, c, split)
             _BASE_CARDS[key] = base_card.to_dict()
@@ -427,14 +445,7 @@ def fingerprints(raw: str) -> str:
     a = _args(raw)
     try:
         c = contracts.load(a["contract"])
-        ds = _dataset(c.name)
-        split = c.splits.validate
-        observed: dict = {}
-        for model_name in _cli._REPRO_MODELS:
-            card = scoring.score(build_model(model_name), ds.panel, c, split)
-            observed[model_name] = _cli._repro_fingerprint(card)
-        observed["_data_version"] = ds.data_version
-        observed["_contract"] = c.digest()
+        observed = verify.fingerprints(_dataset(c))
         expected_path = data_mod.paths(c).expected
         expected = None
         if expected_path.exists():

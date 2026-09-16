@@ -19,6 +19,53 @@ from readiness.contracts import Contract, ContractError
 from tests.fixtures import make_contract
 
 
+class TestDefaults(unittest.TestCase):
+    """One mapping of documented defaults, read by every constructor."""
+
+    def test_defaults_are_read_only(self):
+        with self.assertRaises(TypeError):
+            contracts.DEFAULTS["min_auc"] = 0.5
+
+    def test_from_spec_fills_every_gap_from_defaults(self):
+        d = contracts.DEFAULTS
+        c = Contract.from_spec(
+            {"name": "x", "hazard": "tornado",
+             "splits": {"train": d["train"], "validate": d["validate"], "test": d["test"]}}
+        )
+        self.assertEqual(c.version, d["version"])
+        self.assertEqual(c.country, d["country"])
+        self.assertEqual(c.period, d["period"])
+        self.assertEqual(c.damage_property_usd_min, d["property_usd_min"])
+        self.assertEqual(c.damage_count_casualties, d["count_casualties"])
+        self.assertEqual(c.zone_policy, d["zone_policy"])
+        self.assertEqual(c.test_touch_budget, d["test_touch_budget"])
+        self.assertEqual(c.reference_model, d["reference_model"])
+        self.assertEqual(c.min_brier_skill_score, d["min_brier_skill_score"])
+        self.assertEqual(c.reliability_tolerance_pp, d["reliability_tolerance_pp"])
+        self.assertEqual(c.reliability_min_bin_count, d["reliability_min_bin_count"])
+        self.assertEqual(c.min_auc, d["min_auc"])
+        self.assertEqual(c.n_reliability_bins, d["n_reliability_bins"])
+
+    def test_new_with_nothing_but_a_hazard_is_the_default_contract(self):
+        d = contracts.DEFAULTS
+        want = Contract.from_spec(
+            {"name": "x", "hazard": "tornado",
+             "splits": {"train": d["train"], "validate": d["validate"], "test": d["test"]}}
+        )
+        self.assertEqual(contracts.new("x", hazard="tornado"), want)
+        self.assertEqual(contracts.new("x", hazard="tornado").digest(), want.digest())
+
+    def test_the_documented_defaults_are_the_committed_ones(self):
+        # The README and docs/contracts.md quote these; a change here is a
+        # documentation change too, and moves every new contract's digest.
+        d = contracts.DEFAULTS
+        self.assertEqual((d["train"], d["validate"], d["test"]),
+                         ("1996-2015", "2016-2020", "2021-2025"))
+        self.assertEqual(d["property_usd_min"], 10_000.0)
+        self.assertEqual(d["min_auc"], 0.70)
+        self.assertEqual(d["reliability_tolerance_pp"], 0.05)
+
+
 class TestConstruction(unittest.TestCase):
     def test_defaults_fill_in(self):
         c = Contract.from_spec(

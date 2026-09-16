@@ -59,7 +59,8 @@ import json
 import os
 import pathlib
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
+from types import MappingProxyType
 from typing import Iterator, Mapping, Sequence
 
 from readiness.config import HAZARDS, RECORD_START_YEAR
@@ -80,6 +81,33 @@ ZONE_POLICIES: tuple[str, ...] = ("drop", "expand")
 #: explicit on the card, but the harness will not fit anything else as a
 #: reference — see `readiness.harness.scoring.climatology_reference`.
 REFERENCE_MODELS: tuple[str, ...] = ("climatology-pooled",)
+
+#: What a contract gets for everything it does not say. This is the one
+#: statement of the documented defaults: `Contract.from_spec` fills a spec's
+#: gaps from it, `new()` reads its keyword defaults from it, and the
+#: `readiness register` parser takes every `default=` and "default N" help
+#: text from it, so the three cannot disagree. Read-only, because a default
+#: that one caller edits at run time is a criterion nobody hashed.
+DEFAULTS: Mapping[str, object] = MappingProxyType(
+    {
+        "version": "1.0.0",
+        "country": "US",
+        "period": "quarter",
+        "property_usd_min": 10_000.0,
+        "count_casualties": True,
+        "zone_policy": "drop",
+        "train": "1996-2015",
+        "validate": "2016-2020",
+        "test": "2021-2025",
+        "test_touch_budget": 1,
+        "reference_model": REFERENCE_MODELS[0],
+        "min_brier_skill_score": 0.0,
+        "reliability_tolerance_pp": 0.05,
+        "reliability_min_bin_count": 30,
+        "min_auc": 0.70,
+        "n_reliability_bins": 10,
+    }
+)
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 STATE_RE = re.compile(r"^[A-Z]{2}$")
@@ -165,7 +193,7 @@ class Contract:
     reliability_min_bin_count: int
     min_auc: float
     n_reliability_bins: int
-    version: str = "1.0.0"
+    version: str = DEFAULTS["version"]
     description: str = ""
 
     LABELS = ("name", "version", "description")
@@ -293,32 +321,43 @@ class Contract:
                 )
             event_types = HAZARDS[hazard].event_types
 
+        d = DEFAULTS
         return cls(
             name=str(spec.get("name", "")),
-            version=str(spec.get("version", "1.0.0")),
+            version=str(spec.get("version", d["version"])),
             description=str(spec.get("description", "")),
             hazard=hazard,
             event_types=tuple(str(t) for t in event_types),
-            country=str(scope.get("country", "US")),
+            country=str(scope.get("country", d["country"])),
             states=tuple(str(s).upper() for s in scope.get("states", ())),
-            period=str(spec.get("period", "quarter")),
-            damage_property_usd_min=float(damaging.get("property_usd_min", 10_000.0)),
-            damage_count_casualties=bool(damaging.get("count_casualties", True)),
-            zone_policy=str(spec.get("zone_policy", "drop")),
+            period=str(spec.get("period", d["period"])),
+            damage_property_usd_min=float(
+                damaging.get("property_usd_min", d["property_usd_min"])
+            ),
+            damage_count_casualties=bool(
+                damaging.get("count_casualties", d["count_casualties"])
+            ),
+            zone_policy=str(spec.get("zone_policy", d["zone_policy"])),
             train_years=_years(splits, "train"),
             validate_years=_years(splits, "validate"),
             test_years=_years(splits, "test"),
-            test_touch_budget=int(spec.get("test_touch_budget", 1)),
-            reference_model=str(spec.get("reference_model", REFERENCE_MODELS[0])),
-            min_brier_skill_score=float(thresholds.get("min_brier_skill_score", 0.0)),
+            test_touch_budget=int(spec.get("test_touch_budget", d["test_touch_budget"])),
+            reference_model=str(spec.get("reference_model", d["reference_model"])),
+            min_brier_skill_score=float(
+                thresholds.get("min_brier_skill_score", d["min_brier_skill_score"])
+            ),
             reliability_tolerance_pp=float(
-                thresholds.get("reliability_tolerance_pp", 0.05)
+                thresholds.get("reliability_tolerance_pp", d["reliability_tolerance_pp"])
             ),
             reliability_min_bin_count=int(
-                thresholds.get("reliability_min_bin_count", 30)
+                thresholds.get(
+                    "reliability_min_bin_count", d["reliability_min_bin_count"]
+                )
             ),
-            min_auc=float(thresholds.get("min_auc", 0.70)),
-            n_reliability_bins=int(thresholds.get("n_reliability_bins", 10)),
+            min_auc=float(thresholds.get("min_auc", d["min_auc"])),
+            n_reliability_bins=int(
+                thresholds.get("n_reliability_bins", d["n_reliability_bins"])
+            ),
         )
 
     @classmethod
@@ -524,24 +563,30 @@ def new(
     *,
     hazard: str,
     states: Sequence[str] = (),
-    period: str = "quarter",
+    period: str = DEFAULTS["period"],
     event_types: Sequence[str] | None = None,
-    property_usd_min: float = 10_000.0,
-    count_casualties: bool = True,
-    zone_policy: str = "drop",
-    train: str = "1996-2015",
-    validate: str = "2016-2020",
-    test: str = "2021-2025",
+    property_usd_min: float = DEFAULTS["property_usd_min"],
+    count_casualties: bool = DEFAULTS["count_casualties"],
+    zone_policy: str = DEFAULTS["zone_policy"],
+    train: str = DEFAULTS["train"],
+    validate: str = DEFAULTS["validate"],
+    test: str = DEFAULTS["test"],
     description: str = "",
-    version: str = "1.0.0",
+    version: str = DEFAULTS["version"],
     **thresholds,
 ) -> Contract:
+    """A contract from options, the way `readiness register` builds one.
+
+    A threshold passed as None means "the default", so a caller can forward
+    optional values without knowing them; `from_spec` fills the gaps from
+    `DEFAULTS`.
+    """
     spec: dict = {
         "name": name,
         "version": version,
         "description": description,
         "hazard": hazard,
-        "scope": {"country": "US", "states": list(states)},
+        "scope": {"country": DEFAULTS["country"], "states": list(states)},
         "period": period,
         "damaging": {
             "property_usd_min": property_usd_min,

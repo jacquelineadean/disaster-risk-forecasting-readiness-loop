@@ -31,35 +31,20 @@ import pathlib
 import subprocess
 import sys
 
-from readiness import config, contracts, data as data_mod
+from readiness import config, contracts, data as data_mod, verify
 from readiness.connectors.base import ConnectorError
 from readiness.contracts import Contract, ContractError
 from readiness.engine import build_model, describe_registry
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring, splits
+from readiness.harness.contract import Check
 from readiness.harness.ledger import Ledger
 
-#: Scorecard fields that must reproduce exactly. Reliability bins are included
-#: via a hash so a bin-level difference cannot hide behind matching aggregates.
-_REPRO_FIELDS = (
-    "n_units",
-    "n_positive",
-    "base_rate",
-    "brier_score",
-    "brier_score_reference",
-    "brier_skill_score",
-    "auc",
-    "sharpness",
-    "reliability",
-    "resolution",
-    "uncertainty",
-    "panel_digest",
-    "train_digest",
-    "contract_digest",
-)
-
-#: The baselines whose scores must reproduce bit-for-bit from a clean clone.
-_REPRO_MODELS = ("climatology-pooled", "climatology-seasonal")
+#: The Phase 0 fingerprint definition lives in `readiness.verify`; these names
+#: stay for anything that still reaches it through the CLI.
+_REPRO_FIELDS = verify.REPRO_FIELDS
+_REPRO_MODELS = verify.REPRO_MODELS
+_repro_fingerprint = verify.repro_fingerprint
 
 
 def _p(msg: str = "") -> None:
@@ -307,13 +292,12 @@ def cmd_ledger(args) -> int:
     return 0 if ledger.verify().valid else 1
 
 
-def _repro_fingerprint(card: scoring.Scorecard) -> dict:
-    import hashlib
-
-    bins = json.dumps(card.reliability_bins, sort_keys=True, separators=(",", ":"))
-    out = {f: getattr(card, f) for f in _REPRO_FIELDS}
-    out["reliability_bins_sha256"] = hashlib.sha256(bins.encode()).hexdigest()[:16]
-    return out
+def _print_check(check: Check) -> None:
+    """One `[ok]`/`[FAIL]` line; any further detail lines sit indented under it."""
+    first, *rest = check.detail.splitlines()
+    _p(f"{'[ok]  ' if check.passed else '[FAIL]'} {first}")
+    for line in rest:
+        _p(f"         {line}")
 
 
 def cmd_verify(args) -> int:
@@ -322,72 +306,25 @@ def cmd_verify(args) -> int:
         Exit when the agent reproduces the climatology baseline's scores
         bit-for-bit from a clean clone, and the harness rejects a deliberately
         leaked model (a canary test).
+
+    The checks are `readiness.verify.phase0`'s; this prints them.
     """
     c = _contract(args)
     where = data_mod.paths(c)
     _rule(f"Phase 0 exit criteria  ({c.name})")
-    failures: list[str] = []
-
-    _p(f"[ok]   contract {c.name} validates (sha256:{c.digest()}); splits are disjoint")
-
     ds = _dataset(args, c)
-    split = c.splits.validate
-
-    # --- criterion 1: bit-for-bit reproducibility of the baselines ----------
-    observed = {}
-    for name in _REPRO_MODELS:
-        card = scoring.score(build_model(name), ds.panel, c, split)
-        observed[name] = _repro_fingerprint(card)
-    observed["_data_version"] = ds.data_version
-    observed["_contract"] = c.digest()
-
-    expected_path = where.expected
-    if args.bless:
-        expected_path.parent.mkdir(parents=True, exist_ok=True)
-        expected_path.write_text(json.dumps(observed, indent=2, sort_keys=True) + "\n")
-        _p(f"[ok]   blessed baseline fingerprints -> {where.relative(expected_path)}")
-    elif not expected_path.exists():
-        failures.append(
-            f"no blessed baseline at {where.relative(expected_path)}; "
-            f"run `readiness verify -c {c.name} --bless` once, then commit it"
-        )
-        _p("[FAIL] reproducibility: nothing to compare against")
-    else:
-        expected = json.loads(expected_path.read_text())
-        diffs = []
-        for key in sorted(set(expected) | set(observed)):
-            if expected.get(key) != observed.get(key):
-                diffs.append(key)
-        if diffs:
-            failures.append(f"baseline scores changed: {diffs}")
-            _p(f"[FAIL] reproducibility: {len(diffs)} field group(s) differ")
-            for key in diffs:
-                _p(f"         {key}")
-                _p(f"           expected {json.dumps(expected.get(key), sort_keys=True)}")
-                _p(f"           observed {json.dumps(observed.get(key), sort_keys=True)}")
-        else:
-            _p("[ok]   climatology baselines reproduce bit-for-bit")
-
-    # --- criterion 2: the canary rejects a leaked model ---------------------
-    oracle = build_model("leaky-oracle", canary_panel=ds.panel)
-    _ocard, report = scoring.screen(oracle, ds.panel, c, split)
-    if report.rejected:
-        tripped = [f.check for f in report.findings if f.tripped]
-        _p(f"[ok]   leakage canary rejected leaky-oracle (tripped: {', '.join(tripped)})")
-    else:
-        failures.append("leakage canary did NOT reject leaky-oracle")
-        _p("[FAIL] leakage canary accepted a leaked model")
-
-    # --- criterion 3: the ledger has not been rewritten ---------------------
-    status = Ledger(where.ledger).verify()
-    if status.valid:
-        _p(f"[ok]   {status.format()}")
-    else:
-        failures.append("experiment ledger chain is broken")
-        _p(f"[FAIL] {status.format()}")
-
+    result = verify.phase0(
+        c,
+        ds,
+        ledger_path=where.ledger,
+        expected_path=where.expected,
+        bless=args.bless,
+    )
+    for check in result.checks:
+        _print_check(check)
     _p()
-    if failures:
+    if not result.passed:
+        failures = result.failures()
         _p(f"Phase 0 NOT met for {c.name} — {len(failures)} failure(s):")
         for f in failures:
             _p(f"  - {f}")
@@ -460,13 +397,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--json", action="store_true", help="also print the JSON spec")
     sp.set_defaults(func=cmd_contract)
 
+    d = contracts.DEFAULTS
     sp = sub.add_parser(
         "register",
         help="pre-register a new contract from options",
         description=(
             "Write contracts/NAME.json. Everything not given takes the documented "
-            "default (quarterly, $10,000 property damage or any casualty, "
-            "1996-2015 / 2016-2020 / 2021-2025, BSS > 0, +/-5pp, AUC >= 0.70)."
+            f"default ({d['period']}ly, ${d['property_usd_min']:,.0f} property damage"
+            f"{' or any casualty' if d['count_casualties'] else ''}, "
+            f"{d['train']} / {d['validate']} / {d['test']}, "
+            f"BSS > {d['min_brier_skill_score']:g}, "
+            f"+/-{d['reliability_tolerance_pp'] * 100:g}pp, AUC >= {d['min_auc']:.2f})."
         ),
     )
     sp.add_argument("name", help="lowercase letters, digits and hyphens")
@@ -474,30 +415,38 @@ def build_parser() -> argparse.ArgumentParser:
                     help="a catalogue hazard (see `readiness hazards`) or a new name")
     sp.add_argument("--state", action="append", metavar="XX",
                     help="two-letter state; repeatable; omit for the whole country")
-    sp.add_argument("--period", default="quarter", choices=sorted(contracts.PERIODS))
+    sp.add_argument("--period", default=d["period"], choices=sorted(contracts.PERIODS))
     sp.add_argument("--event-type", action="append", metavar="TYPE",
                     help="Storm Events EVENT_TYPE; repeatable; required for an "
                          "uncatalogued hazard")
-    sp.add_argument("--damage-usd", type=float, default=10_000.0,
-                    help="property damage at or above which an event is damaging")
+    sp.add_argument("--damage-usd", type=float, default=d["property_usd_min"],
+                    help="property damage at or above which an event is damaging "
+                         f"(default {d['property_usd_min']:,.0f})")
     sp.add_argument("--no-casualties", action="store_true",
                     help="do not count injuries or deaths as damaging")
-    sp.add_argument("--zone-policy", default="drop",
+    sp.add_argument("--zone-policy", default=d["zone_policy"],
                     choices=list(contracts.ZONE_POLICIES),
                     help="what to do with zone-coded events: drop them, or expand each "
-                         "to every county in its NWS zone (default: drop)")
-    sp.add_argument("--train", default="1996-2015", metavar="YYYY-YYYY")
-    sp.add_argument("--validate", default="2016-2020", metavar="YYYY-YYYY")
-    sp.add_argument("--test", default="2021-2025", metavar="YYYY-YYYY")
-    sp.add_argument("--min-bss", type=float, default=None, help="default 0.0")
-    sp.add_argument("--tolerance", type=float, default=None,
-                    help="reliability tolerance in probability units, default 0.05")
-    sp.add_argument("--min-bin-count", type=int, default=None, help="default 30")
-    sp.add_argument("--min-auc", type=float, default=None, help="default 0.70")
-    sp.add_argument("--bins", type=int, default=None,
-                    help="reliability bins, default 10")
+                         f"to every county in its NWS zone (default: {d['zone_policy']})")
+    sp.add_argument("--train", default=d["train"], metavar="YYYY-YYYY",
+                    help=f"default {d['train']}")
+    sp.add_argument("--validate", default=d["validate"], metavar="YYYY-YYYY",
+                    help=f"default {d['validate']}")
+    sp.add_argument("--test", default=d["test"], metavar="YYYY-YYYY",
+                    help=f"default {d['test']}")
+    sp.add_argument("--min-bss", type=float, default=d["min_brier_skill_score"],
+                    help=f"default {d['min_brier_skill_score']}")
+    sp.add_argument("--tolerance", type=float, default=d["reliability_tolerance_pp"],
+                    help="reliability tolerance in probability units, "
+                         f"default {d['reliability_tolerance_pp']}")
+    sp.add_argument("--min-bin-count", type=int, default=d["reliability_min_bin_count"],
+                    help=f"default {d['reliability_min_bin_count']}")
+    sp.add_argument("--min-auc", type=float, default=d["min_auc"],
+                    help=f"default {d['min_auc']:.2f}")
+    sp.add_argument("--bins", type=int, default=d["n_reliability_bins"],
+                    help=f"reliability bins, default {d['n_reliability_bins']}")
     sp.add_argument("--description", default="")
-    sp.add_argument("--version", default="1.0.0")
+    sp.add_argument("--version", default=d["version"])
     sp.add_argument("--force", action="store_true", help="overwrite an existing file")
     sp.add_argument("--dry-run", action="store_true",
                     help="print the JSON, write nothing")
