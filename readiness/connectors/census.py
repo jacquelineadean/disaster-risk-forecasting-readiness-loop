@@ -13,7 +13,8 @@ import pathlib
 from dataclasses import dataclass
 from typing import Sequence
 
-from readiness.connectors.base import (, ConnectorError
+from readiness.connectors.base import (
+    ConnectorError,
     Manifest,
     SourceRecord,
     fetch,
