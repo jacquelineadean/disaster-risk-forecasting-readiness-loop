@@ -1,10 +1,19 @@
-.PHONY: help install snapshot panel loop canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
+.PHONY: help install snapshot panel features loop promote backtest phase1 canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
 
 PY ?= python3
 # Which registered contract to run against. Leave empty to let the CLI resolve
 # it ($READINESS_CONTRACT, or the sole registered contract).
 CONTRACT ?=
 CFLAG = $(if $(CONTRACT),-c $(CONTRACT),)
+# Which exit criteria `make verify` checks: 0 (baselines reproduce, canary
+# rejected) or 1 (ledger-only: the promoted test card and its record).
+PHASE ?= 0
+# Feature connectors for the Phase 1 targets, comma-separated. Leave empty to
+# load every connector whose pinned data is present.
+FEATURES ?=
+FFLAG = $(if $(FEATURES),--features $(FEATURES),)
+# The model `make promote` spends the test touch on.
+MODEL ?= logistic
 
 help:            ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -18,20 +27,36 @@ install:         ## install the package (editable). No runtime dependencies.
 contracts:       ## list the registered contracts
 	$(PY) -m readiness.cli contracts
 
-snapshot:        ## pull and pin the public data for the contract (~300 MB, one time)
-	$(PY) -m readiness.cli snapshot $(CFLAG)
+snapshot:        ## pull and pin the public data for the contract (~300 MB, one time; FEATURES=era5,terrain adds sources)
+	$(PY) -m readiness.cli snapshot $(CFLAG) $(FFLAG)
 
 panel:           ## build the labelled region-period panel, show split and event coverage
 	$(PY) -m readiness.cli panel $(CFLAG)
 
-loop:            ## run the experimental loop end to end
+features:        ## load the feature sources; print admission verdicts, columns and the audit
+	$(PY) -m readiness.cli features $(CFLAG) $(FFLAG)
+
+loop:            ## run the experimental loop end to end (baseline queue)
 	$(PY) -m readiness.cli loop $(CFLAG)
+
+promote:         ## spend the one test touch on MODEL (default logistic) after its validate pass
+	$(PY) -m readiness.cli promote $(MODEL) $(CFLAG) $(FFLAG) --spend-test-touch
+
+backtest:        ## write experiments/<name>/backtest.html and .json from committed files only
+	$(PY) -m readiness.cli backtest $(CFLAG)
+
+phase1:          ## snapshot, features, the Phase 1 queue with promotion, the backtest, verify --phase 1
+	$(PY) -m readiness.cli snapshot $(CFLAG) $(FFLAG)
+	$(PY) -m readiness.cli features $(CFLAG) $(FFLAG)
+	$(PY) -m readiness.cli loop $(CFLAG) $(FFLAG) --queue phase1 --promote
+	$(PY) -m readiness.cli backtest $(CFLAG)
+	$(PY) -m readiness.cli verify $(CFLAG) --phase 1
 
 canary:          ## demonstrate the harness rejecting a leaked model
 	$(PY) -m readiness.cli canary $(CFLAG)
 
-verify:          ## check the Phase 0 exit criteria
-	$(PY) -m readiness.cli verify $(CFLAG)
+verify:          ## check the exit criteria for PHASE (default 0)
+	$(PY) -m readiness.cli verify $(CFLAG) --phase $(PHASE)
 
 ledger:          ## show the experiment ledger and verify its hash chain
 	$(PY) -m readiness.cli ledger $(CFLAG)

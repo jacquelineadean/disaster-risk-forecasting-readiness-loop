@@ -1,4 +1,4 @@
-"""Phase 0 verification as a library.
+"""Phase 0 and Phase 1 verification as a library.
 
 Report §6, Phase 0:
 
@@ -15,6 +15,14 @@ others through a private import.
 `REPRO_FIELDS` and `repro_fingerprint` are load-bearing: the blessed files in
 `harness_expected/` were written by them, and a change to either would make
 every committed fingerprint unverifiable. They do not move.
+
+Phase 1 (plan §2) is checked from the ledger alone: the verdict on the test
+card is re-derived from its stored scorecard rather than read, the passing
+test card must be the first test card ever written (no shopping across
+contract versions), a validate pass with the same model, version and
+arguments must precede it, the touch file must agree, and the backtest report
+must embed the card. `replay` rebuilds and rescores the promoted model from
+the card's own arguments without spending a touch, for anyone with the data.
 """
 
 from __future__ import annotations
@@ -27,9 +35,11 @@ from dataclasses import dataclass
 from readiness import data as data_mod
 from readiness.contracts import Contract
 from readiness.engine import build_model
+from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
 from readiness.harness.contract import Check
-from readiness.harness.ledger import Ledger
+from readiness.harness.ledger import ExperimentCard, Ledger
+from readiness.harness.splits import TouchBudget
 
 #: Scorecard fields that must reproduce exactly. Reliability bins are included
 #: via a hash so a bin-level difference cannot hide behind matching aggregates.
@@ -209,3 +219,260 @@ def _canary_check(dataset: data_mod.Dataset) -> Check:
 def _ledger_check(ledger_path: pathlib.Path) -> Check:
     status = Ledger(ledger_path).verify()
     return Check("ledger", status.valid, status.format())
+
+
+# ---------------------------------------------------------------------------
+# Phase 1
+# ---------------------------------------------------------------------------
+
+#: Significant figures at which a replayed score must agree with its card.
+REPLAY_SIGFIGS = 12
+
+
+@dataclass(frozen=True)
+class Phase1Result:
+    """The Phase 1 exit criteria for one contract, each as a check with evidence.
+
+    Ledger-only: nothing here builds a dataset or fits a model. `card` is the
+    test card the checks were made against, when there was exactly one.
+    """
+
+    contract: str
+    checks: tuple[Check, ...]
+    card: ExperimentCard | None = None
+
+    @property
+    def passed(self) -> bool:
+        return all(check.passed for check in self.checks)
+
+    def failures(self) -> list[str]:
+        """One line per failed check: the first line of its detail."""
+        return [c.detail.splitlines()[0] for c in self.checks if not c.passed]
+
+
+def phase1(
+    contract: Contract,
+    *,
+    ledger_path: pathlib.Path,
+    touch_path: pathlib.Path,
+    backtest_path: pathlib.Path,
+) -> Phase1Result:
+    """Evaluate the Phase 1 exit criteria from the committed record alone."""
+    ledger = Ledger(ledger_path)
+    cards = list(ledger.read())
+    card = _the_test_card(cards, contract)
+    checks = [_ledger_check(ledger_path), _test_card_check(cards, contract, card)]
+    if card is not None:
+        checks += [
+            _verdict_check(card, contract),
+            _canary_check_on_card(card),
+            _features_check(card),
+            _validated_first_check(cards, card),
+            _touch_budget_check(card, touch_path, contract),
+            _published_check(card, ledger.head(), backtest_path),
+        ]
+    return Phase1Result(contract.name, tuple(checks), card)
+
+
+def _the_test_card(
+    cards: list[ExperimentCard], contract: Contract
+) -> ExperimentCard | None:
+    """The test card under the current digest, when there is exactly one."""
+    digest = contract.digest()
+    mine = [c for c in cards if c.split == "test" and c.contract_digest == digest]
+    return mine[0] if len(mine) == 1 else None
+
+
+def _test_card_check(
+    cards: list[ExperimentCard], contract: Contract, card: ExperimentCard | None
+) -> Check:
+    digest = contract.digest()
+    tests = [c for c in cards if c.split == "test"]
+    mine = [c for c in tests if c.contract_digest == digest]
+    if not mine:
+        return Check(
+            "test card", False,
+            f"test card: none under contract sha256:{digest}\n"
+            f"run `readiness promote MODEL -c {contract.name} --spend-test-touch` "
+            "after a validate pass",
+        )
+    if card is None:
+        ids = ", ".join(c.experiment_id for c in mine)
+        return Check(
+            "test card", False,
+            f"test card: {len(mine)} test cards under contract sha256:{digest} ({ids}); "
+            "exactly one is allowed",
+        )
+    if tests[0] is not card:
+        return Check(
+            "test card", False,
+            f"test card: {card.experiment_id} is not the first test card in the ledger "
+            f"({tests[0].experiment_id}, {tests[0].model}@{tests[0].version} under "
+            f"sha256:{tests[0].contract_digest} came first); the test split was "
+            "touched before this contract version and cannot be re-shopped",
+        )
+    return Check(
+        "test card", True,
+        f"test card {card.experiment_id}: {card.model}@{card.version} on test, the "
+        f"first and only test card under contract sha256:{digest}",
+    )
+
+
+def stored_scorecard(card: ExperimentCard) -> scoring.Scorecard:
+    """The card's scorecard as the object the judge takes, tuples restored."""
+    raw = dict(card.scorecard)
+    raw["reliability_bins"] = tuple(raw.get("reliability_bins", ()))
+    raw["feature_columns"] = tuple(raw.get("feature_columns", ()))
+    return scoring.Scorecard(**raw)
+
+
+def _verdict_check(card: ExperimentCard, contract: Contract) -> Check:
+    """Re-derive the verdict from the stored numbers; never trust the stored word."""
+    verdict = contract_mod.evaluate(stored_scorecard(card), contract)
+    stored = (card.verdict or {}).get("passed")
+    if verdict.passed and stored:
+        return Check(
+            "verdict", True,
+            f"verdict re-derived from the stored scorecard: PASS "
+            f"(BSS {card.scorecard['brier_skill_score']:+.4f}, "
+            f"AUC {card.scorecard['auc']:.4f})",
+        )
+    failed = [c.name for c in verdict.checks if not c.passed]
+    lines = [
+        "verdict: the stored scorecard does not pass the contract"
+        + (" although the card says it did" if stored else "")
+        + f" (failed: {', '.join(failed) or 'none'})"
+    ]
+    lines += [c.format().strip() for c in verdict.checks]
+    return Check("verdict", False, "\n".join(lines))
+
+
+def _canary_check_on_card(card: ExperimentCard) -> Check:
+    rejected = bool((card.canary or {}).get("rejected"))
+    findings = (card.canary or {}).get("findings", [])
+    tripped = ", ".join(f["check"] for f in findings if f["tripped"])
+    if rejected:
+        return Check(
+            "canary", False, f"canary: the test card was rejected (tripped: {tripped})"
+        )
+    return Check("canary", True, "canary clear on the test card")
+
+
+def _features_check(card: ExperimentCard) -> Check:
+    sc = card.scorecard or {}
+    columns = sc.get("feature_columns") or []
+    if not columns:
+        return Check("features", True, "features: none on this card; audit check skipped")
+    audit = sc.get("feature_audit") or {}
+    if audit.get("clean"):
+        return Check(
+            "features", True,
+            f"feature audit clean over {len(columns)} column(s): {', '.join(columns)}",
+        )
+    findings = [f["detail"] for f in audit.get("findings", []) if not f.get("passed")]
+    return Check(
+        "features", False,
+        "features: the card's audit is not clean\n" + "\n".join(findings or ["no audit"]),
+    )
+
+
+def _validated_first_check(cards: list[ExperimentCard], card: ExperimentCard) -> Check:
+    kwargs = card.data_snapshot.get("model_kwargs")
+    earlier = cards[: cards.index(card)]
+    for prior in earlier:
+        if (
+            prior.split == "validate"
+            and prior.model == card.model
+            and prior.version == card.version
+            and prior.contract_digest == card.contract_digest
+            and prior.data_snapshot.get("model_kwargs") == kwargs
+            and prior.status == "PASS"
+        ):
+            return Check(
+                "validated first", True,
+                f"validate card {prior.experiment_id} passed with the same model, "
+                "version and arguments before the test touch",
+            )
+    return Check(
+        "validated first", False,
+        f"validated first: no earlier validate card for {card.model}@{card.version} "
+        f"with arguments {json.dumps(kwargs, sort_keys=True)} passed under this contract",
+    )
+
+
+def _touch_budget_check(
+    card: ExperimentCard, touch_path: pathlib.Path, contract: Contract
+) -> Check:
+    if not touch_path.exists():
+        return Check(
+            "touch budget", False,
+            f"touch budget: {data_mod.relative(touch_path)} is missing, yet the ledger "
+            "holds a test card",
+        )
+    counts = TouchBudget(touch_path, contract.test_touch_budget).as_dict()
+    key = f"{card.model}@{card.version}"
+    used = counts.get(key, 0)
+    if used != 1:
+        return Check(
+            "touch budget", False,
+            f"touch budget: {data_mod.relative(touch_path)} records {used} touch(es) for "
+            f"{key}; the ledger's one test card needs exactly 1",
+        )
+    return Check("touch budget", True, f"touch budget: exactly 1 test touch for {key}")
+
+
+def _published_check(
+    card: ExperimentCard, head: str, backtest_path: pathlib.Path
+) -> Check:
+    if not backtest_path.exists():
+        return Check(
+            "published", False,
+            f"published: no backtest report at {data_mod.relative(backtest_path)}; "
+            "run `readiness backtest`",
+        )
+    text = backtest_path.read_text(encoding="utf-8")
+    has_card = card.card_hash in text
+    has_head = f'<meta name="ledger-head" content="{head}">' in text
+    if has_card and has_head:
+        return Check(
+            "published", True,
+            f"backtest report embeds the test card ({card.card_hash[:12]}...) and the "
+            f"ledger head ({head[:12]}...)",
+        )
+    parts = (("the test card's hash", has_card), ("the ledger head", has_head))
+    missing = [what for what, ok in parts if not ok]
+    return Check(
+        "published", False,
+        f"published: {data_mod.relative(backtest_path)} is stale; it does not embed "
+        f"{' or '.join(missing)}; re-run `readiness backtest`",
+    )
+
+
+def sig(value: object, figures: int = REPLAY_SIGFIGS) -> str:
+    """A value at `figures` significant figures, or as it is when not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    return f"{value:.{figures}g}"
+
+
+def replay(
+    contract: Contract, dataset: data_mod.Dataset, card: ExperimentCard
+) -> list[tuple[str, object, object, bool]]:
+    """Refit the card's model from its own arguments and rescore it on test.
+
+    No touch is spent: this is `scoring.score`, not the orchestrator, and the
+    card it is compared against already exists. Returns one row per
+    fingerprint field: (field, expected, observed, agree at 12 s.f.).
+    """
+    kwargs = card.data_snapshot.get("model_kwargs", {})
+    model = build_model(card.model, canary_panel=dataset.panel, **kwargs)
+    split = contract.splits.get(card.split)
+    observed = repro_fingerprint(
+        scoring.score(model, dataset.panel, contract, split, sources=dataset.sources)
+    )
+    expected = repro_fingerprint(stored_scorecard(card))
+    return [
+        (field, expected[field], observed[field],
+         sig(expected[field]) == sig(observed[field]))
+        for field in expected
+    ]

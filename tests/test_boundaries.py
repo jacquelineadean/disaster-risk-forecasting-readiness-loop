@@ -37,6 +37,13 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         ("claude_agent_sdk", "anthropic", "readiness.agent"),
         "verification is what the agent is checked against; no LLM client",
     ),
+    (
+        "readiness/backtest.py",
+        ("claude_agent_sdk", "anthropic", "readiness.agent",
+         "readiness.harness.scoring"),
+        "the backtest report is built from committed files; it never scores, "
+        "never calls an agent and never an LLM",
+    ),
 )
 
 #: Non-stdlib, non-package modules tolerated anywhere, and where. Each must be
