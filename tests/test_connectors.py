@@ -36,6 +36,7 @@ from readiness.connectors import (
     nws_zones,
     open_meteo,
     storm_events,
+    usa_structures,
 )
 from readiness.connectors.base import (
     CONNECT_TIMEOUT,
@@ -49,6 +50,7 @@ from readiness.connectors.base import (
     sha256_bytes,
     utc_now,
 )
+from readiness.contracts import Contract
 from readiness.harness import features as F
 from tests.fixtures import make_contract
 
@@ -643,6 +645,7 @@ class TestRegistry(unittest.TestCase):
             "era5": open_meteo.manifest_key("22"),
             "nri": nri.MANIFEST_KEY,
             "climada": climada_layer.manifest_key("inland_flood", "US:LA"),
+            "usa_structures": usa_structures.manifest_key("22"),
         }
         self.assertEqual(sorted(keys), sorted(CONNECTORS))
         for name, key in keys.items():
@@ -659,12 +662,14 @@ class TestRegistry(unittest.TestCase):
             "era5": open_meteo.LICENSE,
             "nri": nri.LICENSE,
             "climada": climada_layer.LICENSE,
+            "usa_structures": usa_structures.LICENSE,
         }
         for name, licence in licences.items():
             self.assertEqual(CONNECTORS[name].license, licence, name)
         for name, module in (
             ("gazetteer", gazetteer), ("era5", open_meteo),
             ("nri", nri), ("climada", climada_layer),
+            ("usa_structures", usa_structures),
         ):
             self.assertEqual(CONNECTORS[name].source, module.SOURCE, name)
 
@@ -1236,6 +1241,208 @@ class TestClimadaLayer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# FEMA / ORNL USA Structures
+# ---------------------------------------------------------------------------
+
+
+def _feature(fips, occ_cls, prim_occ, n) -> dict:
+    return {"attributes": {"FIPS": fips, "OCC_CLS": occ_cls, "PRIM_OCC": prim_occ, "n": n}}
+
+
+#: Two canned statistics pages for state 99, page size 3: the first is full and
+#: says more follow, the second is short. Deliberately unsorted, one FIPS as an
+#: integer, one pair the occupancy mapping does not know.
+PAGES: list[dict] = [
+    {
+        "features": [
+            _feature(99003, "Residential", "Single Family Dwelling", 120),
+            _feature("99001", "Education", "Grade Schools", 4),
+            _feature("99001", "Residential", "Single Family Dwelling", 300),
+        ],
+        "exceededTransferLimit": True,
+    },
+    {
+        "features": [
+            _feature("99001", "Commercial", "Hospital", 2),
+            _feature("99003", "Weird", "Spaceport", 5),
+        ],
+        "exceededTransferLimit": False,
+    },
+]
+LAST_EDIT_MS = 1_700_000_000_000  # 2023-11-14T22:13:20Z
+METADATA = {"editingInfo": {"lastEditDate": LAST_EDIT_MS}}
+
+
+class FakeLayer:
+    """An ArcGIS layer answering the metadata call and paged statistics queries."""
+
+    def __init__(self, pages: list[dict], metadata: dict | None = METADATA, page: int = 3):
+        self.pages = pages
+        self.metadata = metadata
+        self.page = page
+        self.urls: list[str] = []
+
+    def get(self, url: str) -> bytes:
+        self.urls.append(url)
+        if "/query?" not in url:
+            if self.metadata is None:
+                raise ConnectorError(f"HTTP 404 for {url}")
+            return json.dumps(self.metadata).encode()
+        params = dict(
+            pair.split("=", 1) for pair in url.split("?", 1)[1].split("&")
+        )
+        offset = int(params["resultOffset"])
+        index = offset // self.page
+        if index >= len(self.pages):
+            return json.dumps({"features": [], "exceededTransferLimit": False}).encode()
+        return json.dumps(self.pages[index]).encode()
+
+
+class TestUsaStructures(unittest.TestCase):
+    sample = (DATA / "usa_structures_sample.jsonl").read_bytes()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.manifest = Manifest(path=self.dir / "manifest.json")
+        self.layer = FakeLayer(PAGES)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def snapshot(self, states=("99",), **kw):
+        kw.setdefault("session", self.layer)
+        kw.setdefault("page", 3)
+        return usa_structures.snapshot(list(states), self.dir, self.manifest, **kw)
+
+    def test_counts_query_shape(self):
+        url = usa_structures.counts_query("22", 40, 20)
+        self.assertTrue(url.startswith(usa_structures.LAYER_URL + "/query?"))
+        query = url.split("?", 1)[1]
+        self.assertIn("where=FIPS+LIKE+%2722%25%27", query)
+        self.assertIn("groupByFieldsForStatistics=FIPS%2COCC_CLS%2CPRIM_OCC", query)
+        self.assertIn("resultOffset=40", query)
+        self.assertIn("resultRecordCount=20", query)
+        self.assertIn("f=json", query)
+        stats = "%5B%7B%22statisticType%22%3A%22count%22%2C%22onStatisticField%22%3A%22OBJECTID"
+        self.assertIn(stats, query)
+        self.assertIn("outStatisticFieldName%22%3A%22n%22", query)
+        other = usa_structures.counts_query("22", layer_url="https://mirror.invalid/L/0/")
+        self.assertTrue(other.startswith("https://mirror.invalid/L/0/query?"))
+        with self.assertRaises(ConnectorError):
+            usa_structures.counts_query("LA")
+
+    def test_paged_stats_hashed_together(self):
+        paths = self.snapshot()
+        self.assertEqual(paths, [self.dir / "usa_structures" / "99_counts.jsonl"])
+        # The metadata call, then two pages: the second was short, so no third.
+        queries = [u for u in self.layer.urls if "/query?" in u]
+        self.assertEqual(len(self.layer.urls), 3)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("resultOffset=0&", queries[0])
+        self.assertIn("resultOffset=3&", queries[1])
+        # The extract is the sorted union of both pages, exactly as committed.
+        self.assertEqual(paths[0].read_bytes(), self.sample)
+        rec = self.manifest.records["fema/usa_structures/99"]
+        self.assertEqual(rec.sha256, sha256_bytes(self.sample))
+        self.assertEqual(rec.bytes, len(self.sample))
+        self.assertEqual(rec.license, usa_structures.LICENSE)
+        self.assertEqual(rec.source, usa_structures.SOURCE)
+        self.assertIn("2 page(s)", rec.notes)
+        self.assertIn("2 counties, 5 groups", rec.notes)
+
+    def test_vintage_recorded(self):
+        self.snapshot()
+        rec = self.manifest.records["fema/usa_structures/99"]
+        self.assertIn("derived_through=2023", rec.notes)
+        self.assertIn("lastEditDate 2023-11-14", rec.notes)
+        self.assertIn(f"layer {usa_structures.LAYER_URL}", rec.notes)
+        self.assertEqual(usa_structures.vintage_of(rec), 2023)
+        self.assertTrue(rec.url.startswith(usa_structures.LAYER_URL + "/query?"))
+
+    def test_layer_url_override_is_resolved_into_the_record(self):
+        url = "https://mirror.invalid/USA_Structures/FeatureServer/0"
+        self.snapshot(layer_url=url)
+        rec = self.manifest.records["fema/usa_structures/99"]
+        self.assertIn(f"layer {url}", rec.notes)
+        self.assertTrue(all(u.startswith(url) for u in self.layer.urls))
+
+    def test_vintage_falls_back_to_the_snapshot_year_when_metadata_is_unavailable(self):
+        self.snapshot(session=FakeLayer(PAGES, metadata=None))
+        rec = self.manifest.records["fema/usa_structures/99"]
+        year = int(utc_now()[:4])
+        self.assertIn(f"derived_through={year}", rec.notes)
+        self.assertIn("unavailable", rec.notes)
+        self.snapshot(session=FakeLayer(PAGES, metadata={"editingInfo": {}}), refresh=True)
+        self.assertIn("unavailable", self.manifest.records["fema/usa_structures/99"].notes)
+
+    def test_a_pinned_extract_is_not_refetched(self):
+        self.snapshot()
+        self.snapshot()
+        self.assertEqual(len(self.layer.urls), 3)
+        self.snapshot(refresh=True)
+        self.assertEqual(len(self.layer.urls), 6)
+
+    def test_a_tampered_extract_is_refetched(self):
+        paths = self.snapshot()
+        paths[0].write_text("{}\n")
+        self.snapshot()
+        self.assertEqual(len(self.layer.urls), 6)
+        self.assertEqual(paths[0].read_bytes(), self.sample)
+
+    def test_schema_drift_raises(self):
+        drifted = [
+            {"features": [{"attributes": {"FIPS": "99001", "OCC_CLS": "x", "n": 1}}]},
+        ]
+        with self.assertRaises(ConnectorError) as ctx:
+            self.snapshot(session=FakeLayer(drifted))
+        self.assertIn("PRIM_OCC", str(ctx.exception))
+        with self.assertRaises(ConnectorError):
+            self.snapshot(session=FakeLayer([{"rows": []}]))
+        with self.assertRaises(ConnectorError):
+            self.snapshot(session=FakeLayer([{"error": {"code": 400}}]))
+        with self.assertRaises(ConnectorError):
+            self.snapshot(session=FakeLayer([{"features": []}]))
+        self.assertNotIn("fema/usa_structures/99", self.manifest.records)
+
+    def test_read_extract_checks_every_line(self):
+        rows = usa_structures.read_extract(self.sample)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0], {"fips": "99001", "occ_cls": "Commercial",
+                                   "prim_occ": "Hospital", "n": 2})
+        with self.assertRaises(ConnectorError):
+            usa_structures.read_extract(b'{"fips":"99001","occ_cls":"a","n":1}\n')
+        with self.assertRaises(ConnectorError):
+            usa_structures.read_extract(b'{"fips":"99001","occ_cls":"a","prim_occ":"b","n":-1}\n')
+        with self.assertRaises(ConnectorError):
+            usa_structures.read_extract(b"not json\n")
+
+    def test_refused_as_feature_by_admit(self):
+        from readiness.exposure.table import ExposureTable
+
+        self.snapshot()
+        table = ExposureTable.load(self.dir, self.manifest, ["99"])
+        src = usa_structures.source(table)
+        self.assertEqual((src.name, src.kind), ("usa_structures", "static"))
+        self.assertEqual(src.derived_through, 2023)
+        self.assertEqual(src.manifest_keys, ("fema/usa_structures/99",))
+        self.assertFalse(src.global_coverage)
+        self.assertEqual(src.static("99001")["total"], 306.0)
+        self.assertEqual(src.static("99001")["hospital"], 2.0)
+        self.assertIsNone(src.static("00000"))
+        self.assertIsNone(src.series("99001", "total"))
+        self.assertIsInstance(src, F.FeatureSource)
+        # Exposure is a join, never a covariate: every current contract
+        # validates from 2016, and the layer is maintained through 2023.
+        with self.assertRaises(F.FeatureAdmissionError) as ctx:
+            F.admit(src, make_contract())
+        self.assertIn("usa_structures", str(ctx.exception))
+        for path in sorted((REPO_ROOT / "contracts").glob("*.json")):
+            with self.subTest(contract=path.name), self.assertRaises(F.FeatureAdmissionError):
+                F.admit(src, Contract.from_path(path))
 
 
 class TestRefreshWithoutFetching(unittest.TestCase):

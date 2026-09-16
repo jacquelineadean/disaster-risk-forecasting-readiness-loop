@@ -44,6 +44,13 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "the backtest report is built from committed files; it never scores, "
         "never calls an agent and never an LLM",
     ),
+    (
+        "readiness/exposure",
+        ("readiness.harness.labels", "readiness.harness.scoring", "readiness.agent",
+         "claude_agent_sdk", "anthropic"),
+        "exposure is a join, never a covariate: it never sees labels, scores, "
+        "the agent plane or an LLM client",
+    ),
 )
 
 #: Non-stdlib, non-package modules tolerated anywhere, and where. Each must be

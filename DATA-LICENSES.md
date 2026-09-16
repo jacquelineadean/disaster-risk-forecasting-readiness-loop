@@ -29,6 +29,7 @@ and `tests/test_connectors.py` checks that every entry has a row here.
 | Precipitation, temperature, elevation | Open-Meteo archive API serving ECMWF/Copernicus ERA5 | `open-meteo/era5/` | CC BY 4.0 | no | attribution required on every published output: *"Weather data by Open-Meteo.com (CC BY 4.0); ERA5 by ECMWF/Copernicus"*; the pinned artefact is the monthly extract, not the raw responses |
 | Baseline risk (benchmark) | FEMA National Risk Index, county table v1.20 | `fema/nri_counties_` | US Government work, public domain | no | cite FEMA; declares `derived_through=2023` and is **refused as a feature** under every current contract — shipped as the firewall's demonstration and as a benchmark row |
 | Return-period intensities | CLIMADA event set, run by `tools/climada/run_event_set.py` outside the package | `climada/` | GPL-3.0 tool; the layer values as produced (CC BY 4.0) | yes, for the tool's code; no for the values | cite CLIMADA (ETH Zurich); the tool is never imported, the layer file is read and pinned; admissible only when `event_set_years[1]` is before the first validate year |
+| Exposure (US), county counts by occupancy | FEMA / Oak Ridge National Laboratory USA Structures, ArcGIS FeatureServer statistics | `fema/usa_structures/` | US Government work, public domain | no | cite FEMA and ORNL; only county-level counts are pulled and pinned, never footprints; declares `derived_through=<layer edit year>` and is **refused as a feature** (exposure is a join, never a covariate); exposure-joined outputs stay a separate artefact from the probability outputs (the ODbL note below) |
 
 None of these layers imposes a share-alike obligation on the derived panel or
 the feature frame, so **the Phase 0–1 derived data carries no inherited licence
@@ -93,6 +94,8 @@ Geography: US Census Bureau (public domain).
   Service (public domain).
 Weather data by Open-Meteo.com (CC BY 4.0); ERA5 by ECMWF/Copernicus.
 [if NRI shown] Baseline risk: FEMA National Risk Index (public domain).
+[if exposure joined] Exposure: FEMA / Oak Ridge National Laboratory USA
+  Structures (public domain), county counts only.
 [if exposure joined] Building footprints: (c) Microsoft / Overture Maps
   contributors, ODbL 1.0. This derived database is available under ODbL 1.0.
 [if risk engine used] Risk computation: CLIMADA, ETH Zurich, GPL-3.0.
