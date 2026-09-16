@@ -81,13 +81,18 @@ class TestBuildSite(unittest.TestCase):
         ledgers = self._json("ledgers.json")
         for name, c in contracts.registered().items():
             where = data_mod.paths(c)
-            lines = [x for x in where.ledger.read_text().splitlines() if x.strip()]
+            # A contract registered before its first run has no ledger yet.
+            text = where.ledger.read_text() if where.ledger.exists() else ""
+            lines = [x for x in text.splitlines() if x.strip()]
             self.assertEqual(len(ledgers[name]["cards"]), len(lines))
             for card, raw in zip(ledgers[name]["cards"], lines):
                 self.assertEqual(card["raw"], raw)
                 self.assertEqual(card["card_hash"], json.loads(raw)["card_hash"])
             self.assertTrue(ledgers[name]["status"]["valid"])
-            self.assertEqual(ledgers[name]["anchor"]["n_cards"], len(lines))
+            if lines:
+                self.assertEqual(ledgers[name]["anchor"]["n_cards"], len(lines))
+            else:
+                self.assertIsNone(ledgers[name]["anchor"])
 
     def test_the_browser_verification_premise_holds(self):
         # ledgers.js hashes each raw line with its card_hash member removed.
