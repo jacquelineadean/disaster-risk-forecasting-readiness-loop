@@ -3,9 +3,13 @@
 Report §4: the agent "reads the score report, writes an experiment card (what
 changed, why, result), adjusts features or calibration, and reruns".
 
-Every scored run produces a card, appended to the contract's own ledger at
-`experiments/<contract>/ledger.jsonl`. The ledger is hash-chained and anchored,
-so cards cannot be edited, reordered, or quietly deleted after the fact.
+Only `readiness loop` writes cards, one per candidate it runs, appended to the
+contract's own ledger at `experiments/<contract>/ledger.jsonl`. `readiness
+score` runs the same scoring path for a single model but only prints the
+result — it writes nothing. If you scored a model by hand and want it on the
+record, it goes through the loop, not a manual append. The ledger is
+hash-chained and anchored, so cards cannot be edited, reordered, or quietly
+deleted after the fact.
 
 ## The three fields you actually write
 

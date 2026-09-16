@@ -47,7 +47,7 @@ make verify CONTRACT=flood-xx     # check the Phase 0 exit criteria
 ```
 
 ```bash
-make test                         # 260 tests, no network needed
+make test                         # no network needed
 ```
 
 Replace `XX` with a two-letter US state, or omit `--state` for the whole
@@ -55,6 +55,18 @@ country, and `inland_flood` with any hazard from `readiness hazards`. Three
 example contracts ship registered, with their ledgers and blessed fingerprints
 — see [Examples](#examples) — so `make loop CONTRACT=tornado-ok` works from a
 clean clone once the data is pulled.
+
+`make loop` appends to the contract's **committed** ledger in `experiments/`.
+To try a contract without touching those files — for a scratch run, a fourth
+contract you are not ready to commit, or CI — point the whole experiments tree
+somewhere else first:
+
+```bash
+READINESS_EXPERIMENTS_DIR=/tmp/readiness-scratch make loop CONTRACT=tornado-ok
+```
+
+Every command that reads or writes `experiments/<contract>/` (`loop`, `score
+--split test`, `ledger`, `verify`, `dashboard`) honours it.
 
 ---
 
@@ -79,7 +91,7 @@ contract's own ledger. The queue is the same for every contract:
 |---|---|---|
 | `climatology-pooled` | the training base rate, issued everywhere | the contract's reference; scored against itself it must show exactly zero skill and AUC 0.5, or the yardstick is bent |
 | `climatology-seasonal` | per-region, per-period frequency, shrunk toward the scope-wide seasonal rate | the first candidate with any structure — it should beat the reference |
-| `persistence-last-year` | a sharp, fixed-level forecast | expected to *fail* on reliability, so the contract is seen rejecting something |
+| `persistence-last-year` | persists the last *training* year's outcome and issues it for every holdout year — no holdout label ever reaches a model, so this is a sharp, fixed-level forecast, constant across the holdout years | expected to *fail* on reliability, so the contract is seen rejecting something |
 | `leaky-oracle` | reads the outcomes it is scored on | must be **REJECTED** by the leakage canary; this is the Phase 0 exit criterion |
 
 ## Why there is no model yet
@@ -151,15 +163,19 @@ Read the tables as assertions about the harness, not as forecasts:
    still fails every contract, because being climatology is not beating it.
 2. **The same seasonal model lands differently on each hazard.** On the
    flood contract it has slight skill and misses the AUC floor; on tornadoes
-   it discriminates well (AUC 0.82) and fails only on calibration, a 12-point
-   miss in one bin; on monthly tropical cyclones it *passes* — the season is
+   it discriminates well (AUC 0.82) and fails only on calibration — its worst
+   populated bin ([0.2, 0.3), n=90) forecasts 0.245 against an observed 0.322,
+   a 7.7-point miss where the contract allows 5; on monthly tropical cyclones
+   it *passes* — the season is
    so sharp that knowing the region and the month clears every clause. Its
    skill score there is +0.009, because at a 0.66% base rate the pooled
    reference is already nearly right nearly everywhere. A passing contract
    is permission to spend one test touch, not a claim of a forecast.
 3. **The persistence baseline is rejected on every contract**, for a different
-   clause each time. On the tornado contract it is the only model that gains
-   skill from last year's events; on tropical cyclones it has none.
+   clause each time. It issues the last training year's outcome as a fixed
+   level for every holdout year, so on the tornado contract that fixed level
+   still carries a little skill (BSS +0.0114); on tropical cyclones it has
+   none.
 4. **The leaky oracle is rejected everywhere**, tripping all four canary
    checks. Running the canary across base rates from 8% to 0.66% is what
    exposed — and fixed — a check that had been calibrated to one hazard:
@@ -419,7 +435,7 @@ site/                the overview website: pages, and the browser sandbox that r
 plans/               scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
-tests/               260 tests, no network required
+tests/               unittest suite, no network required
 ```
 
 ---

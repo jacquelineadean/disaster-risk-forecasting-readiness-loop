@@ -1,0 +1,41 @@
+# Run the test suite on every push and pull request.
+#
+# No dependencies to install: the package is pure standard library, and the
+# suite needs no network. The matrix covers the two ends of the supported
+# range (README: "requires-python >=3.10") — 3.10, the floor, and 3.12, the
+# interpreter the blessed fingerprints in harness_expected/ are checked
+# bit-for-bit against (see harness_expected/README.md).
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -t .
+
+  build-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the site without the data sandbox
+        run: python tools/build_site.py --no-sandbox

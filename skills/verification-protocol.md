@@ -77,8 +77,12 @@ then (report §7), and earlier years are excluded rather than silently trusted.
 1. Read the contract. Then `readiness panel -c <contract>` and read the event
    coverage: if most of the hazard's events are zone-coded and dropped, the
    panel under-counts the hazard and no model will fix that.
-2. Score on `validate`. Read the reliability diagram, not just the headline.
-3. Write an experiment card — including for the runs that failed.
+2. Score on `validate`. `readiness score <model> -c <contract>` fits, scores
+   and prints the full result — including the runs that failed — but writes
+   nothing. Only `readiness loop` appends a card to the contract's ledger,
+   one per candidate in its queue; that is what puts an experiment card on
+   the record, including for the candidates that failed.
+3. Read the reliability diagram, not just the headline.
 4. Iterate.
 5. When and only when a model passes on `validate`, score `test` once, with
    `--spend-test-touch`. Whatever it says is the result.

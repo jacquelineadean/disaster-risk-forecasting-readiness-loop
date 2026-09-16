@@ -1,0 +1,53 @@
+# Pull real, pinned data for one contract and verify it, on demand.
+#
+# Nothing on `main` is written by this workflow: it snapshots and verifies in
+# the runner's own checkout and uploads the result as a downloadable
+# artifact. A person reviews it and commits what the run produced (an updated
+# snapshots/manifest.json, a new or refreshed harness_expected/<contract>.json,
+# ledger cards) themselves, the same as any other change to those files.
+
+name: real-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Registered contract name"
+        required: false
+        default: "tornado-ok"
+      extra_args:
+        description: "Extra arguments appended to `readiness verify`"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore the pinned data
+        uses: actions/cache@v4
+        with:
+          path: |
+            snapshots/census
+            snapshots/nws
+            snapshots/storm_events
+          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
+      - name: Pull and pin the contract's data
+        run: python -m readiness.cli snapshot -c ${{ inputs.contract }}
+      - name: Verify the Phase 0 exit criteria
+        run: >
+          python -m readiness.cli verify -c ${{ inputs.contract }}
+          ${{ inputs.extra_args }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-data-${{ inputs.contract }}
+          path: |
+            experiments/${{ inputs.contract }}
+            snapshots/manifest.json
