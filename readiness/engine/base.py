@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Sequence
 
+from readiness.harness.features import FeatureSpec
 from readiness.harness.splits import PredictionRequest, TrainingView
 
 
@@ -38,14 +39,20 @@ class FittedModel:
     #: Registry name and semantic version. Set by every subclass.
     name: str = ""
     version: str = ""
+    #: The feature columns the model asks the harness for, as specs from the
+    #: closed vocabulary. Empty for a model that sees units only. The harness
+    #: builds and audits the rows; the model never touches a source.
+    feature_specs: tuple[FeatureSpec, ...] = ()
 
     def __init__(self) -> None:
         self.training_digest: str | None = None
+        self.feature_digest: str | None = None
 
     def fit(self, view: TrainingView) -> None:
         """Fit through the training view, then record what was fitted on."""
         self._fit(view)
         self.training_digest = view.digest
+        self.feature_digest = view.feature_digest or None
 
     def predict(self, request: PredictionRequest) -> Sequence[float]:
         """Forecast the request's bare units; only after `fit()`."""

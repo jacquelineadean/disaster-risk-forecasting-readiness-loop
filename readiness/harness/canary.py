@@ -71,6 +71,8 @@ def run(
     auc: float,
     view: TrainingView | None = None,
     declared_train_digest: str | None = None,
+    declared_feature_digest: str | None = None,
+    frame_digest: str | None = None,
 ) -> CanaryReport:
     """Screen one model's output for signs it saw the answers.
 
@@ -144,6 +146,12 @@ def run(
     #    when there is nothing to compare against.
     findings.append(_provenance(view, declared_train_digest))
 
+    # 5. Feature provenance. When the harness built a feature frame for the
+    #    model, the model must declare the digest of the frame it was fitted
+    #    on, and it must be that frame. Skipped only when there were no
+    #    features in the run at all, so Phase 0 verdicts are unchanged.
+    findings.append(_feature_provenance(frame_digest, declared_feature_digest))
+
     return CanaryReport(
         rejected=any(f.tripped for f in findings), findings=tuple(findings)
     )
@@ -166,5 +174,26 @@ def _provenance(view: TrainingView | None, declared: str | None) -> CanaryFindin
         "train provenance",
         mismatch,
         f"model claims sha256:{declared}, harness exposed sha256:{view.digest}"
+        + ("  <- mismatch" if mismatch else "  (match)"),
+    )
+
+
+def _feature_provenance(frame_digest: str | None, declared: str | None) -> CanaryFinding:
+    if frame_digest is None:
+        return CanaryFinding(
+            "feature provenance", False, "no feature frame in this run; check skipped"
+        )
+    if declared is None:
+        return CanaryFinding(
+            "feature provenance",
+            True,
+            f"model declared no feature digest; harness exposed sha256:{frame_digest}"
+            "  <- undeclared",
+        )
+    mismatch = declared != frame_digest
+    return CanaryFinding(
+        "feature provenance",
+        mismatch,
+        f"model claims sha256:{declared}, harness exposed sha256:{frame_digest}"
         + ("  <- mismatch" if mismatch else "  (match)"),
     )

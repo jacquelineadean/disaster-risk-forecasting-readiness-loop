@@ -21,8 +21,10 @@ from __future__ import annotations
 import json
 import pathlib
 from dataclasses import dataclass
+from typing import Sequence
 
 from readiness.contracts import Contract, ContractError, Split, Splits
+from readiness.harness.features import FeatureFrame
 from readiness.harness.labels import Panel, Unit
 
 __all__ = [
@@ -57,15 +59,26 @@ class TrainingView:
     the canary can later verify the model was fitted on what it claims.
     """
 
-    def __init__(self, panel: Panel, split: Split) -> None:
+    def __init__(
+        self, panel: Panel, split: Split, features: FeatureFrame | None = None
+    ) -> None:
         leaked = sorted(set(panel.years) - set(split.years))
         if leaked:
             raise SplitViolation(
                 f"TrainingView built over {split.name!r} but panel contains "
                 f"out-of-split years {leaked}; refusing to expose holdout data"
             )
+        if features is not None:
+            strays = sorted(set(features.rows) - set(panel.units))
+            if strays:
+                raise SplitViolation(
+                    f"TrainingView over {split.name!r} was handed features for "
+                    f"{len(strays)} unit(s) outside its panel (first: {strays[0]}); "
+                    "refusing to expose holdout-period features"
+                )
         self._panel = panel
         self._split = split
+        self._features = features
         self._digest = panel.digest()
         self.accessed = False
 
@@ -77,6 +90,29 @@ class TrainingView:
     def digest(self) -> str:
         """Fingerprint of the data this view exposed. Checked by the canary."""
         return self._digest
+
+    @property
+    def features(self) -> FeatureFrame | None:
+        """The training units' feature rows, or None when the run has none."""
+        self.accessed = True
+        return self._features
+
+    @property
+    def feature_digest(self) -> str:
+        """Fingerprint of the feature rows exposed; empty when there are none."""
+        return self._features.digest() if self._features is not None else ""
+
+    def restrict(self, years: Sequence[int]) -> "TrainingView":
+        """A view over a subset of the training years, features sliced along.
+
+        For a calibrator that holds out the last training years to fit its
+        own correction: the result is still a training-only view by
+        construction, because `years` can only narrow what this view holds.
+        """
+        keep = set(years) & set(self._split.years)
+        panel = self._panel.filter_years(sorted(keep))
+        frame = self._features.restrict(panel.units) if self._features else None
+        return TrainingView(panel, self._split, frame)
 
     @property
     def base_rate(self) -> float:
@@ -107,10 +143,21 @@ class PredictionRequest:
 
     units: tuple[Unit, ...]
     split_name: str
+    #: Feature rows for exactly these units, built by the harness under its
+    #: cutoffs. Still no labels: a frame is covariates, never outcomes.
+    features: FeatureFrame | None = None
 
     @classmethod
-    def from_panel(cls, panel: Panel, split: Split) -> "PredictionRequest":
-        return cls(units=panel.units, split_name=split.name)
+    def from_panel(
+        cls, panel: Panel, split: Split, features: FeatureFrame | None = None
+    ) -> "PredictionRequest":
+        return cls(units=panel.units, split_name=split.name, features=features)
+
+    def row(self, unit: Unit) -> tuple[float, ...]:
+        """The feature row for one unit; raises if the request carries none."""
+        if self.features is None:
+            raise LookupError("this request carries no features")
+        return self.features.row(unit)
 
     def __len__(self) -> int:
         return len(self.units)

@@ -14,6 +14,9 @@ from unittest import mock
 from readiness.engine.baseline import ClimatologyPooled, ClimatologySeasonal
 from readiness.harness import scoring
 from readiness.harness.splits import PredictionRequest, split_panel
+from readiness.engine import build_model
+from readiness.harness import features as F
+from tests.test_features import FakeSeries, FakeStatic
 from tests.fixtures import make_contract, make_panel
 
 
@@ -164,8 +167,14 @@ class TestScorecardShape(unittest.TestCase):
     ]
 
     def test_fields_and_order_are_frozen(self):
-        names = [f.name for f in dataclasses.fields(scoring.Scorecard)]
-        self.assertEqual(names, self.FIELDS)
+        """Phase 0's fields keep their order; later phases only append defaults."""
+        fields = dataclasses.fields(scoring.Scorecard)
+        names = [f.name for f in fields]
+        self.assertEqual(names[: len(self.FIELDS)], self.FIELDS)
+        trailing = fields[len(self.FIELDS):]
+        self.assertEqual([f.name for f in trailing], ["feature_digest", "feature_columns", "feature_audit"])
+        for f in trailing:
+            self.assertIsNot(f.default, dataclasses.MISSING, f.name)
 
     def test_populated_follows_the_contracts_minimum_bin_count(self):
         c = make_contract(thresholds={"reliability_min_bin_count": 7})
@@ -189,3 +198,97 @@ class TestScorecardShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Windowed(ClimatologySeasonal):
+    """A seasonal climatology that also asks for one feature column."""
+
+    name = "windowed"
+    feature_specs = (
+        F.FeatureSpec("p1", "era5", "precip_mm", "trailing_sum", 1),
+    )
+
+    def _predict(self, request):
+        # Reads its feature rows, proving the request carries them, and then
+        # forecasts exactly as the seasonal climatology would.
+        for unit in request:
+            request.row(unit)
+        return super()._predict(request)
+
+
+class TestFeatureChannel(unittest.TestCase):
+    def setUp(self):
+        self.contract = make_contract()
+        self.panel = make_panel(contract=self.contract, n_regions=4)
+        self.sources = {"era5": FakeSeries(), "gazetteer": FakeStatic()}
+
+    def test_baselines_are_bit_identical_with_and_without_sources(self):
+        for name in ("climatology-pooled", "climatology-seasonal", "persistence-last-year"):
+            with self.subTest(model=name):
+                a = scoring.score(build_model(name), self.panel, self.contract, "validate")
+                b = scoring.score(
+                    build_model(name), self.panel, self.contract, "validate",
+                    sources=self.sources,
+                )
+                self.assertEqual(a, b)
+                self.assertEqual(a.feature_digest, "")
+                self.assertEqual(a.feature_columns, ())
+                self.assertIsNone(a.feature_audit)
+
+    def test_a_feature_model_gets_audited_rows_and_declares_their_digest(self):
+        card, report = scoring.screen(
+            Windowed(), self.panel, self.contract, "validate", sources=self.sources
+        )
+        self.assertEqual(card.feature_columns, ("p1",))
+        self.assertEqual(len(card.feature_digest), 16)
+        self.assertTrue(card.feature_audit["clean"])
+        provenance = [f for f in report.findings if f.check == "feature provenance"][0]
+        self.assertFalse(provenance.tripped)
+        self.assertIn("(match)", provenance.detail)
+
+    def test_a_feature_model_without_sources_is_refused_before_fit(self):
+        model = Windowed()
+        with self.assertRaises(F.FeatureAdmissionError):
+            scoring.score(model, self.panel, self.contract, "validate")
+        self.assertIsNone(model.training_digest)
+
+    def test_an_unclean_audit_refuses_before_fit(self):
+        class Tainted(Windowed):
+            feature_specs = (F.FeatureSpec("eal", "nri", "water_share"),)
+
+        sources = {"nri": FakeStatic("nri", derived_through=2023)}
+        model = Tainted()
+        with self.assertRaises(F.FeatureAdmissionError) as cm:
+            scoring.score(model, self.panel, self.contract, "validate", sources=sources)
+        self.assertIn("2023", str(cm.exception))
+        self.assertIsNone(model.training_digest)
+
+    def test_the_view_holds_training_rows_only_and_the_request_the_scored_ones(self):
+        seen = {}
+
+        class Peeking(Windowed):
+            def _fit(self, view):
+                seen["view"] = set(view.features.rows)
+                super()._fit(view)
+
+            def _predict(self, request):
+                seen["request"] = set(request.features.rows)
+                return super()._predict(request)
+
+        scoring.score(Peeking(), self.panel, self.contract, "validate", sources=self.sources)
+        train_years = set(self.contract.train_years)
+        self.assertTrue(all(u[1] in train_years for u in seen["view"]))
+        self.assertTrue(all(u[1] in set(self.contract.validate_years) for u in seen["request"]))
+
+    def test_a_model_that_forgets_its_feature_digest_is_tripped(self):
+        class Forgetful(Windowed):
+            def fit(self, view):
+                super().fit(view)
+                self.feature_digest = None
+
+        _card, report = scoring.screen(
+            Forgetful(), self.panel, self.contract, "validate", sources=self.sources
+        )
+        self.assertTrue(report.rejected)
+        provenance = [f for f in report.findings if f.check == "feature provenance"][0]
+        self.assertTrue(provenance.tripped)
