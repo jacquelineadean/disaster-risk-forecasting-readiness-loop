@@ -51,6 +51,13 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "exposure is a join, never a covariate: it never sees labels, scores, "
         "the agent plane or an LLM client",
     ),
+    (
+        "readiness/cite.py",
+        ("readiness.harness.labels", "readiness.harness.scoring", "readiness.agent",
+         "claude_agent_sdk", "anthropic"),
+        "the citation validator checks model prose; it must see neither labels, "
+        "scores, the agent plane nor an LLM client",
+    ),
 )
 
 #: Non-stdlib, non-package modules tolerated anywhere, and where. Each must be
