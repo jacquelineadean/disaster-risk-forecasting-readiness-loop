@@ -9,8 +9,11 @@ import pathlib
 import tempfile
 import unittest
 
+from unittest import mock
+
 from readiness import data as data_mod
-from readiness.agent import orchestrator, subagents
+from readiness.agent import guard, orchestrator, subagents
+from readiness.harness import scoring
 from readiness.connectors.base import Manifest
 from readiness.harness.labels import diagnose
 from readiness.harness.ledger import Ledger
@@ -202,6 +205,20 @@ class TestTestSplit(unittest.TestCase):
             self.score(None)
         self.assertFalse(self.where.ledger.exists())
         self.assertFalse(self.where.touch_budget.exists())
+
+    def test_the_touch_is_paid_before_the_model_sees_a_test_unit(self):
+        """An interrupted test run cannot be re-run for free."""
+        with mock.patch.object(scoring, "screen", side_effect=RuntimeError("cut")):
+            with self.assertRaises(RuntimeError):
+                self.score(self.budget())
+        self.assertEqual(self.budget().count("climatology-seasonal", "1.0.0"), 1)
+        self.assertFalse(self.where.ledger.exists())
+        with self.assertRaises(SplitViolation):
+            self.score(self.budget())
+
+    def test_every_card_carries_the_harness_digest_it_was_scored_under(self):
+        card = self.score(self.budget())
+        self.assertEqual(card.data_snapshot["harness_digest"], guard.tree_digest())
 
 
 if __name__ == "__main__":

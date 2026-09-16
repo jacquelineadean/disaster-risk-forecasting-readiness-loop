@@ -9,6 +9,13 @@ paths before the agent runs and again after, and any difference fails the run.
 The guard is itself on the list, because a guard the agent can edit is not a
 guard. Paths that do not exist are skipped so the list can name modules a
 later phase adds (`readiness/verify.py`) without breaking earlier trees.
+
+Two snapshots bracket the run, but an agent that edits a guarded file, scores
+with it and restores it before the run ends would leave the two snapshots
+equal. So every experiment card also carries `tree_digest()` of the guarded
+*code* as it stood when the card was scored (`data_snapshot.harness_digest`),
+and the guard compares each card written during the run with the digest it
+took before the run. Edit, run, restore then shows up on the card.
 """
 
 from __future__ import annotations
@@ -18,16 +25,28 @@ import pathlib
 
 from readiness.data import REPO_ROOT
 
-#: Repository-relative paths whose bytes the agent must never change. A
-#: directory means every file beneath it.
-GUARDED: tuple[str, ...] = (
+#: Repository-relative paths whose bytes decide how the agent is judged and
+#: what it is judged on: the harness, the contract machinery, the data plane
+#: that builds the labels, the guard itself, the registered contracts and the
+#: manifest that pins the data. Cheap to hash, so every card is stamped with
+#: their digest. A directory means every file beneath it.
+GUARDED_CODE: tuple[str, ...] = (
     "readiness/harness",
     "readiness/contracts.py",
     "readiness/config.py",
     "readiness/verify.py",
+    "readiness/data.py",
+    "readiness/connectors",
     "readiness/agent/guard.py",
     "contracts",
+    "snapshots/manifest.json",
 )
+
+#: Everything the before/after snapshots cover: the code above plus the pinned
+#: data itself. The extracts are large, so they are hashed twice per run, not
+#: once per card; an edit to an extract also moves the panel digest on the
+#: card, which `readiness verify` compares with the blessed fingerprints.
+GUARDED: tuple[str, ...] = GUARDED_CODE + ("snapshots",)
 
 #: Directory names that hold compiled or editor state, not source. Skipped so
 #: an import during the run (which writes `__pycache__`) is not read as tampering.
@@ -98,3 +117,37 @@ def check(before: dict[str, str], root: pathlib.Path = REPO_ROOT) -> None:
     changed = diff(before, snapshot(root))
     if changed:
         raise HarnessTampered(changed)
+
+
+def tree_digest(
+    root: pathlib.Path = REPO_ROOT, guarded: tuple[str, ...] = GUARDED_CODE
+) -> str:
+    """One short digest of the guarded code, for stamping on a card.
+
+    A card that carries the digest of the harness it was scored under can be
+    checked after the fact against the harness that should have been there;
+    that is what closes the edit-run-restore gap the two snapshots leave open.
+    """
+    h = hashlib.sha256()
+    for path, digest in sorted(snapshot(root, guarded).items()):
+        h.update(f"{path}\t{digest}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def check_cards(cards, expected: str) -> None:
+    """Raise `HarnessTampered` for any card not scored under `expected`.
+
+    `cards` are the experiment cards written during a guarded run. A card with
+    no digest at all is treated as tampered too: the orchestrator always
+    stamps one, so its absence means the card was not written by it.
+    """
+    bad = []
+    for card in cards:
+        seen = (card.data_snapshot or {}).get("harness_digest")
+        if seen != expected:
+            bad.append(
+                f"ledger card {card.experiment_id}: scored under harness "
+                f"{seen or 'unknown'}, expected {expected}"
+            )
+    if bad:
+        raise HarnessTampered(bad)

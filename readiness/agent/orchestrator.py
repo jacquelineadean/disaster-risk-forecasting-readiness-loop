@@ -150,15 +150,14 @@ def run_experiment(
     if split.name == "test":
         if touch_budget is None:
             raise RuntimeError("scoring against test requires a touch budget")
-        touch_budget.check(model.name, model.version)
+        # Paid before the model sees a single test unit, so a run that is
+        # interrupted after scoring cannot be re-run for free.
+        spent = touch_budget.spend(model.name, model.version)
+        progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
 
     progress(f"  fit {model.name}@{model.version} on {contract.splits.train}")
     card_scorecard, report = scoring.screen(model, panel, contract, split)
     verdict = contract_mod.evaluate(card_scorecard, contract)
-
-    if split.name == "test" and touch_budget is not None:
-        spent = touch_budget.spend(model.name, model.version)
-        progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
 
     if report.rejected:
         outcome = "REJECTED by leakage canary; contract verdict not honoured"
@@ -180,7 +179,9 @@ def run_experiment(
         scorecard=card_scorecard.to_dict(),
         verdict=verdict.to_dict(),
         canary=report.to_dict(),
-        data_snapshot=dataset.provenance(),
+        # The guarded code as it stood at scoring time, so a guarded agent run
+        # can check every card it produced against the harness it began with.
+        data_snapshot=dataset.provenance() | {"harness_digest": guard.tree_digest()},
         contract_digest=contract.digest(),
     )
     return ledger.append(card)
@@ -257,9 +258,11 @@ FORBIDDEN_EDITS: tuple[str, ...] = (
     "readiness/contracts.py",
     "readiness/config.py",
     "readiness/verify.py",
+    "readiness/data.py",
     "readiness/agent/guard.py",
     "readiness/connectors/",
     "contracts/",
+    "snapshots/ (the data is pinned before the run; do not pull or edit it)",
     "any module named `features` (the feature channel, Phase 1)",
 )
 
@@ -293,8 +296,9 @@ RULES YOU CANNOT NEGOTIATE:
 {forbidden}
     Those files define how you are judged and where your data comes from;
     editing them is not iteration, it is cheating. An integrity guard hashes
-    the harness, the contracts and the guard itself before and after the run;
-    any change fails the run and discards its cards.
+    those paths before and after the run, and every card you write is stamped
+    with the digest of the harness it was scored under; any change, even one
+    restored before the run ends, fails the run and discards its cards.
   * You never see holdout labels. Ask for them and the answer is no.
   * The validate split ({c.validate_years[0]}-{c.validate_years[-1]})
     is yours to iterate against. The test split
@@ -356,18 +360,31 @@ def run_claude(
         async for message in query(prompt=prompt, options=options):
             progress(str(message))
 
-    _run_guarded(lambda: asyncio.run(_go()))
+    ledger = Ledger(data_mod.paths(contract).ledger)
+    _run_guarded(lambda: asyncio.run(_go()), ledger=ledger)
 
 
-def _run_guarded(run: Callable[[], None], root: pathlib.Path = guard.REPO_ROOT) -> None:
+def _run_guarded(
+    run: Callable[[], None],
+    root: pathlib.Path = guard.REPO_ROOT,
+    ledger: Ledger | None = None,
+) -> None:
     """Run the agent between two integrity snapshots of the guarded paths.
 
     The check also runs when the agent raises: a run that crashed halfway can
     still have edited the harness first, and that is the finding that matters
     most, so `HarnessTampered` takes precedence over the agent's own error.
+
+    With a `ledger`, every card appended during the run must carry the digest
+    of the guarded code taken before it started; a card scored under an edited
+    and then restored harness carries a different one and fails the run.
     """
     before = guard.snapshot(root)
+    expected = guard.tree_digest(root)
+    n_before = len(ledger) if ledger is not None else 0
     try:
         run()
     finally:
         guard.check(before, root)
+        if ledger is not None:
+            guard.check_cards(list(ledger.read())[n_before:], expected)

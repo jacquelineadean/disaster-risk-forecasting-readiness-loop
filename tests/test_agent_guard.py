@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 from readiness.agent import guard, orchestrator
+from readiness.harness.ledger import ExperimentCard, Ledger
 
 
 def make_tree(root: pathlib.Path) -> None:
@@ -25,6 +26,9 @@ def make_tree(root: pathlib.Path) -> None:
     (root / "readiness" / "agent" / "guard.py").write_text("GUARDED = ()\n")
     (root / "contracts").mkdir()
     (root / "contracts" / "flood-zz.json").write_text("{}\n")
+    (root / "snapshots" / "storm_events").mkdir(parents=True)
+    (root / "snapshots" / "manifest.json").write_text('{"records": {}}\n')
+    (root / "snapshots" / "storm_events" / "99_2004.jsonl").write_text("{}\n")
     (root / "readiness" / "engine.py").write_text("free = True\n")
 
 
@@ -47,6 +51,8 @@ class TestSnapshot(unittest.TestCase):
                 "readiness/config.py",
                 "readiness/contracts.py",
                 "readiness/harness/metrics.py",
+                "snapshots/manifest.json",
+                "snapshots/storm_events/99_2004.jsonl",
             ],
         )
         self.assertNotIn("readiness/engine.py", snap)
@@ -138,6 +144,84 @@ class TestGuardedRun(unittest.TestCase):
             (self.root / "readiness" / "engine.py").write_text("free = False\n")
 
         orchestrator._run_guarded(edit, root=self.root)
+
+
+class TestTreeDigest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        make_tree(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_is_stable_and_short(self):
+        a = guard.tree_digest(self.root)
+        self.assertEqual(a, guard.tree_digest(self.root))
+        self.assertEqual(len(a), 16)
+
+    def test_moves_when_guarded_code_changes(self):
+        before = guard.tree_digest(self.root)
+        (self.root / "readiness" / "config.py").write_text("HAZARDS = (1,)\n")
+        self.assertNotEqual(before, guard.tree_digest(self.root))
+
+    def test_ignores_the_data_extracts_but_not_the_manifest(self):
+        before = guard.tree_digest(self.root)
+        (self.root / "snapshots" / "storm_events" / "99_2004.jsonl").write_text('{"x":1}\n')
+        self.assertEqual(before, guard.tree_digest(self.root))
+        (self.root / "snapshots" / "manifest.json").write_text('{"records": {"a": 1}}\n')
+        self.assertNotEqual(before, guard.tree_digest(self.root))
+
+
+class TestCardCheck(unittest.TestCase):
+    """Edit, run, restore leaves the two snapshots equal; the card gives it away."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        make_tree(self.root)
+        self.ledger = Ledger(self.root / "experiments" / "flood-zz" / "ledger.jsonl")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def card(self, digest):
+        snapshot = {} if digest is None else {"harness_digest": digest}
+        return ExperimentCard(
+            experiment_id=self.ledger.next_id(), timestamp="t", model="m", version="1",
+            split="validate", changed="", hypothesis="", outcome="",
+            scorecard={}, verdict={"passed": False}, data_snapshot=snapshot,
+        )
+
+    def test_a_card_scored_under_the_starting_harness_passes(self):
+        expected = guard.tree_digest(self.root)
+        run = lambda: self.ledger.append(self.card(guard.tree_digest(self.root)))
+        orchestrator._run_guarded(run, root=self.root, ledger=self.ledger)
+        self.assertEqual(list(self.ledger.read())[0].data_snapshot["harness_digest"], expected)
+
+    def test_edit_run_restore_is_caught_by_the_card(self):
+        metrics = self.root / "readiness" / "harness" / "metrics.py"
+        original = metrics.read_text()
+
+        def edit_run_restore():
+            metrics.write_text("def brier(): return 0\n")
+            self.ledger.append(self.card(guard.tree_digest(self.root)))
+            metrics.write_text(original)
+
+        with self.assertRaises(guard.HarnessTampered) as cm:
+            orchestrator._run_guarded(edit_run_restore, root=self.root, ledger=self.ledger)
+        self.assertEqual(len(cm.exception.paths), 1)
+        self.assertIn("ledger card exp-0001", cm.exception.paths[0])
+
+    def test_a_card_with_no_digest_is_refused(self):
+        run = lambda: self.ledger.append(self.card(None))
+        with self.assertRaises(guard.HarnessTampered) as cm:
+            orchestrator._run_guarded(run, root=self.root, ledger=self.ledger)
+        self.assertIn("unknown", cm.exception.paths[0])
+
+    def test_cards_written_before_the_run_are_not_judged(self):
+        self.ledger.append(self.card("stale"))
+        orchestrator._run_guarded(lambda: None, root=self.root, ledger=self.ledger)
 
 
 class TestTamperedError(unittest.TestCase):
