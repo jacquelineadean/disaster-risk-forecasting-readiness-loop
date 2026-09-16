@@ -3,7 +3,14 @@
 import inspect
 import unittest
 
-from readiness.engine import REGISTRY, FittedModel, build_model, describe_registry
+from readiness.engine import (
+    FEATURE_SETS,
+    REGISTRY,
+    FittedModel,
+    build_model,
+    describe_registry,
+    specs_for,
+)
 from readiness.engine.baseline import (
     ClimatologyPooled,
     ClimatologySeasonal,
@@ -74,13 +81,23 @@ class TestRegistry(unittest.TestCase):
 class TestParameterSchemas(unittest.TestCase):
     """`ModelSpec.params` describes exactly what `build_model(**kwargs)` accepts."""
 
-    TYPES = {"float": float, "int": int, "bool": bool, "str": str}
+    TYPES = {"float": float, "int": int, "bool": bool, "str": str, "list": list}
+    FEATURE_MODELS = ("logistic", "logistic+iso", "gbm", "gbm+iso")
 
     def test_the_documented_parameters(self):
         self.assertEqual(list(REGISTRY["climatology-seasonal"].params), ["shrinkage"])
         self.assertEqual(list(REGISTRY["persistence-last-year"].params), ["hit", "miss"])
         self.assertEqual(REGISTRY["climatology-pooled"].params, {})
         self.assertEqual(list(REGISTRY["leaky-oracle"].params), ["confidence"])
+        for name in self.FEATURE_MODELS:
+            self.assertEqual(list(REGISTRY[name].params)[:2], ["feature_sets", "history"])
+        self.assertEqual(list(REGISTRY["logistic+iso"].params)[-1], "holdout_years")
+        self.assertEqual(list(REGISTRY["gbm+iso"].params)[-1], "holdout_years")
+
+    @staticmethod
+    def documented(default, type_):
+        """A constructor's default as the schema states it: a list for "list"."""
+        return list(default) if type_ == "list" else default
 
     def test_every_entry_matches_the_constructor(self):
         for name, spec in REGISTRY.items():
@@ -88,10 +105,20 @@ class TestParameterSchemas(unittest.TestCase):
             for key, p in spec.params.items():
                 with self.subTest(model=name, param=key):
                     self.assertIn(key, signature.parameters)
-                    self.assertEqual(p["default"], signature.parameters[key].default)
+                    self.assertEqual(
+                        p["default"],
+                        self.documented(signature.parameters[key].default, p["type"]),
+                    )
                     self.assertIn(p["type"], self.TYPES)
                     self.assertIsInstance(p["default"], self.TYPES[p["type"]])
                     self.assertTrue(p["help"])
+
+    @staticmethod
+    def knob(model, key):
+        """A model's knob, looking through a calibration wrapper to its inner model."""
+        if hasattr(model, key):
+            return getattr(model, key)
+        return getattr(model.inner, key)
 
     def test_defaults_build_the_same_model_as_no_arguments(self):
         panel = make_panel(n_regions=4)
@@ -101,7 +128,18 @@ class TestParameterSchemas(unittest.TestCase):
                 explicit = build_model(name, canary_panel=panel, **defaults)
                 implicit = build_model(name, canary_panel=panel)
                 for key in spec.params:
-                    self.assertEqual(getattr(explicit, key), getattr(implicit, key))
+                    self.assertEqual(self.knob(explicit, key), self.knob(implicit, key))
+
+    def test_needs_features_marks_exactly_the_feature_models(self):
+        for name, spec in REGISTRY.items():
+            with self.subTest(model=name):
+                self.assertEqual(spec.needs_features, name in self.FEATURE_MODELS)
+                model = build_model(name, canary_panel=make_panel(n_regions=4))
+                self.assertEqual(bool(model.feature_specs), spec.needs_features)
+
+    def test_the_feature_catalogue_is_exported(self):
+        self.assertIn("era5-antecedent", FEATURE_SETS)
+        self.assertEqual(specs_for(["terrain"]), FEATURE_SETS["terrain"])
 
 
 class TestFittedModel(unittest.TestCase):

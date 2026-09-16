@@ -9,12 +9,24 @@ Models are hazard- and geography-agnostic by construction: they receive units
 of the form (region, year, period) and nothing else, so the same model can be
 proposed against any registered contract.
 
-Phase 1 adds the CLIMADA glue here (report §3E: "the engine the agent should
-drive, extend, and calibrate rather than reinvent"). Phase 0 ships climatologies
-only, on purpose.
+Phase 0 shipped climatologies only, on purpose. Phase 1 adds the feature
+models — `logistic`, `gbm` and their isotonic-calibrated variants — which ask
+the harness for named feature sets (`FEATURE_SETS`, `specs_for`) and derive
+their history feature from training labels alone. The CLIMADA subprocess model
+(report §3E: "the engine the agent should drive, extend, and calibrate rather
+than reinvent") is deferred; Phase 1 reads a pinned CLIMADA layer as a static
+feature set instead.
 """
 
 from readiness.engine.base import FittedModel
+from readiness.engine.features import FEATURE_SETS, specs_for
 from readiness.engine.registry import REGISTRY, build_model, describe_registry
 
-__all__ = ["REGISTRY", "FittedModel", "build_model", "describe_registry"]
+__all__ = [
+    "FEATURE_SETS",
+    "REGISTRY",
+    "FittedModel",
+    "build_model",
+    "describe_registry",
+    "specs_for",
+]

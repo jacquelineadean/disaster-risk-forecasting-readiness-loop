@@ -7,6 +7,12 @@ registered and flagged as the canary target, and only a canary target ever
 receives the `canary_panel` a caller passes: a forecaster requested with one
 never sees it, and the target requested without one is refused. Call sites
 pass the dataset's panel once and stop caring which model they are building.
+
+Phase 1 adds the feature models. A `ModelSpec` says whether a model asks the
+harness for features (`needs_features`), so an orchestrator can skip such a
+candidate when no sources are loaded instead of discovering it at fit time.
+The calibrated variants are registered under their own names with explicit
+factories, so their knobs are documented like any other model's.
 """
 
 from __future__ import annotations
@@ -19,6 +25,9 @@ from readiness.engine.baseline import (
     LeakyOracle,
     PersistenceLastYear,
 )
+from readiness.engine.boosting import GradientBoosting
+from readiness.engine.calibrate import Calibrated
+from readiness.engine.linear import LogisticRegression
 from readiness.harness.labels import Panel
 
 
@@ -26,8 +35,16 @@ from readiness.harness.labels import Panel
 ParamSpec = Mapping[str, object]
 
 
+#: The JSON types a parameter may declare. "list" is a list of strings (the
+#: feature-set names); its documented default is a list, and the constructor
+#: it maps to accepts any sequence and keeps a tuple.
+PARAM_TYPES = ("float", "int", "bool", "str", "list")
+
+
 def param(type_: str, default: object, help_: str) -> ParamSpec:
     """One entry of a model's parameter schema: its JSON type, default and meaning."""
+    if type_ not in PARAM_TYPES:
+        raise ValueError(f"unknown parameter type {type_!r}; known: {PARAM_TYPES}")
     return {"type": type_, "default": default, "help": help_}
 
 
@@ -39,6 +56,7 @@ class ModelSpec:
         *,
         params: Mapping[str, ParamSpec] | None = None,
         is_canary_target: bool = False,
+        needs_features: bool = False,
     ) -> None:
         self.factory = factory
         self.description = description
@@ -51,6 +69,82 @@ class ModelSpec:
         #: A canary target is not a forecaster: it is built with the full
         #: panel so the harness has something to reject.
         self.is_canary_target = is_canary_target
+        #: The model, as built by default, declares feature specs and so needs
+        #: the harness to have sources loaded. A caller can still build it
+        #: with an empty `feature_sets` for a history-only variant.
+        self.needs_features = needs_features
+
+
+DEFAULT_FEATURE_SETS = ["era5-antecedent", "terrain"]
+
+
+def logistic_isotonic(
+    feature_sets=("era5-antecedent", "terrain"),
+    history: bool = True,
+    l2: float = 1.0,
+    iters: int = 400,
+    lr: float = 0.1,
+    shrinkage: float = 10.0,
+    holdout_years: int = 3,
+) -> Calibrated:
+    """`logistic` wrapped in an isotonic map fitted on the last training years."""
+    inner = LogisticRegression(
+        feature_sets=feature_sets, history=history, l2=l2, iters=iters, lr=lr,
+        shrinkage=shrinkage,
+    )
+    return Calibrated(inner, "isotonic", holdout_years)
+
+
+def gbm_isotonic(
+    feature_sets=("era5-antecedent", "terrain"),
+    history: bool = True,
+    rounds: int = 150,
+    depth: int = 2,
+    lr: float = 0.1,
+    bins: int = 32,
+    min_leaf: int = 20,
+    shrinkage: float = 10.0,
+    holdout_years: int = 3,
+) -> Calibrated:
+    """`gbm` wrapped in an isotonic map fitted on the last training years."""
+    inner = GradientBoosting(
+        feature_sets=feature_sets, history=history, rounds=rounds, depth=depth, lr=lr,
+        bins=bins, min_leaf=min_leaf, shrinkage=shrinkage,
+    )
+    return Calibrated(inner, "isotonic", holdout_years)
+
+
+_FEATURE_PARAMS = {
+    "feature_sets": param(
+        "list", DEFAULT_FEATURE_SETS,
+        "feature sets to ask the harness for (see engine.features.FEATURE_SETS); "
+        "empty for history only",
+    ),
+    "history": param(
+        "bool", True, "add the leave-one-year-out seasonal-rate logit from training labels"
+    ),
+}
+_LOGISTIC_PARAMS = {
+    **_FEATURE_PARAMS,
+    "l2": param("float", 1.0, "L2 penalty in pseudo-observations (intercept unpenalised)"),
+    "iters": param("int", 400, "gradient-descent steps, fixed"),
+    "lr": param("float", 0.1, "gradient-descent step size"),
+    "shrinkage": param("float", 10.0, "shrinkage κ of the history feature's rates"),
+}
+_GBM_PARAMS = {
+    **_FEATURE_PARAMS,
+    "rounds": param("int", 150, "boosting rounds (trees)"),
+    "depth": param("int", 2, "maximum tree depth"),
+    "lr": param("float", 0.1, "learning rate applied to every leaf value"),
+    "bins": param("int", 32, "quantile bins per column"),
+    "min_leaf": param("int", 20, "minimum training rows on each side of a split"),
+    "shrinkage": param("float", 10.0, "shrinkage κ of the history feature's rates"),
+}
+_CALIBRATION_PARAMS = {
+    "holdout_years": param(
+        "int", 3, "last training years held out to fit the isotonic map"
+    ),
+}
 
 
 REGISTRY: dict[str, ModelSpec] = {
@@ -90,6 +184,30 @@ REGISTRY: dict[str, ModelSpec] = {
         },
         is_canary_target=True,
     ),
+    "logistic": ModelSpec(
+        LogisticRegression,
+        "L2 logistic regression on harness-built features, full-batch GD, no RNG",
+        params=_LOGISTIC_PARAMS,
+        needs_features=True,
+    ),
+    "logistic+iso": ModelSpec(
+        logistic_isotonic,
+        "logistic, then an isotonic map fitted on the last training years",
+        params={**_LOGISTIC_PARAMS, **_CALIBRATION_PARAMS},
+        needs_features=True,
+    ),
+    "gbm": ModelSpec(
+        GradientBoosting,
+        "histogram gradient boosting, depth-limited trees, deterministic",
+        params=_GBM_PARAMS,
+        needs_features=True,
+    ),
+    "gbm+iso": ModelSpec(
+        gbm_isotonic,
+        "gbm, then an isotonic map fitted on the last training years",
+        params={**_GBM_PARAMS, **_CALIBRATION_PARAMS},
+        needs_features=True,
+    ),
 }
 
 
@@ -122,6 +240,7 @@ def describe_registry() -> str:
     lines = []
     for name, spec in REGISTRY.items():
         tag = "  [canary target]" if spec.is_canary_target else ""
+        tag += "  [needs features]" if spec.needs_features else ""
         lines.append(f"  {name:<28} {spec.description}{tag}")
         for key, p in spec.params.items():
             lines.append(

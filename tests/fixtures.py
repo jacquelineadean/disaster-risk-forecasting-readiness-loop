@@ -126,3 +126,49 @@ def make_event(
         damage_property_usd=damage,
         damage_crops_usd=0.0,
     )
+
+
+def make_signal_panel(
+    contract: Contract,
+    series_source,
+    n_regions: int = 12,
+    seed: int = 20260916,
+    *,
+    intercept: float = -2.0,
+    slope: float = 1.5,
+) -> Panel:
+    """A dense panel whose labels follow the source's antecedent precipitation.
+
+    Each unit's log-odds rise with the trailing three-month `precip_mm` sum
+    the harness itself would compute for that unit (same spec, same cutoff,
+    same transform, via `readiness.harness.features`), standardised over the
+    panel. A feature model then has real, harness-visible signal to find, and
+    "does the model beat climatology" is a test of the model rather than of
+    noise. Units with no window (NaN) get the intercept alone.
+    """
+    from readiness.harness import features as F
+
+    ppy = contract.periods_per_year
+    units = tuple(
+        (region_id(i), year, period)
+        for i in range(n_regions)
+        for year in contract.all_years()
+        for period in range(1, ppy + 1)
+    )
+    spec = F.FeatureSpec("precip_3m", series_source.name, "precip_mm", "trailing_sum", 3)
+    frame = F.build_frame((spec,), {series_source.name: series_source}, units, ppy)
+    values = [frame.row(u)[0] for u in units]
+    present = [v for v in values if not math.isnan(v)]
+    mean = sum(present) / len(present)
+    std = math.sqrt(sum((v - mean) ** 2 for v in present) / len(present)) or 1.0
+
+    rng = random.Random(seed)
+    labels = []
+    for v in values:
+        z = intercept + (0.0 if math.isnan(v) else slope * (v - mean) / std)
+        p = 1.0 / (1.0 + math.exp(-z))
+        labels.append(1 if rng.random() < p else 0)
+    return Panel(
+        units, tuple(labels), hazard=contract.hazard, scope=contract.scope_key,
+        period=contract.period,
+    )

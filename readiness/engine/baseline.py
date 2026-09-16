@@ -57,6 +57,43 @@ class ClimatologyPooled(FittedModel):
         return [self.p] * len(request)
 
 
+def seasonal_rates(
+    rows: Sequence[tuple[Unit, int]], shrinkage: float
+) -> tuple[float, dict[int, float], dict[tuple[str, int], float]]:
+    """The seasonal climatology's arithmetic: pooled, per-period, per-cell rates.
+
+    Extracted from `ClimatologySeasonal._fit` so that the Phase 1 history
+    feature is *the same number* the baseline issues, not a re-derivation
+    that agrees to a few decimals. The committed fingerprints pin the
+    baseline's probabilities to twelve places and hash the whole vector, so
+    the operations here are the original ones in the original order: the
+    same sums, the same divisions, the same dictionary iteration. Do not
+    reorder a sum or fold a division; `tests.test_repro_guard` will notice.
+    """
+    rp_pos: dict[tuple[str, int], int] = defaultdict(int)
+    rp_n: dict[tuple[str, int], int] = defaultdict(int)
+    p_pos: dict[int, int] = defaultdict(int)
+    p_n: dict[int, int] = defaultdict(int)
+    total_pos = 0
+
+    for (region, _year, period), label in rows:
+        rp_pos[(region, period)] += label
+        rp_n[(region, period)] += 1
+        p_pos[period] += label
+        p_n[period] += 1
+        total_pos += label
+
+    pooled_rate = total_pos / len(rows)
+    by_period = {
+        p: (p_pos[p] + shrinkage * pooled_rate) / (p_n[p] + shrinkage) for p in p_n
+    }
+    by_region_period = {
+        key: (rp_pos[key] + shrinkage * by_period[key[1]]) / (rp_n[key] + shrinkage)
+        for key in rp_n
+    }
+    return pooled_rate, by_period, by_region_period
+
+
 class ClimatologySeasonal(FittedModel):
     """Empirical frequency per (region, period-of-year), smoothed and backed off.
 
@@ -80,32 +117,11 @@ class ClimatologySeasonal(FittedModel):
         self.pooled_rate: float = 0.0
 
     def _fit(self, view: TrainingView) -> None:
-        rows = view.rows()
-        rp_pos: dict[tuple[str, int], int] = defaultdict(int)
-        rp_n: dict[tuple[str, int], int] = defaultdict(int)
-        p_pos: dict[int, int] = defaultdict(int)
-        p_n: dict[int, int] = defaultdict(int)
-        total_pos = 0
-
-        for (region, _year, period), label in rows:
-            rp_pos[(region, period)] += label
-            rp_n[(region, period)] += 1
-            p_pos[period] += label
-            p_n[period] += 1
-            total_pos += label
-
-        self.pooled_rate = total_pos / len(rows)
-        self.by_period = {
-            p: (p_pos[p] + self.shrinkage * self.pooled_rate) / (p_n[p] + self.shrinkage)
-            for p in p_n
-        }
-        self.by_region_period = {
-            key: (
-                rp_pos[key] + self.shrinkage * self.by_period[key[1]]
-            )
-            / (rp_n[key] + self.shrinkage)
-            for key in rp_n
-        }
+        # The arithmetic lives in `seasonal_rates` so the history feature can
+        # share it; the committed fingerprints pin its every operation.
+        self.pooled_rate, self.by_period, self.by_region_period = seasonal_rates(
+            view.rows(), self.shrinkage
+        )
 
     def _probability(self, unit: Unit) -> float:
         region, _year, period = unit
