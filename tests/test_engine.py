@@ -1,5 +1,6 @@
 """The proposable models: registry hygiene and hazard-agnostic behaviour."""
 
+import inspect
 import unittest
 
 from readiness.engine import REGISTRY, FittedModel, build_model, describe_registry
@@ -61,6 +62,46 @@ class TestRegistry(unittest.TestCase):
 
     def test_describe_marks_the_canary_target(self):
         self.assertIn("[canary target]", describe_registry())
+
+    def test_describe_lists_every_parameter(self):
+        text = describe_registry()
+        for spec in REGISTRY.values():
+            for key, p in spec.params.items():
+                self.assertIn(key, text)
+                self.assertIn(p["help"], text)
+
+
+class TestParameterSchemas(unittest.TestCase):
+    """`ModelSpec.params` describes exactly what `build_model(**kwargs)` accepts."""
+
+    TYPES = {"float": float, "int": int, "bool": bool, "str": str}
+
+    def test_the_documented_parameters(self):
+        self.assertEqual(list(REGISTRY["climatology-seasonal"].params), ["shrinkage"])
+        self.assertEqual(list(REGISTRY["persistence-last-year"].params), ["hit", "miss"])
+        self.assertEqual(REGISTRY["climatology-pooled"].params, {})
+        self.assertEqual(REGISTRY["leaky-oracle"].params, {})
+
+    def test_every_entry_matches_the_constructor(self):
+        for name, spec in REGISTRY.items():
+            signature = inspect.signature(spec.factory)
+            for key, p in spec.params.items():
+                with self.subTest(model=name, param=key):
+                    self.assertIn(key, signature.parameters)
+                    self.assertEqual(p["default"], signature.parameters[key].default)
+                    self.assertIn(p["type"], self.TYPES)
+                    self.assertIsInstance(p["default"], self.TYPES[p["type"]])
+                    self.assertTrue(p["help"])
+
+    def test_defaults_build_the_same_model_as_no_arguments(self):
+        panel = make_panel(n_regions=4)
+        for name, spec in REGISTRY.items():
+            with self.subTest(model=name):
+                defaults = {k: p["default"] for k, p in spec.params.items()}
+                explicit = build_model(name, canary_panel=panel, **defaults)
+                implicit = build_model(name, canary_panel=panel)
+                for key in spec.params:
+                    self.assertEqual(getattr(explicit, key), getattr(implicit, key))
 
 
 class TestFittedModel(unittest.TestCase):

@@ -137,12 +137,12 @@ def reliability_svg(bins: Iterable[dict], tolerance: float, size: int = 300) -> 
     return "".join(parts)
 
 
+#: CSS class per card status; the names are shared with site.js (see test_site).
+_STATUS_CLASS = {"REJECTED": "reject", "PASS": "pass", "FAIL": "fail"}
+
+
 def _verdict_tag(card: ExperimentCard) -> str:
-    if card.canary and card.canary.get("rejected"):
-        return '<span class="tag reject">REJECTED</span>'
-    if (card.verdict or {}).get("passed"):
-        return '<span class="tag pass">PASS</span>'
-    return '<span class="tag fail">FAIL</span>'
+    return f'<span class="tag {_STATUS_CLASS[card.status]}">{card.status}</span>'
 
 
 def _experiment(card: ExperimentCard, contract: Contract) -> str:
@@ -240,9 +240,8 @@ def render_index(pages: list[tuple[Contract, pathlib.Path, Ledger]]) -> str:
     items = []
     for contract, path, ledger in pages:
         cards = list(ledger.read())
-        passed = sum(1 for c in cards if (c.verdict or {}).get("passed")
-                     and not (c.canary or {}).get("rejected"))
-        rejected = sum(1 for c in cards if (c.canary or {}).get("rejected"))
+        passed = sum(1 for c in cards if c.status == "PASS")
+        rejected = sum(1 for c in cards if c.status == "REJECTED")
         items.append(
             f'<li><a href="{_esc(path.parent.name)}/{_esc(path.name)}"><strong>{_esc(contract.name)}</strong></a> '
             f"— {_esc(contract.hazard)}, {_esc(contract.scope_label)}, {_esc(contract.period)}ly · "

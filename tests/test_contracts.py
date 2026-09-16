@@ -175,6 +175,30 @@ class TestValidation(unittest.TestCase):
     def test_reference_model_must_be_computable(self):
         self.assert_rejected("reference model", reference_model="oracle")
 
+    def test_malformed_values_name_the_field(self):
+        # A value of the wrong shape is a ContractError that says which field,
+        # never a bare TypeError or ValueError traceback from a cast.
+        for overrides, field in (
+            ({"thresholds": {"min_auc": "high"}}, "thresholds.min_auc"),
+            ({"thresholds": {"n_reliability_bins": None}},
+             "thresholds.n_reliability_bins"),
+            ({"damaging": {"property_usd_min": "lots"}}, "damaging.property_usd_min"),
+            ({"test_touch_budget": "one"}, "test_touch_budget"),
+            ({"splits": {"train": ["a", 2015]}}, "splits.train"),
+            ({"scope": {"states": 7}}, "scope.states"),
+            ({"event_types": 5}, "event_types"),
+            ({"scope": "US"}, "scope"),
+            ({"thresholds": [0.7]}, "thresholds"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ContractError) as ctx:
+                make_contract(**overrides)
+            self.assertIn(field, str(ctx.exception))
+
+    def test_a_non_object_spec_is_refused(self):
+        for spec in ([], "flood", 3):
+            with self.subTest(spec=spec), self.assertRaises(ContractError):
+                Contract.from_spec(spec)
+
     def test_missing_required_field(self):
         with self.assertRaises(ContractError):
             Contract.from_spec({"name": "x", "hazard": "tornado"})

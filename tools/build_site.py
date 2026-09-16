@@ -8,8 +8,12 @@ hazard catalogue, the model registry — is generated here, from the same
 modules the CLI uses, into `site/generated/`:
 
     contracts.json     every registered contract, its digest and describe() text
+    contract_defaults.json
+                       what a contract gets for everything it does not say
+                       (readiness.contracts.DEFAULTS); the register form reads it
     hazards.json       the hazard catalogue (readiness.config.HAZARDS)
-    models.json        the proposable models and the loop's baseline queue
+    models.json        the proposable models, each with its parameter schema,
+                       and the loop's baseline queue
     ledgers.json       every committed ledger: cards, raw lines, anchor, chain status
     expected.json      the blessed baseline fingerprints, one per contract
     panels.json        each contract's labelled panel: size, splits, event coverage
@@ -132,7 +136,17 @@ def build_contracts(out: pathlib.Path) -> dict[str, contracts_mod.Contract]:
     registry = contracts_mod.registered()
     dump(out / "contracts.json", [contract_view(c) for c in registry.values()])
     log(f"contracts.json: {len(registry)} registered contract(s)")
+    # The defaults travel separately because contracts.json is the list the
+    # other pages iterate; the register form reads these so it never restates
+    # a default the package might change.
+    dump(out / "contract_defaults.json", dict(contracts_mod.DEFAULTS))
     return registry
+
+
+def model_params(spec) -> list[dict]:
+    """A model's parameter schema as a list, so `dump`'s key sorting keeps the
+    constructor's order."""
+    return [{"name": name, **p} for name, p in spec.params.items()]
 
 
 def build_hazards(out: pathlib.Path) -> None:
@@ -158,6 +172,7 @@ def build_models(out: pathlib.Path) -> None:
                     "name": name,
                     "description": spec.description,
                     "is_canary_target": spec.is_canary_target,
+                    "params": model_params(spec),
                 }
                 for name, spec in REGISTRY.items()
             ],
@@ -192,7 +207,7 @@ def build_ledgers(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
         else:
             raw_lines = []
         for card, raw in zip(ledger.read(), raw_lines):
-            cards.append(card.payload() | {"card_hash": card.card_hash, "raw": raw})
+            cards.append(card.record() | {"raw": raw})
         status = ledger.verify()
         anchor = None
         if ledger.anchor_path.exists():

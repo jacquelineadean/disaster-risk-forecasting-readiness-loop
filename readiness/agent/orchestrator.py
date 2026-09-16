@@ -218,9 +218,9 @@ def run_local(
         work.append(CANARY_CANDIDATE)
 
     cards: list[ExperimentCard] = []
-    passed: list[str] = []
-    failed: list[str] = []
-    rejected: list[str] = []
+    # Tallied by the card's own status, so the loop's summary cannot disagree
+    # with the ledger's summary or the dashboard about what a card was.
+    tallies: dict[str, list[str]] = {"PASS": [], "FAIL": [], "REJECTED": []}
 
     for candidate in work:
         progress(f"take action  [{candidate.model}]")
@@ -237,15 +237,12 @@ def run_local(
         )
         progress(f"  -> {card.outcome}")
 
-        if card.canary and card.canary["rejected"]:
-            rejected.append(card.model)
-        elif card.verdict["passed"]:
-            passed.append(card.model)
-        else:
-            failed.append(card.model)
+        tallies[card.status].append(card.model)
 
     progress("repeat  (queue exhausted)")
-    return LoopResult(contract, cards, dataset, passed, failed, rejected)
+    return LoopResult(
+        contract, cards, dataset, tallies["PASS"], tallies["FAIL"], tallies["REJECTED"]
+    )
 
 
 # ---------------------------------------------------------------------------

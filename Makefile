@@ -57,6 +57,6 @@ site:            ## build the overview website's data into site/generated (packs
 serve-site:      ## serve the overview website at http://localhost:8138 (run `make site` first)
 	$(PY) -m http.server 8138 --directory site
 
-clean-derived:   ## drop derived artefacts; keeps snapshots and the ledgers
-	rm -rf report/index.html experiments/*/dashboard.html experiments/index.html site/generated
+clean-derived:   ## drop derived artefacts; keeps snapshots, the ledgers and the committed report
+	rm -rf experiments/*/dashboard.html experiments/index.html site/generated
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

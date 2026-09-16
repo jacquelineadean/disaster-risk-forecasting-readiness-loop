@@ -391,5 +391,63 @@ class TestCanaryPanelAndLoop(DataCase):
         self.assertTrue(self.where.ledger.exists())
 
 
+class TestLedgerCommand(DataCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("loop", "-c", "flood-zz", "--quiet")
+
+    def test_summary_by_default(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz")
+        self.assertEqual(code, 0)
+        self.assertIn("exp-0001", out)
+        self.assertIn("chain intact", out)
+        self.assertNotIn('"card_hash"', out)
+
+    def test_id_implies_show(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--id", "exp-0002")
+        self.assertEqual(code, 0)
+        card = json.loads(out[out.index("{"):out.rindex("}") + 1])  # exactly one card
+        self.assertEqual(card["experiment_id"], "exp-0002")
+        self.assertIn("card_hash", card)
+        self.assertNotIn("exp-0001", out)
+
+    def test_unknown_id_is_a_failure_with_a_message(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--id", "exp-9999")
+        self.assertEqual(code, 1)
+        self.assertIn("no experiment 'exp-9999'", out)
+
+    def test_show_prints_every_card(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--show")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count('"card_hash"'), 4)
+
+
+class TestDashboardCommand(DataCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("loop", "-c", "flood-zz", "--quiet")
+
+    def test_all_refuses_a_contract_or_an_output_path(self):
+        for extra in (("-c", "flood-zz"), ("-o", str(self.dir / "page.html"))):
+            with self.subTest(extra=extra):
+                code, out = self.run_cli("dashboard", "--all", *extra)
+                self.assertEqual(code, 2)
+                self.assertEqual(len(out.strip().splitlines()), 1)
+                self.assertIn("--all cannot be combined", out)
+        self.assertFalse((self.dir / "page.html").exists())
+        self.assertFalse((self.experiments / "index.html").exists())
+
+    def test_all_alone_writes_the_index(self):
+        code, out = self.run_cli("dashboard", "--all")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.experiments / "index.html").exists())
+
+    def test_output_path_is_honoured_for_one_contract(self):
+        target = self.dir / "page.html"
+        code, _out = self.run_cli("dashboard", "-c", "flood-zz", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(target.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

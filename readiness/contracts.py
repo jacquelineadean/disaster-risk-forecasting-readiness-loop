@@ -299,18 +299,18 @@ class Contract:
     @classmethod
     def from_spec(cls, spec: Mapping) -> "Contract":
         """Build a contract from the JSON layout, filling defaults where allowed."""
+        if not isinstance(spec, Mapping):
+            raise ContractError("contract spec must be a JSON object")
         try:
             hazard = str(spec["hazard"])
-            scope = spec.get("scope") or {}
-            damaging = spec.get("damaging") or {}
             splits = spec["splits"]
-            thresholds = spec.get("thresholds") or {}
         except KeyError as exc:
             raise ContractError(
                 f"contract is missing required field {exc.args[0]!r}"
             ) from None
-        except TypeError:
-            raise ContractError("contract spec must be a JSON object") from None
+        scope = _section(spec, "scope")
+        damaging = _section(spec, "damaging")
+        thresholds = _section(spec, "thresholds")
 
         event_types = spec.get("event_types")
         if event_types is None:
@@ -327,12 +327,15 @@ class Contract:
             version=str(spec.get("version", d["version"])),
             description=str(spec.get("description", "")),
             hazard=hazard,
-            event_types=tuple(str(t) for t in event_types),
+            event_types=_cast("event_types", _strings, event_types, "a list"),
             country=str(scope.get("country", d["country"])),
-            states=tuple(str(s).upper() for s in scope.get("states", ())),
+            states=_cast(
+                "scope.states", _state_codes, scope.get("states", ()), "a list"
+            ),
             period=str(spec.get("period", d["period"])),
-            damage_property_usd_min=float(
-                damaging.get("property_usd_min", d["property_usd_min"])
+            damage_property_usd_min=_cast(
+                "damaging.property_usd_min", float,
+                damaging.get("property_usd_min", d["property_usd_min"]),
             ),
             damage_count_casualties=bool(
                 damaging.get("count_casualties", d["count_casualties"])
@@ -341,23 +344,20 @@ class Contract:
             train_years=_years(splits, "train"),
             validate_years=_years(splits, "validate"),
             test_years=_years(splits, "test"),
-            test_touch_budget=int(spec.get("test_touch_budget", d["test_touch_budget"])),
+            test_touch_budget=_cast(
+                "test_touch_budget", int,
+                spec.get("test_touch_budget", d["test_touch_budget"]),
+            ),
             reference_model=str(spec.get("reference_model", d["reference_model"])),
-            min_brier_skill_score=float(
-                thresholds.get("min_brier_skill_score", d["min_brier_skill_score"])
+            min_brier_skill_score=_threshold(thresholds, "min_brier_skill_score", float),
+            reliability_tolerance_pp=_threshold(
+                thresholds, "reliability_tolerance_pp", float
             ),
-            reliability_tolerance_pp=float(
-                thresholds.get("reliability_tolerance_pp", d["reliability_tolerance_pp"])
+            reliability_min_bin_count=_threshold(
+                thresholds, "reliability_min_bin_count", int
             ),
-            reliability_min_bin_count=int(
-                thresholds.get(
-                    "reliability_min_bin_count", d["reliability_min_bin_count"]
-                )
-            ),
-            min_auc=float(thresholds.get("min_auc", d["min_auc"])),
-            n_reliability_bins=int(
-                thresholds.get("n_reliability_bins", d["n_reliability_bins"])
-            ),
+            min_auc=_threshold(thresholds, "min_auc", float),
+            n_reliability_bins=_threshold(thresholds, "n_reliability_bins", int),
         )
 
     @classmethod
@@ -533,6 +533,46 @@ class Contract:
         return "\n".join(lines)
 
 
+def _cast(field: str, caster, value, kind: str | None = None):
+    """Coerce one spec value, naming the field when it cannot be coerced.
+
+    A `float("high")` or `int(None)` deep inside `from_spec` would otherwise
+    surface as a traceback that never says which field of the contract was
+    wrong; the CLI turns a `ContractError` into a one-line refusal instead.
+    """
+    try:
+        return caster(value)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(
+            f"contract field {field!r}: cannot read {value!r} as "
+            f"{kind or caster.__name__} ({exc})"
+        ) from None
+
+
+def _section(spec: Mapping, key: str) -> Mapping:
+    """An optional nested object of the spec, absent meaning empty."""
+    value = spec.get(key) or {}
+    if not isinstance(value, Mapping):
+        raise ContractError(
+            f"contract field {key!r} must be a JSON object, got {value!r}"
+        )
+    return value
+
+
+def _threshold(thresholds: Mapping, key: str, caster):
+    return _cast(f"thresholds.{key}", caster, thresholds.get(key, DEFAULTS[key]))
+
+
+def _strings(values) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError("expected a list of strings, not one string")
+    return tuple(str(v) for v in values)
+
+
+def _state_codes(values) -> tuple[str, ...]:
+    return tuple(s.upper() for s in _strings(values))
+
+
 def _years(splits: Mapping, label: str) -> tuple[int, ...]:
     try:
         raw = splits[label]
@@ -543,7 +583,8 @@ def _years(splits: Mapping, label: str) -> tuple[int, ...]:
     if isinstance(raw, str) and YEAR_RANGE_RE.match(raw):
         first, last = (int(x) for x in YEAR_RANGE_RE.match(raw).groups())
     elif isinstance(raw, Sequence) and len(raw) == 2 and not isinstance(raw, str):
-        first, last = int(raw[0]), int(raw[1])
+        first = _cast(f"splits.{label}[0]", int, raw[0])
+        last = _cast(f"splits.{label}[1]", int, raw[1])
     else:
         raise ContractError(
             f"splits.{label} must be [first_year, last_year] or 'YYYY-YYYY', got {raw!r}"

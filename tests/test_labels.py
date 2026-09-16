@@ -244,9 +244,6 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIn("WARNING", d.format())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestZonePolicy(unittest.TestCase):
     """Zone-coded events: dropped by default, expanded through the crosswalk on request."""
@@ -340,3 +337,7 @@ class TestZonePolicy(unittest.TestCase):
         # instead, which is what the card records.
         self.assertEqual(a.units_digest(), b.units_digest())
         self.assertNotEqual(drop.digest(), expand.digest())
+
+
+if __name__ == "__main__":
+    unittest.main()

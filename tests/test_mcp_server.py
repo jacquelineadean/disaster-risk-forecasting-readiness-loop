@@ -104,6 +104,29 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(lines[0]["error"]["code"], -32700)
         self.assertEqual(lines[1]["id"], 9)
 
+    def test_valid_json_that_is_not_an_object_is_an_invalid_request(self):
+        # A bare list, number or string parses fine and used to crash the
+        # dispatcher; each is answered with -32600 and the server keeps serving.
+        stdin = io.StringIO(
+            "[1, 2]\n42\n\"ping\"\n"
+            + json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}) + "\n"
+        )
+        stdout = io.StringIO()
+        mcp_server.serve(stdin, stdout)
+        lines = [json.loads(x) for x in stdout.getvalue().strip().split("\n")]
+        self.assertEqual(len(lines), 4)
+        for bad in lines[:3]:
+            self.assertEqual(bad["error"]["code"], -32600)
+            self.assertIsNone(bad["id"])
+            self.assertIn("invalid request", bad["error"]["message"])
+        self.assertEqual(lines[3], {"jsonrpc": "2.0", "id": 9, "result": {}})
+
+    def test_handle_refuses_a_non_object_without_raising(self):
+        for message in ([], 42, "ping", None):
+            with self.subTest(message=message):
+                resp = mcp_server.handle(message)
+                self.assertEqual(resp["error"]["code"], -32600)
+
 
 class TestNoHoldoutExposure(unittest.TestCase):
     def setUp(self):

@@ -145,9 +145,7 @@ def tool_ledger(args: dict) -> str:
     if args.get("experiment_id"):
         for card in ledger.read():
             if card.experiment_id == args["experiment_id"]:
-                return json.dumps(
-                    card.payload() | {"card_hash": card.card_hash}, indent=2
-                )
+                return json.dumps(card.record(), indent=2)
         return f"no experiment {args['experiment_id']!r}"
     return ledger.summary()
 
@@ -273,8 +271,18 @@ def _error(request_id: Any, code: int, message: str) -> dict:
     }
 
 
-def handle(message: dict) -> dict | None:
+def handle(message: object) -> dict | None:
     """Dispatch one JSON-RPC message. Returns None for notifications."""
+    if not isinstance(message, dict):
+        # Valid JSON that is not an object: a bare list, number or string. Such
+        # a message has no id to answer to, but it must be answered rather than
+        # allowed to raise, or one stray line would take the server down.
+        return _error(
+            None,
+            -32600,
+            f"invalid request: a JSON-RPC message is an object, got "
+            f"{type(message).__name__} (batches are not supported)",
+        )
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}

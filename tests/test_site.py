@@ -22,6 +22,7 @@ from unittest import mock
 
 from readiness import contracts, data as data_mod
 from readiness.agent import orchestrator
+from readiness.engine.registry import REGISTRY
 from tests.fixtures import make_contract
 from tests.test_orchestrator import synthetic_dataset
 
@@ -124,6 +125,34 @@ class TestBuildSite(unittest.TestCase):
         self.assertEqual([q["model"] for q in models["queue"]],
                          [c.model for c in orchestrator.BASELINE_QUEUE])
         self.assertEqual(models["canary_candidate"]["model"], "leaky-oracle")
+
+    def test_models_json_carries_each_models_parameter_schema_in_order(self):
+        # A list, not an object: the build sorts object keys, and the order is
+        # the constructor's. The playground renders one input per entry.
+        by_name = {m["name"]: m for m in self._json("models.json")["registry"]}
+        self.assertEqual(set(by_name), set(REGISTRY))
+        for name, spec in REGISTRY.items():
+            exported = by_name[name]["params"]
+            self.assertEqual([p["name"] for p in exported], list(spec.params))
+            for p in exported:
+                self.assertEqual({k: v for k, v in p.items() if k != "name"},
+                                 spec.params[p["name"]])
+        self.assertEqual([p["name"] for p in by_name["persistence-last-year"]["params"]],
+                         ["hit", "miss"])
+
+    def test_contract_defaults_json_is_the_packages_defaults(self):
+        self.assertEqual(self._json("contract_defaults.json"), dict(contracts.DEFAULTS))
+
+    def test_the_playground_reads_defaults_and_parameters_instead_of_restating(self):
+        js = (SITE / "assets" / "playground.js").read_text(encoding="utf-8")
+        self.assertIn('"contract_defaults.json"', js)
+        self.assertIn('"models.json"', js)
+        for value in (contracts.DEFAULTS["train"], contracts.DEFAULTS["validate"],
+                      contracts.DEFAULTS["test"]):
+            self.assertNotIn(value, js, f"playground.js restates the default {value!r}")
+        for spec in REGISTRY.values():
+            for p in spec.params.values():
+                self.assertNotIn(p["help"], js, "playground.js restates a param label")
 
     def test_tapes_json_packs_each_built_panel_as_bits(self):
         tapes = self._json("tapes.json")

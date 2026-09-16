@@ -281,15 +281,27 @@ def cmd_ledger(args) -> int:
     where = data_mod.paths(c)
     ledger = Ledger(where.ledger)
     _rule(f"experiment ledger  ({c.name}: {where.relative(where.ledger)})")
-    if args.show:
-        for card in ledger.read():
-            if args.id and card.experiment_id != args.id:
-                continue
-            _p(json.dumps(card.payload() | {"card_hash": card.card_hash}, indent=2))
-            _p()
-        return 0
+    if args.id or args.show:
+        # Asking for one card by id only makes sense as a request to see it,
+        # so --id implies --show rather than silently printing the table.
+        return _show_cards(ledger, args.id)
     _p(ledger.summary())
     return 0 if ledger.verify().valid else 1
+
+
+def _show_cards(ledger: Ledger, experiment_id: str | None) -> int:
+    """Print full cards as JSON — every card, or just the one with this id."""
+    shown = 0
+    for card in ledger.read():
+        if experiment_id and card.experiment_id != experiment_id:
+            continue
+        _p(json.dumps(card.record(), indent=2))
+        _p()
+        shown += 1
+    if experiment_id and not shown:
+        _p(f"no experiment {experiment_id!r} in this ledger")
+        return 1
+    return 0
 
 
 def _print_check(check: Check) -> None:
@@ -336,6 +348,11 @@ def cmd_verify(args) -> int:
 def cmd_dashboard(args) -> int:
     from readiness import dashboard
 
+    if args.all and (args.contract or args.output):
+        # --all renders every contract to its own directory; a contract or an
+        # output path would be ignored, and an ignored option is a lie.
+        _p("dashboard: --all cannot be combined with -c/--contract or -o/--output")
+        return 2
     if args.all:
         written = dashboard.write_all()
     else:
@@ -487,7 +504,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser("ledger", help="show and verify the experiment ledger")
     )
     sp.add_argument("--show", action="store_true", help="print full cards as JSON")
-    sp.add_argument("--id", help="only this experiment id")
+    sp.add_argument("--id", help="only this experiment id, as JSON (implies --show)")
     sp.set_defaults(func=cmd_ledger)
 
     sp = data_flags(sub.add_parser("verify", help="check the Phase 0 exit criteria"))
