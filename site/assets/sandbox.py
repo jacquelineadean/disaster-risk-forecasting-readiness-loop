@@ -38,6 +38,7 @@ from readiness import data as data_mod  # noqa: E402
 from readiness.connectors.base import ConnectorError  # noqa: E402
 from readiness.contracts import ContractError  # noqa: E402
 from readiness.engine import build_model  # noqa: E402
+from readiness.engine.features import FEATURE_SETS  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
 from readiness.harness import contract as contract_mod  # noqa: E402
 from readiness.harness import scoring  # noqa: E402
@@ -61,14 +62,78 @@ def _fail(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Commands the browser refuses outright, and why. `promote` is the one
+#: atomic test touch and writes a card the repository is meant to commit; a
+#: touch spent in a tab is a spent budget with no record, so it is refused
+#: here rather than budgeted. `backtest` reads only committed files, but its
+#: report is the published record of that touch and belongs beside the ledger
+#: in git, not in a browser's memory.
+NOT_IN_BROWSER = {
+    "snapshot": "a network connection",
+    "mcp": "a process",
+    "report": "a process",
+    "promote": "the committed test-touch budget; a test touch spent from a browser "
+               "would be a spent budget with no card in the repository",
+    "backtest": "the committed ledger and backtest report of a real-data run; "
+                "there is nothing to publish from a browser",
+}
+
+
+def _refuse(command: str) -> int:
+    print(f"`readiness {command}` is not available in the browser sandbox: "
+          f"it needs {NOT_IN_BROWSER[command]}.")
+    return 2
+
+
+def _requested_features(argv: list[str]) -> list[str]:
+    """The connectors `--features a,b` names, or every connector by default."""
+    for i, arg in enumerate(argv):
+        if arg == "--features" and i + 1 < len(argv):
+            return [x for x in argv[i + 1].split(",") if x]
+        if arg.startswith("--features="):
+            return [x for x in arg.split("=", 1)[1].split(",") if x]
+    return list(data_mod.FEATURE_CONNECTORS)
+
+
+def _features_in_browser(argv: list[str]) -> int:
+    """What `readiness features` can say here: the archive packs no feature data.
+
+    The sandbox carries Storm Events extracts only, so instead of failing on a
+    missing pinned file it reports, per connector, that nothing is packed,
+    and lists the feature sets that would need each. Admission verdicts and
+    the audit are what the real command prints on a machine with the data.
+    """
+    names = _requested_features(argv)
+    unknown = sorted(set(names) - set(data_mod.FEATURE_CONNECTORS))
+    if unknown:
+        print(f"unknown feature connector(s) {unknown}; "
+              f"known: {list(data_mod.FEATURE_CONNECTORS)}")
+        return 2
+    print()
+    print("feature sources  (browser sandbox)")
+    print("-" * 60)
+    for name in names:
+        print(f"  {name:<10} no feature sources packed in the browser sandbox")
+    print()
+    print("feature sets in the catalogue (none can be built here):")
+    for set_name, specs in FEATURE_SETS.items():
+        sources = sorted({spec.source for spec in specs})
+        print(f"  {set_name:<18} {', '.join(s.column for s in specs)}  "
+              f"[sources: {', '.join(sources)}]")
+    print()
+    print("Run `readiness features -c <contract>` on a machine with the pinned "
+          "feature data (`readiness snapshot --features era5,terrain`) for the "
+          "admission verdicts and the audit.")
+    return 0
+
+
 def run_cli(argv_json: str) -> int:
     """Run `readiness <argv>` exactly as the console script would."""
     argv = json.loads(argv_json)
-    if argv and argv[0] in ("mcp", "report", "snapshot"):
-        needs = "a network connection" if argv[0] == "snapshot" else "a process"
-        print(f"`readiness {argv[0]}` is not available in the browser sandbox: "
-              f"it needs {needs}.")
-        return 2
+    if argv and argv[0] in NOT_IN_BROWSER:
+        return _refuse(argv[0])
+    if argv and argv[0] == "features":
+        return _features_in_browser(argv)
     try:
         return int(_cli.main(argv) or 0)
     except SystemExit as exc:  # argparse errors and explicit exits
@@ -162,6 +227,11 @@ def sandbox_info(_raw: str | None = None) -> str:
                 for name, h in config.HAZARDS.items()
             },
             "models": list(REGISTRY),
+            # The archive packs Storm Events extracts only: no ERA5, terrain,
+            # NRI or CLIMADA layer. The page says so before a visitor asks a
+            # feature model for a non-empty feature-set list.
+            "feature_sources_packed": [],
+            "feature_connectors": list(data_mod.FEATURE_CONNECTORS),
         }
     )
 
@@ -254,9 +324,9 @@ class Recalibrated:
 _BASE_CARDS: dict[tuple, dict] = {}
 
 #: The only split the browser may score. The test split is a one-shot holdout
-#: whose touches are budgeted on disk by `readiness score`; the playground has
-#: no budget, so it has no business there, and the training split is not a
-#: holdout at all.
+#: whose touches are budgeted on disk by `readiness promote`; the playground
+#: has no budget, so it has no business there, and the training split is not
+#: a holdout at all.
 PLAYGROUND_SPLIT = "validate"
 
 
@@ -274,8 +344,8 @@ def score_playground(raw: str) -> str:
             raise SplitViolation(
                 f"the playground scores the {PLAYGROUND_SPLIT} split only; "
                 f"{split!r} is refused. The test split is spent through "
-                "`readiness score --split test --spend-test-touch`, which charges "
-                "the touch budget first."
+                "`readiness promote MODEL --spend-test-touch`, the one atomic "
+                "test touch, which charges the budget and writes the card together."
             )
         c = contracts.load(name)
         ds = _dataset(c)

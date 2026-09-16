@@ -34,6 +34,7 @@
   <p class="eyebrow">Experiment ledgers<span class="n">read from experiments/&lt;contract&gt;/ledger.jsonl</span></p>
   <h1>Every experiment, sealed.</h1>
   <p class="lede">One append-only ledger per registered contract. Every number on this page is from the ledger; nothing was recomputed — except the hash chain, which your browser re-verifies below.</p>
+  <p class="small">A contract that has spent its Phase 1 test touch also carries a backtest report, <code>experiments/&lt;contract&gt;/backtest.html</code>, built by <code>readiness backtest</code> from committed files only; the site copies it to <code>generated/backtest/&lt;contract&gt;.html</code> and <code>contracts.json</code> records which contracts have one. None is committed yet: the test touch is spent by the real-data run, not by hand (<a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/backtest.md">docs/backtest.md</a>).</p>
 </div></section>
 
 <nav class="jumpbar" aria-label="Contracts"><div class="jumpbar__inner" id="tabs"></div></nav>

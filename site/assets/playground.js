@@ -83,7 +83,7 @@
   // --- page state --------------------------------------------------------------------
   const term = new Term($("#term"));
   const sb = new Sandbox();
-  let coverage = null, hazards = {}, contracts = [], models = null;
+  let coverage = null, hazards = {}, contracts = [], models = null, features = [];
   let queuedCmd = null, busy = false, bootedAt = 0;
 
   function setStatus(kind, text, sub) {
@@ -275,17 +275,39 @@
   // generated/models.json (each registry entry's `params`, the package's
   // ModelSpec.params). Only the input ranges, which are presentation, live here.
   const RANGES = { shrinkage: [0, 200, 1], hit: [0.01, 0.99, 0.01], miss: [0.001, 0.5, 0.001] };
+  function modelEntry(name) { return models && models.registry.find((x) => x.name === name); }
   function modelParams(name) {
-    const m = models && models.registry.find((x) => x.name === name);
+    const m = modelEntry(name);
     return (m && m.params) || [];
   }
+  // One input per parameter, by the schema's JSON type: a `list` (the feature
+  // sets) is a comma-separated text field whose default is the registry's, a
+  // `bool` a checkbox, a `str` a text field, `float`/`int` a number field.
+  function paramInput(p) {
+    const id = `cal-p-${p.name}`, attrs = `id="${id}" data-param="${p.name}" data-type="${p.type}"`;
+    if (p.type === "list") {
+      const names = features.map((f) => f.name);
+      return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="text" ${attrs} value="${RL.esc((p.default || []).join(","))}" list="cal-feature-sets" placeholder="comma-separated set names, empty for none"><datalist id="cal-feature-sets">${names.map((n) => `<option value="${RL.esc(n)}">`).join("")}</datalist></div>`;
+    }
+    if (p.type === "bool") return `<div class="field"><label></label><span class="check"><input type="checkbox" ${attrs}${p.default ? " checked" : ""}><label for="${id}" style="color:inherit">${RL.esc(p.help)}</label></span></div>`;
+    if (p.type === "str") return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="text" ${attrs} value="${RL.esc(String(p.default))}"></div>`;
+    const [lo, hi, step] = RANGES[p.name] || [undefined, undefined, p.type === "int" ? 1 : "any"];
+    const bounds = lo === undefined ? "" : ` min="${lo}" max="${hi}"`;
+    return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="number" ${attrs} value="${p.default}"${bounds} step="${step}"></div>`;
+  }
+  function paramValue(el) {
+    const t = el.dataset.type;
+    if (t === "list") return el.value.split(",").map((x) => x.trim()).filter(Boolean);
+    if (t === "bool") return el.checked;
+    if (t === "str") return el.value;
+    return Number(el.value);
+  }
   function renderParams() {
-    const m = $("#cal-model").value;
-    $("#cal-params").innerHTML = modelParams(m).map((p) => {
-      const [lo, hi, step] = RANGES[p.name] || [undefined, undefined, p.type === "int" ? 1 : "any"];
-      const bounds = lo === undefined ? "" : ` min="${lo}" max="${hi}"`;
-      return `<div class="field"><label for="cal-p-${p.name}">${RL.esc(p.help)}</label><input type="number" id="cal-p-${p.name}" data-param="${p.name}" value="${p.default}"${bounds} step="${step}"></div>`;
-    }).join("");
+    const m = $("#cal-model").value, entry = modelEntry(m);
+    const note = entry && entry.needs_features
+      ? `<p class="small"><span class="pill warn">needs features</span> the sandbox packs no feature sources (ERA5, terrain, NRI, CLIMADA), so a non-empty feature-set list is refused here. Clear the field to run the history-only variant; on a machine with the pinned data, <code>readiness score ${RL.esc(m)} --features era5,terrain</code> runs the full model.</p>`
+      : "";
+    $("#cal-params").innerHTML = modelParams(m).map(paramInput).join("") + note;
     $$("#cal-params input").forEach((el) => el.addEventListener("change", () => calibrate.scheduled && calibrate()));
   }
   $("#cal-model").addEventListener("change", () => { renderParams(); if (calibrate.scheduled) calibrate(); });
@@ -296,7 +318,7 @@
   $("#cal-run").addEventListener("click", () => { calibrate.scheduled = true; calibrate(); });
   async function calibrate() {
     if (!sb.ready || busy) return;
-    const params = {}; $$("#cal-params input").forEach((el) => { params[el.dataset.param] = Number(el.value); });
+    const params = {}; $$("#cal-params input").forEach((el) => { params[el.dataset.param] = paramValue(el); });
     const args = { contract: $("#cal-contract").value, model: $("#cal-model").value, params, scale: Number($("#cal-scale").value), shift: Number($("#cal-shift").value) };
     const out = $("#cal-result");
     out.innerHTML = `<p class="small">fitting and scoring with the harness…</p>`;
@@ -411,10 +433,10 @@
     sb.onOut = (text, stream) => term.line(text, stream === "err" ? "err" : null);
     try {
       let contractDefaults;
-      [coverage, hazards, contracts, models, contractDefaults] = await Promise.all([
+      [coverage, hazards, contracts, models, contractDefaults, features] = await Promise.all([
         RL.fetchJSON("sandbox.json").catch(() => null), RL.fetchJSON("hazards.json").catch(() => ({})),
         RL.fetchJSON("contracts.json").catch(() => []), RL.fetchJSON("models.json").catch(() => null),
-        RL.fetchJSON("contract_defaults.json").catch(() => null),
+        RL.fetchJSON("contract_defaults.json").catch(() => null), RL.fetchJSON("features.json").catch(() => []),
       ]);
       if (contractDefaults) applyDefaults(contractDefaults);
       fill($("#reg-hazard"), Object.keys(hazards).map((h) => `<option value="${RL.esc(h)}">${RL.esc(h)}</option>`).join(""));

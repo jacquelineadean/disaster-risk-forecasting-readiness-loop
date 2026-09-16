@@ -55,9 +55,18 @@ jobs:
             snapshots/census
             snapshots/nws
             snapshots/storm_events
+            snapshots/open_meteo
+            snapshots/nri
+            snapshots/climada
           key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
       - name: Pull and pin the example contracts' data (no-op when cached)
         continue-on-error: true
+        # The Phase 1 feature pulls (Census Gazetteer, ERA5 via Open-Meteo,
+        # FEMA NRI) are restored from the cache above when present but are not
+        # pulled here: the site packs no feature extracts, and the CLI exposes
+        # them through `readiness snapshot --features era5,terrain,nri`, which
+        # the real-data workflow runs. Add that line here only if the site
+        # ever needs the feature data on the Pages runner.
         run: |
           python -m readiness.cli snapshot -c tropical-cyclone-gulf --keep-raw
           python -m readiness.cli snapshot -c tornado-ok --keep-raw

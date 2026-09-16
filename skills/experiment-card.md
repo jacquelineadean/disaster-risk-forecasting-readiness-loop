@@ -3,11 +3,12 @@
 Report §4: the agent "reads the score report, writes an experiment card (what
 changed, why, result), adjusts features or calibration, and reruns".
 
-Only `readiness loop` writes cards, one per candidate it runs, appended to the
-contract's own ledger at `experiments/<contract>/ledger.jsonl`. `readiness
-score` runs the same scoring path for a single model but only prints the
-result — it writes nothing. If you scored a model by hand and want it on the
-record, it goes through the loop, not a manual append. The ledger is
+`readiness loop` writes cards, one per candidate it runs, appended to the
+contract's own ledger at `experiments/<contract>/ledger.jsonl`; `readiness
+promote` writes the one test card, through the same path. `readiness score`
+runs the same scoring path for a single model but only prints the result —
+it writes nothing. If you scored a model by hand and want it on the record,
+it goes through the loop, not a manual append. The ledger is
 hash-chained and anchored, so cards cannot be edited, reordered, or quietly
 deleted after the fact.
 
@@ -68,9 +69,30 @@ And one that did not work — equally valuable:
 | `scorecard` | every metric, plus the reliability bins |
 | `verdict` | per-clause contract result, naming the contract |
 | `canary` | leakage screen findings |
-| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range |
+| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range, the manifest keys the panel was built from; and, for a Phase 1 card, `model_kwargs`, `feature_version`, `feature_inputs`, `feature_columns` and `feature_audit` (below) |
 | `contract_digest` | which contract this was judged under |
 | `prev_hash` / `card_hash` | the chain |
+
+## Kwargs and the feature audit on a Phase 1 card
+
+Nothing was added to the card's fields — the hashes of the committed cards
+are untouched — so the Phase 1 provenance lives inside `data_snapshot`:
+
+- **`model_kwargs`** — the constructor arguments the candidate was built
+  with (`feature_sets`, `history`, `l2`, `rounds`, …). `readiness promote`
+  matches the validate PASS it requires on exactly these, and `verify
+  --phase 1 --replay` rebuilds the model from them.
+- **`feature_columns`** and **`feature_version`** — the columns the harness
+  handed the model and the manifest digest of the sources they came from;
+  `feature_inputs` lists those manifest keys. A card with no features has
+  none of these.
+- **`feature_audit`** — the harness's findings before the fit: each source's
+  admission verdict, the poisoned-cutoff bound, coverage per column, and
+  `clean`. A test card whose audit is not clean fails `verify --phase 1`,
+  whatever its scores say.
+
+The scorecard carries the frame's `feature_digest`, and the canary's fifth
+finding records whether the model's declared digest matched it.
 
 ## Reading the ledger
 

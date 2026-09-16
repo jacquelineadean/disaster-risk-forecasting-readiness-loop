@@ -75,8 +75,11 @@
             <button class="btn small secondary" data-needs-sandbox data-cmd="verify -c {c} --quiet">verify</button>
             <button class="btn small secondary" data-needs-sandbox data-cmd="canary -c {c} --quiet">canary</button>
             <button class="btn small secondary" data-needs-sandbox data-cmd="score climatology-seasonal -c {c} --split test --quiet">score on test (refused)</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="features -c {c}">features (nothing packed)</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="loop -c {c} --queue phase1 --quiet">loop --queue phase1</button>
+            <button class="btn small secondary" data-needs-sandbox data-cmd="promote logistic -c {c} --spend-test-touch">promote (refused)</button>
           </div>
-          <p class="small mb0">The loop writes into a fresh experiments tree, so the ledger starts empty like a new clone's; switch to the committed tree in the terminal's toolbar to append to a copy of the real ledgers instead. Scoring against <code>test</code> without <code>--spend-test-touch</code> is refused, as it should be.</p>
+          <p class="small mb0">The loop writes into a fresh experiments tree, so the ledger starts empty like a new clone's; switch to the committed tree in the terminal's toolbar to append to a copy of the real ledgers instead. Scoring against <code>test</code> is refused outright and points to <code>readiness promote</code>, the one atomic test touch; <code>promote</code> and <code>backtest</code> are refused in the browser altogether, because a test touch spent in a tab would be a spent budget with no card in the repository. <code>features</code> reports that the archive packs no feature sources, and <code>loop --queue phase1</code> skips the feature candidates and runs the history-only logistic model.</p>
         </div>
       </details>
 
@@ -191,6 +194,8 @@
         <span class="chip" data-chip="loop -c inland-flood-la --quiet">loop</span>
         <span class="chip" data-chip="ledger -c tornado-ok --show --id exp-0002">ledger --show</span>
         <span class="chip" data-chip="canary -c tropical-cyclone-gulf --quiet">canary (Gulf)</span>
+        <span class="chip" data-chip="features -c tornado-ok">features</span>
+        <span class="chip" data-chip="loop -c tornado-ok --queue phase1 --quiet">loop --queue phase1</span>
         <span class="chip" data-chip="register --help">register --help</span>
       </div>
       <div class="field" style="margin-top:6px"><label>experiments tree</label><span class="check">
