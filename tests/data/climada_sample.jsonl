@@ -1,0 +1,4 @@
+{"event_set_years": [1980, 2015], "seed": 20260101, "climada_version": "5.0.0", "hazard": "inland_flood"}
+{"region": "99001", "rp10": 0.8, "rp50": 1.6, "rp100": 2.1}
+{"region": "99003", "rp10": 0.2, "rp50": 0.7, "rp100": 1.1}
+{"region": "99005", "rp10": 1.4, "rp50": 2.9, "rp100": 3.6}

@@ -14,10 +14,21 @@ import unittest
 from unittest import mock
 
 from readiness import data as data_mod
-from readiness.connectors import census, nws_zones, storm_events
-from readiness.connectors.base import Manifest, SourceRecord, sha256_bytes
+from readiness.connectors import (
+    census,
+    climada_layer,
+    gazetteer,
+    nri,
+    nws_zones,
+    open_meteo,
+    storm_events,
+)
+from readiness.connectors.base import ConnectorError, Manifest, SourceRecord, sha256_bytes
+from readiness.harness import features as F
 from readiness.harness.labels import diagnose
 from tests.fixtures import STATE_FIPS, make_contract, make_panel
+
+DATA = pathlib.Path(__file__).resolve().parent / "data"
 
 CENSUS_TEXT = (
     "STATE|STATEFP|COUNTYFP|COUNTYNS|COUNTYNAME|CLASSFP|FUNCSTAT\n"
@@ -258,6 +269,181 @@ class TestSyntheticProvenance(unittest.TestCase):
         self.assertEqual(prov["panel_digest"], panel.digest())
         self.assertEqual(prov["inputs"], data_mod.input_keys(c))
         self.assertEqual(len(prov["inputs"]), 1 + 30)
+
+
+
+
+class NoSession:
+    """Stands in for the Open-Meteo session: any request is a test failure."""
+
+    def get(self, url):
+        raise AssertionError(f"build() tried to download {url}")
+
+
+def era5_line(fips: str, first_year: int, last_year: int) -> dict:
+    n = 12 * (last_year - first_year + 1)
+    return {
+        "id": fips,
+        "elevation_m": 10.0 + int(fips[-3:]),
+        "month0": F.month_index(first_year, 1),
+        "precip_mm": [float(i % 7) for i in range(n)],
+        "tmean_c": [15.0 + (i % 12) for i in range(n)],
+    }
+
+
+class FeatureSnapshotCase(SnapshotCase):
+    """The Phase 0 snapshot plus a pinned Gazetteer and a pinned ERA5 extract."""
+
+    def setUp(self):
+        super().setUp()
+        manifest = Manifest.load(self.root / "manifest.json")
+        gaz = (DATA / "gazetteer_sample.txt").read_bytes()
+        (self.root / "census" / gazetteer.CACHE_NAME).write_bytes(gaz)
+        manifest.add(gazetteer.MANIFEST_KEY, record("gazetteer", sha256_bytes(gaz)))
+        # The extract the connector would have written for this scope: every
+        # county of state 99, from the year before the contract's first year.
+        self.extract = open_meteo.extract_path(self.root, STATE_FIPS)
+        self.extract.parent.mkdir()
+        lines = [era5_line(f, 1999, 2007) for f in ("99001", "99003", "99005")]
+        self.extract.write_text("".join(open_meteo._dumps(ln) for ln in lines))
+        self.era5_key = open_meteo.manifest_key(STATE_FIPS)
+        manifest.add(
+            self.era5_key, record("era5", sha256_bytes(self.extract.read_bytes()))
+        )
+        manifest.save()
+        more = [
+            mock.patch.object(gazetteer, "fetch", no_fetch),
+            mock.patch.object(nri, "fetch", no_fetch),
+            mock.patch.object(open_meteo, "DEFAULT_SESSION", NoSession()),
+        ]
+        for p in more:
+            p.start()
+        self.patches.extend(more)
+
+    def build(self, contract=None, **kw):
+        return data_mod.build(contract or self.c, snapshot_dir=self.root, **kw)
+
+
+class TestBuildWithFeatures(FeatureSnapshotCase):
+    def test_terrain_loads_the_gazetteer_and_the_pinned_elevation(self):
+        ds = self.build(features=("terrain",))
+        self.assertEqual(sorted(ds.sources), ["elevation", "gazetteer"])
+        for src in ds.sources.values():
+            F.admit(src, self.c)
+        water = ds.sources["gazetteer"].static("99001")["water_share"]
+        self.assertAlmostEqual(water, 0.2)
+        self.assertEqual(ds.sources["elevation"].static("99003"), {"elevation_m": 13.0})
+        self.assertEqual(ds.feature_inputs, (gazetteer.MANIFEST_KEY, self.era5_key))
+
+    def test_feature_version_is_separate_from_and_stable_beside_data_version(self):
+        plain = self.build()
+        ds = self.build(features=("terrain",))
+        again = self.build(features=("terrain",))
+        self.assertEqual(ds.data_version, plain.data_version)  # features never move it
+        self.assertNotEqual(ds.feature_version, ds.data_version)
+        self.assertEqual(ds.feature_version, again.feature_version)
+        self.assertEqual(ds.feature_version, ds.manifest.digest(ds.feature_inputs))
+        self.assertEqual(plain.feature_version, "")
+        self.assertEqual(plain.feature_inputs, ())
+        self.assertEqual(plain.sources, {})
+
+    def test_provenance_names_the_features_only_when_loaded(self):
+        plain = self.build().provenance()
+        self.assertNotIn("feature_version", plain)
+        self.assertNotIn("feature_inputs", plain)
+        prov = self.build(features=("terrain",)).provenance()
+        added = sorted(set(prov) - set(plain))
+        self.assertEqual(added, ["feature_inputs", "feature_version"])
+        self.assertEqual(prov["feature_inputs"], [gazetteer.MANIFEST_KEY, self.era5_key])
+        self.assertEqual(prov["data_version"], plain["data_version"])
+        json.dumps(prov)
+
+    def test_era5_reads_the_pinned_extract_without_fetching(self):
+        ds = self.build(features=("era5",))
+        self.assertEqual(sorted(ds.sources), ["elevation", "era5"])
+        s = ds.sources["era5"].series("99005", "precip_mm")
+        self.assertEqual(s.start, F.month_index(1999, 1))
+        self.assertEqual(len(s.values), 9 * 12)
+        F.admit(ds.sources["era5"], self.c)
+
+    def test_a_county_missing_from_the_extract_means_a_download(self):
+        lines = [era5_line(f, 1999, 2007) for f in ("99001", "99003")]
+        self.extract.write_text("".join(open_meteo._dumps(ln) for ln in lines))
+        with self.assertRaises(AssertionError):
+            self.build(features=("era5",))
+
+    def test_terrain_without_an_era5_extract_has_no_elevation(self):
+        self.extract.unlink()
+        ds = self.build(features=("terrain",))
+        self.assertEqual(sorted(ds.sources), ["gazetteer"])
+        self.assertEqual(ds.feature_inputs, (gazetteer.MANIFEST_KEY,))
+
+    def test_terrain_ignores_an_extract_that_no_longer_matches_its_record(self):
+        # Bytes that do not hash to the manifest are unpinned; `era5` would
+        # re-fetch them, and `terrain` must not quietly serve them either.
+        self.extract.write_text(self.extract.read_text() + "\n")
+        ds = self.build(features=("terrain",))
+        self.assertEqual(sorted(ds.sources), ["gazetteer"])
+
+    def test_a_read_only_feature_build_leaves_the_manifest_untouched(self):
+        before = (self.root / "manifest.json").read_text()
+        self.build(features=("terrain", "era5"))
+        self.assertEqual((self.root / "manifest.json").read_text(), before)
+
+    def test_nri_loads_and_is_refused_by_the_firewall(self):
+        with self.assertRaises(AssertionError):  # not pinned: it would download
+            self.build(features=("nri",))
+        sample = (DATA / "nri_sample.csv").read_bytes()
+        (self.root / "fema").mkdir()
+        (self.root / "fema" / nri.CACHE_NAME).write_bytes(sample)
+        manifest = Manifest.load(self.root / "manifest.json")
+        manifest.add(nri.MANIFEST_KEY, record("nri", sha256_bytes(sample)))
+        manifest.save()
+        ds = self.build(features=("nri",))
+        self.assertEqual(ds.sources["nri"].derived_through, 2023)
+        with self.assertRaises(F.FeatureAdmissionError):
+            F.admit(ds.sources["nri"], self.c)
+
+    def test_climada_needs_the_layer_the_tool_produces(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            self.build(features=("climada",))
+        self.assertIn("tools/climada/run_event_set.py", str(ctx.exception))
+        path = climada_layer.layer_path(self.root, self.c.hazard, self.c.scope_key)
+        path.parent.mkdir()
+        path.write_bytes((DATA / "climada_sample.jsonl").read_bytes())
+        ds = self.build(features=("climada",))
+        key = climada_layer.manifest_key(self.c.hazard, self.c.scope_key)
+        self.assertEqual(ds.sources["climada"].derived_through, 2015)
+        self.assertEqual(ds.feature_inputs, (key,))
+        self.assertIn(key, Manifest.load(self.root / "manifest.json").records)
+
+    def test_an_unknown_feature_name_is_an_error(self):
+        with self.assertRaises(ValueError):
+            self.build(features=("weather",))
+
+
+class TestPinnedWithFeatures(FeatureSnapshotCase):
+    def test_pinned_features(self):
+        self.assertTrue(data_mod.pinned(self.c, self.root))
+        self.assertTrue(data_mod.pinned(self.c, self.root, features=("terrain", "era5")))
+        self.assertFalse(data_mod.pinned(self.c, self.root, features=("nri",)))
+        self.assertFalse(data_mod.pinned(self.c, self.root, features=("climada",)))
+
+    def test_an_unrecorded_extract_is_not_pinned(self):
+        manifest = Manifest.load(self.root / "manifest.json")
+        del manifest.records[self.era5_key]
+        manifest.save(force=True)
+        self.assertFalse(data_mod.pinned(self.c, self.root, features=("era5",)))
+        self.assertTrue(data_mod.pinned(self.c, self.root, features=("terrain",)))
+
+    def test_a_missing_extract_is_not_pinned(self):
+        self.extract.unlink()
+        self.assertFalse(data_mod.pinned(self.c, self.root, features=("era5",)))
+
+    def test_the_national_scope_reads_the_all_extract(self):
+        national = make_contract(scope={"states": []}, splits=SPLITS)
+        self.assertEqual(data_mod.era5_parts(national, ["98", "99"]), ["all"])
+        self.assertEqual(data_mod.era5_parts(self.c, ["99"]), ["99"])
 
 
 if __name__ == "__main__":
