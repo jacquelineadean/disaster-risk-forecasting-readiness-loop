@@ -255,3 +255,43 @@ class TestDataTools(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMalformedParams(unittest.TestCase):
+    def test_params_that_are_not_an_object_get_an_error_not_a_crash(self):
+        from readiness.connectors import mcp_server
+
+        for params in ("x", [1], [{"name": "panel_summary"}]):
+            with self.subTest(params=params):
+                reply = mcp_server.handle(
+                    {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": params}
+                )
+                self.assertEqual(reply["error"]["code"], -32602)
+                self.assertEqual(reply["id"], 7)
+
+    def test_serve_answers_the_next_request_after_an_internal_error(self):
+        import io
+        import json
+        from unittest import mock
+
+        from readiness.connectors import mcp_server
+
+        lines = [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "ping"}),
+        ]
+        out = io.StringIO()
+        real = mcp_server.handle
+        calls = []
+
+        def flaky(message):
+            calls.append(message)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return real(message)
+
+        with mock.patch.object(mcp_server, "handle", flaky):
+            mcp_server.serve(io.StringIO("\n".join(lines) + "\n"), out)
+        replies = [json.loads(line) for line in out.getvalue().splitlines()]
+        self.assertEqual(replies[0]["error"]["code"], -32603)
+        self.assertEqual(replies[1]["id"], 2)

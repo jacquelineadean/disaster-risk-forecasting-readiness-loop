@@ -236,6 +236,15 @@ def cmd_loop(args) -> int:
         orchestrator.run_claude(c, split_name=args.split, progress=progress)
         return 0
 
+    if args.split == "test" and not args.spend_test_touch:
+        _p()
+        _p(
+            "refusing to run the loop against the test split without "
+            f"--spend-test-touch.\nEvery candidate in the queue would spend one of "
+            f"the {c.test_touch_budget} touch(es) its model version has, ever."
+        )
+        return 2
+
     _rule(f"experimental loop  ({c.name}, {args.backend} backend, split={args.split})")
     result = orchestrator.run_local(
         c,
@@ -493,6 +502,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--split", default="validate", choices=["train", "validate", "test"])
     sp.add_argument("--no-canary", action="store_true",
                     help="skip the leaked-model demonstration")
+    sp.add_argument("--spend-test-touch", action="store_true",
+                    help="required with --split test: every queued candidate spends a touch")
     sp.add_argument("--quiet", action="store_true", help="suppress data-plane chatter")
     sp.set_defaults(func=cmd_loop)
 

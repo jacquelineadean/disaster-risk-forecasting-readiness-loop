@@ -140,12 +140,14 @@ class TestBuildFrame(unittest.TestCase):
         self.assertTrue(math.isnan(row["p3"]))
         self.assertEqual(frame.missing_share()["p1"], 1.0)
 
-    def test_frame_takes_units_and_ignores_labels(self):
-        """Shuffling every holdout label cannot move a single feature value."""
+    def test_frame_takes_units_and_has_no_way_to_receive_labels(self):
+        """Label independence is structural: the builder has no label parameter."""
+        import inspect
+
+        names = set(inspect.signature(F.build_frame).parameters)
+        self.assertEqual(names, {"specs", "sources", "units", "periods_per_year", "_poison"})
         panel = make_panel(contract=self.contract, n_regions=3)
         frame = F.build_frame(self.specs, self.sources, panel.units, self.ppy)
-        flipped = [1 - y for y in panel.labels]
-        self.assertNotEqual(list(panel.labels), flipped)
         again = F.build_frame(self.specs, self.sources, panel.units, self.ppy)
         self.assertEqual(frame.digest(), again.digest())
         self.assertEqual(len(frame), len(panel))

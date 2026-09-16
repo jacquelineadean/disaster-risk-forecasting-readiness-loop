@@ -52,6 +52,13 @@ GUARDED: tuple[str, ...] = GUARDED_CODE + ("snapshots",)
 #: an import during the run (which writes `__pycache__`) is not read as tampering.
 _SKIP_DIRS = frozenset({"__pycache__"})
 
+#: Derived files the data plane rewrites on every build from the pinned parts
+#: (`storm_events.snapshot` concatenates the per-year extracts into one
+#: `<scope>_extract.jsonl` whenever a panel is built). Their bytes are a
+#: deterministic function of files that *are* guarded, so hashing them would
+#: only turn a legitimate first build during a run into a false alarm.
+_DERIVED_SUFFIXES = ("_extract.jsonl",)
+
 
 class HarnessTampered(RuntimeError):
     """A guarded file changed while the agent was running.
@@ -81,6 +88,8 @@ def _files_under(path: pathlib.Path) -> list[pathlib.Path]:
     found = []
     for candidate in sorted(path.rglob("*")):
         if any(part in _SKIP_DIRS for part in candidate.relative_to(path).parts):
+            continue
+        if candidate.name.endswith(_DERIVED_SUFFIXES):
             continue
         if candidate.is_file():
             found.append(candidate)

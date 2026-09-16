@@ -21,7 +21,7 @@ marks every prior experiment as incomparable — that is the intended cost.
 | | |
 |---|---|
 | **May** | propose any model in `readiness/engine/`, add features, change hyperparameters, iterate on `validate` as often as you like |
-| **May not** | edit anything under `readiness/harness/`, edit `readiness/contracts.py`, `readiness/config.py` or any file in `contracts/`, read holdout labels, score `test` more than the contract's budget allows per model version |
+| **May not** | edit anything under `readiness/harness/`, `readiness/connectors/` or `snapshots/`, edit `readiness/contracts.py`, `readiness/config.py`, `readiness/data.py`, `readiness/verify.py`, `readiness/agent/guard.py`, any module named `features` or any file in `contracts/` (the integrity guard hashes all of these and every card records the digest it was scored under), read holdout labels, score `test` more than the contract's budget allows per model version |
 
 If you find yourself wanting to change a threshold because a model is close,
 that is the moment the protocol exists for. Write the experiment card saying the

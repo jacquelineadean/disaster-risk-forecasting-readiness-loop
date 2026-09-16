@@ -91,13 +91,10 @@ class TestImportRules(unittest.TestCase):
                                 f"{file.relative_to(REPO_ROOT)} imports {module}: {why}",
                             )
 
-    def test_rules_name_existing_subtrees_or_planned_files(self):
-        # A rule for a path that will never exist is a rule that never runs.
+    def test_rules_name_existing_paths(self):
+        # A rule for a path that does not exist is a rule that never runs.
         for subtree, _, _ in RULES:
-            self.assertTrue(
-                (REPO_ROOT / subtree).exists() or subtree.endswith(".py"),
-                f"{subtree} does not exist",
-            )
+            self.assertTrue((REPO_ROOT / subtree).exists(), f"{subtree} does not exist")
 
 
 class TestStdlibOnly(unittest.TestCase):

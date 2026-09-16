@@ -133,6 +133,8 @@ def load(
     """
     cache = snapshot_dir / "zone_county.dbx"
     record = manifest.records.get(MANIFEST_KEY)
+    if refresh and not allow_fetch:
+        raise ConnectorError("refresh requested for the zone crosswalk but fetching is not allowed")
     data = None
     if not refresh:
         data = pinned_bytes(cache, record, allow_fetch=allow_fetch)

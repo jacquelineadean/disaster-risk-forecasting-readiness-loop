@@ -263,8 +263,9 @@ Two invariants hold everywhere, and most of the design follows from them:
 **No model ever receives a holdout label.** `splits.TrainingView` is the only
 channel a model gets data through, and it raises if handed a panel containing a
 validate or test year. `predict()` receives bare units. Labels are fetched in
-`scoring.score()` *after* `predict()` has returned — one function, readable in
-one sitting, which is the point.
+`scoring._fit_predict()` *after* `predict()` has returned — one function, readable
+in one sitting, which is the point; `score()`, `predictions_for()` and `screen()`
+all go through it.
 
 **Nothing in the harness calls a language model.** Verification has to be
 rules-based to be worth anything. If an LLM wants these numbers it reads them
@@ -420,10 +421,13 @@ the subagents from report §4 (a hazard analyst for the contract's hazard, a
 calibration critic, a data steward). Needs `pip install 'readiness-loop[agent]'`
 and an API key. The harness is unchanged; no subagent is granted a write tool.
 Because Bash is a write channel whatever the prompt says, `readiness.agent.guard`
-hashes `readiness/harness/`, `readiness/contracts.py`, `readiness/config.py`,
-`readiness/verify.py`, the guard itself and `contracts/` before the run and
-again after it. Any byte that moved fails the run with the list of paths, and
-the cards it wrote are not to be trusted or committed.
+hashes the harness, the contract machinery, the data plane (`readiness/data.py`,
+`readiness/connectors/`, the manifest and the pinned extracts), the guard
+itself and `contracts/` before the run and again after it, and stamps every
+card the run writes with the digest of that code as it stood at scoring time.
+Any byte that moved, even one restored before the run ended, fails the run
+with the list of paths, and the cards it wrote are not to be trusted or
+committed.
 
 ### MCP
 
@@ -448,7 +452,7 @@ readiness/
   data.py            builds a contract's dataset: snapshot, panel, provenance; input_keys/pinned
   verify.py          the Phase 0 exit criteria as a library: reproducibility fingerprint, canary check
   connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server
-  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
+  harness/           eval plane: metrics, splits, labels, features, scoring, contract, canary, ledger
   engine/            proposable models: climatologies, persistence, the canary target
   agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
   dashboard.py       the ledger rendered as a self-contained HTML page

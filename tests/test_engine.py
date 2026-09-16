@@ -80,7 +80,7 @@ class TestParameterSchemas(unittest.TestCase):
         self.assertEqual(list(REGISTRY["climatology-seasonal"].params), ["shrinkage"])
         self.assertEqual(list(REGISTRY["persistence-last-year"].params), ["hit", "miss"])
         self.assertEqual(REGISTRY["climatology-pooled"].params, {})
-        self.assertEqual(REGISTRY["leaky-oracle"].params, {})
+        self.assertEqual(list(REGISTRY["leaky-oracle"].params), ["confidence"])
 
     def test_every_entry_matches_the_constructor(self):
         for name, spec in REGISTRY.items():

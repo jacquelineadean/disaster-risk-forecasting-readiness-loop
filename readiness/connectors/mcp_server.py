@@ -286,6 +286,12 @@ def handle(message: object) -> dict | None:
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
+    if not isinstance(params, dict):
+        return _error(
+            request_id,
+            -32602,
+            f"invalid params: expected an object, got {type(params).__name__}",
+        )
 
     if method == "initialize":
         return _result(
@@ -352,7 +358,14 @@ def serve(stdin=None, stdout=None, *, contract: Contract | None = None) -> None:
             stdout.write(json.dumps(_error(None, -32700, f"parse error: {exc}")) + "\n")
             stdout.flush()
             continue
-        response = handle(message)
+        try:
+            response = handle(message)
+        except Exception as exc:  # a bad request must not take the server down
+            response = _error(
+                message.get("id") if isinstance(message, dict) else None,
+                -32603,
+                f"internal error: {type(exc).__name__}: {exc}",
+            )
         if response is not None:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()

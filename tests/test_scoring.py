@@ -9,6 +9,7 @@ once and the card and the canary describe the same forecasts.
 
 import dataclasses
 import unittest
+from unittest import mock
 
 from readiness.engine.baseline import ClimatologyPooled, ClimatologySeasonal
 from readiness.harness import scoring
@@ -55,11 +56,27 @@ class TestOneFit(unittest.TestCase):
     def test_the_card_and_the_canary_describe_the_same_forecasts(self):
         # The canary's skill and AUC findings quote the card's numbers, and
         # the arrays it inspected are the ones `predictions_for` exposes.
-        card, report = scoring.screen(
-            ClimatologySeasonal(), self.panel, self.c, "validate"
-        )
+        from readiness.harness import canary as canary_mod
+
+        seen = {}
+        real_run = canary_mod.run
+
+        def spy(**kwargs):
+            seen["probs"] = list(kwargs["probs"])
+            seen["outcomes"] = list(kwargs["outcomes"])
+            return real_run(**kwargs)
+
+        with mock.patch.object(canary_mod, "run", spy):
+            card, report = scoring.screen(
+                ClimatologySeasonal(), self.panel, self.c, "validate"
+            )
         alone = scoring.score(ClimatologySeasonal(), self.panel, self.c, "validate")
         self.assertEqual(card, alone)
+        _units, probs, outcomes = scoring.predictions_for(
+            ClimatologySeasonal(), self.panel, self.c, "validate"
+        )
+        self.assertEqual(seen["probs"], probs)
+        self.assertEqual(seen["outcomes"], outcomes)
         skill = next(f for f in report.findings if f.check == "implausible skill")
         self.assertIn(f"{card.brier_skill_score:+.4f}", skill.detail)
         provenance = next(f for f in report.findings if f.check == "train provenance")

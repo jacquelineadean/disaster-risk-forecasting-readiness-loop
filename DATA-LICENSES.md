@@ -22,7 +22,7 @@ The machine-readable version — with a sha256 for every file actually pulled �
 | County universe | US Census Bureau, national county file (2020) | US Government work, public domain | no | cite the Census Bureau |
 | Zone-county crosswalk | NWS zone-county correlation file | US Government work, public domain (17 U.S.C. §105) | no | cite NOAA NWS; pinned only when a contract's `zone_policy` is `expand` |
 
-Neither layer imposes a share-alike obligation, so **the Phase 0 derived panel
+None of these layers imposes a share-alike obligation, so **the Phase 0 derived panel
 carries no inherited licence constraint**. This project's own code is Apache-2.0.
 
 ## Committed to by the roadmap
@@ -79,6 +79,8 @@ Any published artefact derived from these layers should carry, at minimum:
 Hazard history: NOAA National Centers for Environmental Information,
   Storm Events Database (public domain).
 Geography: US Census Bureau (public domain).
+[if zone events expanded] Zone-county crosswalk: NOAA National Weather
+  Service (public domain).
 [if exposure joined] Building footprints: (c) Microsoft / Overture Maps
   contributors, ODbL 1.0. This derived database is available under ODbL 1.0.
 [if risk engine used] Risk computation: CLIMADA, ETH Zurich, GPL-3.0.

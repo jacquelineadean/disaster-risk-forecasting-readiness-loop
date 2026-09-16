@@ -82,6 +82,12 @@ REGISTRY: dict[str, ModelSpec] = {
     "leaky-oracle": ModelSpec(
         LeakyOracle,
         "reads the outcomes; exists only to be rejected by the canary",
+        params={
+            "confidence": param(
+                "float", 0.999,
+                "how close to 0 and 1 the cheat pins its forecasts",
+            ),
+        },
         is_canary_target=True,
     ),
 }

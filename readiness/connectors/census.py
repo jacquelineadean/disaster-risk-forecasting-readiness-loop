@@ -55,6 +55,8 @@ def load(
     """
     cache = snapshot_dir / "national_county2020.txt"
     key = "census/national_county2020"
+    if refresh and not allow_fetch:
+        raise ConnectorError("refresh requested for the county file but fetching is not allowed")
     data = None
     if not refresh:
         data = pinned_bytes(cache, manifest.records.get(key), allow_fetch=allow_fetch)

@@ -90,7 +90,7 @@ fix can move a committed number (it never does; the guard proves it).
 
 | finding | fix |
 |---|---|
-| the claude backend and every subagent are granted Bash, which is a write channel to the harness, contracts and snapshots | `agent/guard.py`: a sha256 manifest of `readiness/harness/`, `readiness/contracts.py`, `readiness/config.py` and `contracts/*.json` is taken before `run_claude` and checked after; any change fails the run and is reported; the system prompt's forbidden list gains `readiness/connectors/` and the feature modules (Phase 1) |
+| the claude backend and every subagent are granted Bash, which is a write channel to the harness, contracts and snapshots | `agent/guard.py`: a sha256 manifest of the harness, `contracts.py`, `config.py`, `verify.py`, `data.py`, `connectors/`, the guard, `contracts/` and `snapshots/` (the derived combined extract excepted) is taken before `run_claude` and checked after; every card is stamped with the digest of the guarded code at scoring time and checked against the pre-run digest, so edit-run-restore is caught; the cards that existed before the run must be intact afterwards; the system prompt's forbidden list matches |
 | agent prompts hard-code Storm Events and county vocabulary | prompts read the contract's own `describe()`; Phase 4 supplies the rest |
 
 ### R5. Site and sandbox (`site/`, `tools/build_site.py`)
@@ -108,7 +108,7 @@ fix can move a committed number (it never does; the guard proves it).
 | no tests for `verify`, `score`, `canary`, `panel`; `run_experiment`'s test-split path untested; MCP data tools never executed | tests against a synthetic `Dataset` injected in place of `data.build` |
 | engine import rule is docstring-only | `tests/test_boundaries.py` walks the AST: engine never imports the judge or the canary; harness never imports the engine, the agent or an LLM client; every import under `readiness/` is stdlib or `readiness.*` except the SDK behind `try:` in `agent/` |
 | README says 260 tests (277), misstates the tornado calibration miss (12 points; the ledger says 7.7), and runs the quickstart against the committed ledgers without naming `READINESS_EXPERIMENTS_DIR`; skills say every scored run writes a card (`score` does not) | corrected |
-| no CI runs the test suite | `.github/workflows/test.yml`: the suite on 3.10 and 3.12, no network; `real-data.yml`: manual, restores the pinned-data cache and runs `verify` for a contract and phase |
+| no CI runs the test suite | `.github/workflows/test.yml`: the suite on 3.10 and 3.12, no network; `real-data.yml`: manual, restores the pinned-data cache and runs `snapshot` then `verify` for a contract with any extra arguments (the `--phase` flag arrives with Phase 1) |
 
 ### R7. The low-severity sweep
 

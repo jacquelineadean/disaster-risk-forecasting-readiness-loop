@@ -36,7 +36,7 @@ from readiness.contracts import Contract, Split
 from readiness.engine import build_model
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
-from readiness.harness.ledger import ExperimentCard, Ledger, utc_now
+from readiness.harness.ledger import GENESIS, ExperimentCard, Ledger, utc_now
 from readiness.harness.splits import TouchBudget, get_split
 
 Progress = Callable[[str], None]
@@ -382,9 +382,24 @@ def _run_guarded(
     before = guard.snapshot(root)
     expected = guard.tree_digest(root)
     n_before = len(ledger) if ledger is not None else 0
+    head_before = ledger.head() if ledger is not None else None
     try:
         run()
     finally:
         guard.check(before, root)
         if ledger is not None:
-            guard.check_cards(list(ledger.read())[n_before:], expected)
+            cards = list(ledger.read())
+            # The cards that existed before the run must still be there,
+            # unchanged and in place: a run that emptied the ledger and wrote
+            # a fresh one would otherwise slip past the positional slice.
+            intact = (
+                len(cards) >= n_before
+                and (cards[n_before - 1].card_hash if n_before else GENESIS) == head_before
+                and ledger.verify().valid
+            )
+            if not intact:
+                raise guard.HarnessTampered(
+                    ["ledger: the cards that existed before the run were rewritten, "
+                     "reordered or removed"]
+                )
+            guard.check_cards(cards[n_before:], expected)

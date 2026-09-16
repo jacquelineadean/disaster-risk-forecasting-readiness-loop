@@ -84,7 +84,7 @@ class TestSnapshot(unittest.TestCase):
         self.assertEqual(guard.diff(before, before), [])
 
     def test_the_real_repository_snapshot_includes_the_guard_itself(self):
-        snap = guard.snapshot()
+        snap = guard.snapshot(guarded=guard.GUARDED_CODE)
         self.assertIn("readiness/agent/guard.py", snap)
         self.assertIn("readiness/harness/metrics.py", snap)
         self.assertIn("readiness/contracts.py", snap)
@@ -165,6 +165,14 @@ class TestTreeDigest(unittest.TestCase):
         (self.root / "readiness" / "config.py").write_text("HAZARDS = (1,)\n")
         self.assertNotEqual(before, guard.tree_digest(self.root))
 
+    def test_a_derived_combined_extract_is_not_guarded(self):
+        """The data plane rewrites it on every build from the pinned parts."""
+        combined = self.root / "snapshots" / "storm_events" / "99_extract.jsonl"
+        before = guard.snapshot(self.root)
+        combined.write_text('{"rebuilt": 1}\n')
+        self.assertEqual(guard.diff(before, guard.snapshot(self.root)), [])
+        self.assertNotIn("snapshots/storm_events/99_extract.jsonl", guard.snapshot(self.root))
+
     def test_ignores_the_data_extracts_but_not_the_manifest(self):
         before = guard.tree_digest(self.root)
         (self.root / "snapshots" / "storm_events" / "99_2004.jsonl").write_text('{"x":1}\n')
@@ -227,6 +235,20 @@ class TestCardCheck(unittest.TestCase):
     def test_cards_written_before_the_run_are_not_judged(self):
         self.ledger.append(self.card("stale"))
         orchestrator._run_guarded(lambda: None, root=self.root, ledger=self.ledger)
+
+    def test_a_run_that_replaces_the_ledger_is_caught(self):
+        """Emptying the ledger and writing a fresh one must not slip past."""
+        self.ledger.append(self.card("stale"))
+        self.ledger.append(self.card("stale"))
+
+        def replace():
+            self.ledger.path.unlink()
+            self.ledger.anchor_path.unlink()
+            self.ledger.append(self.card(guard.tree_digest(self.root)))
+
+        with self.assertRaises(guard.HarnessTampered) as cm:
+            orchestrator._run_guarded(replace, root=self.root, ledger=self.ledger)
+        self.assertIn("existed before the run", cm.exception.paths[0])
 
 
 class TestTamperedError(unittest.TestCase):
