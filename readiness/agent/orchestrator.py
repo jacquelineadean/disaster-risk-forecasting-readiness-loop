@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
+import time
 from dataclasses import dataclass, field
 from textwrap import indent
 from typing import Callable, Sequence
@@ -257,10 +258,102 @@ PHASE1_QUEUE: tuple[Candidate, ...] = (
     ),
 )
 
-#: The queues `readiness loop --queue` can name.
+#: Feature sets every Phase 2 candidate is built on: the Phase 1 winner's
+#: columns, so a national card differs from a state card in scope only.
+PHASE2_SETS = ["era5-antecedent", "terrain"]
+
+#: The boosting budget a national panel gets. Plan annex §2.1: a national
+#: quarterly panel is about 380k units and a monthly one about 1.1M, so the
+#: registry's 150 rounds over 32 bins would run for hours per card; 60 rounds
+#: over 16 bins keeps a capped GBM to tens of minutes and still lets the trees
+#: say something a line cannot.
+PHASE2_GBM = {"rounds": 60, "bins": 16}
+
+#: The Phase 2 queue, run after the baselines on every national contract.
+#: Four candidates, not six: Phase 1 already showed what each ERA5 and terrain
+#: set adds on a state; at national scale a card costs minutes, so the fleet
+#: spends them on the four learners the Phase 1 record says are worth a card.
+PHASE2_QUEUE: tuple[Candidate, ...] = (
+    Candidate(
+        model="logistic",
+        kwargs={"feature_sets": list(PHASE2_SETS)},
+        changed=(
+            "Ran the Phase 1 ERA5+terrain logistic unchanged on the national panel: "
+            "every county in the country, the same antecedent-precipitation and "
+            "terrain columns, the same leave-one-year-out history logit. Only the "
+            "scope of the contract changed."
+        ),
+        hypothesis=(
+            "A relationship between antecedent wetness, terrain and damaging events "
+            "that held in one state should hold across the country, and thousands "
+            "of counties give every populated reliability bin far more rows, so the "
+            "linear model is expected to clear BSS > 0 and AUC with less bin noise "
+            "than on a state. Falsified if AUC falls to the history-only level, "
+            "which would say the state result was a regional fit, not a hazard one."
+        ),
+    ),
+    Candidate(
+        model="logistic+iso",
+        kwargs={"feature_sets": list(PHASE2_SETS)},
+        changed=(
+            "Wrapped the national logistic in the train-only isotonic map: the "
+            "early training years fit the model, the last three fit the map, then "
+            "a refit on all of training. Nothing else changed."
+        ),
+        hypothesis=(
+            "National scale makes the map's job easier, not harder: three years of "
+            "every county give the isotonic fit hundreds of thousands of forecasts "
+            "to sort, so every populated bin should land inside the tolerance band "
+            "with AUC unchanged. Falsified if reliability on validate is worse than "
+            "the uncalibrated model's, which would mean the late training years are "
+            "not representative of the validate years at national scale."
+        ),
+    ),
+    Candidate(
+        model="gbm",
+        kwargs={"feature_sets": list(PHASE2_SETS), **PHASE2_GBM},
+        changed=(
+            "Swapped the linear learner for histogram gradient boosting on the same "
+            "columns, capped for the national panel: 60 rounds over 16 quantile bins "
+            "instead of the registry's 150 over 32, depth-2 trees, deterministic "
+            "splits, no subsampling."
+        ),
+        hypothesis=(
+            "With hundreds of thousands of training rows the trees can afford to "
+            "find thresholds and interactions a line cannot, so the capped GBM is "
+            "expected to beat the logistic on AUC even at a third of the rounds, "
+            "and to be less reliable, as boosted margins usually are. Falsified if "
+            "it does not beat the linear model on AUC, which would say the signal "
+            "is additive and 60 rounds buy variance, not resolution."
+        ),
+    ),
+    Candidate(
+        model="gbm+iso",
+        kwargs={"feature_sets": list(PHASE2_SETS), **PHASE2_GBM},
+        changed=(
+            "Wrapped the capped national GBM in the same train-only isotonic map as "
+            "the logistic, so the two calibrated candidates differ only in the "
+            "learner and the boosting budget is the one the card before it used."
+        ),
+        hypothesis=(
+            "Whatever resolution the capped trees find should survive a monotone "
+            "recalibration, so this is expected to be the best-calibrated high-AUC "
+            "candidate on the national panel and the one the fleet promotes. "
+            "Falsified if it fails where logistic+iso passes, which would say the "
+            "coarse 16-bin forecasts are too lumpy for a map fitted on three years "
+            "to smooth."
+        ),
+    ),
+)
+
+#: The queues `readiness loop --queue` and `readiness fleet --queue` can name.
+#: Every queue starts with the baselines: the reference and the persistence
+#: rejection cost seconds and make a national ledger readable the same way
+#: as a state one.
 QUEUES: dict[str, tuple[Candidate, ...]] = {
     "baseline": BASELINE_QUEUE,
     "phase1": BASELINE_QUEUE + PHASE1_QUEUE,
+    "phase2": BASELINE_QUEUE + PHASE2_QUEUE,
 }
 
 
@@ -348,9 +441,14 @@ def run_experiment(
         progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
 
     progress(f"  fit {model.name}@{model.version} on {contract.splits.train}")
+    started = time.perf_counter()
     card_scorecard, report = scoring.screen(
         model, panel, contract, split, sources=dataset.sources
     )
+    # Provenance, not a criterion: the annex budgets a national card in
+    # minutes, and the only way to know what a queue costs is to write down
+    # what each card cost. Nothing hashes or judges it.
+    wall_clock_s = round(time.perf_counter() - started, 3)
     verdict = contract_mod.evaluate(card_scorecard, contract)
 
     if report.rejected:
@@ -380,6 +478,7 @@ def run_experiment(
         | {
             "harness_digest": guard.tree_digest(),
             "model_kwargs": json_kwargs(candidate.kwargs),
+            "wall_clock_s": wall_clock_s,
         },
         contract_digest=contract.digest(),
     )
@@ -797,6 +896,30 @@ def run_claude(
 
     ledger = Ledger(data_mod.paths(contract).ledger)
     _run_guarded(lambda: asyncio.run(_go()), ledger=ledger)
+
+
+def run_claude_fleet(
+    contracts: Sequence[Contract],
+    *,
+    split_name: str = "validate",
+    max_turns: int = 24,
+    progress: Progress = print,
+) -> None:
+    """`run_claude` for each contract in turn, each with its own subagents.
+
+    Report §4 calls risk work "embarrassingly parallel: one hazard-analyst
+    subagent per peril"; plan §3 makes the fleet a loop over registered
+    contracts rather than a redesign. Sequential on purpose: every contract
+    has its own ledger and touch budget, and the snapshot manifest the data
+    plane saves is not safe to write from two runs at once. Not required by
+    any exit criterion — the deterministic `readiness.fleet.run_fleet` is —
+    and the SDK is imported only when `run_claude` runs.
+    """
+    for contract in contracts:
+        progress(f"fleet        [{contract.name}] claude backend")
+        run_claude(
+            contract, split_name=split_name, max_turns=max_turns, progress=progress
+        )
 
 
 def _run_guarded(

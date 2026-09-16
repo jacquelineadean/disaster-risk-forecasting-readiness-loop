@@ -193,6 +193,50 @@ class TestSelection(CliCase):
         self.assertIn("tornado-zz", out)
         self.assertIn("hail-yy", out)
 
+    def test_contracts_names_prints_one_name_per_line_and_nothing_else(self):
+        self.run_cli("register", "tornado-zz", "--hazard", "tornado")
+        self.run_cli("register", "hail-yy", "--hazard", "hail", "--state", "yy")
+        code, out = self.run_cli("contracts", "--names")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["hail-yy", "tornado-zz"])
+        code, out = self.run_cli("contracts", "--names", "--national")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["tornado-zz"])
+
+    def test_contracts_names_on_an_empty_registry_prints_nothing(self):
+        code, out = self.run_cli("contracts", "--names")
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+
+    def test_fleet_status_on_an_empty_registry_says_so_and_exits_zero(self):
+        code, out = self.run_cli("fleet", "--status")
+        self.assertEqual(code, 0)
+        self.assertIn("fleet status  (0 contract(s))", out)
+        self.assertIn("no contracts registered", out)
+
+    def test_fleet_status_is_ledger_only(self):
+        self.run_cli("register", "tornado-zz", "--hazard", "tornado")
+        with mock.patch.object(data_mod, "build", side_effect=AssertionError("built")), \
+                mock.patch.dict(os.environ,
+                                {data_mod.EXPERIMENTS_DIR_ENV: str(self.dir / "exp")}):
+            code, out = self.run_cli("fleet", "--status")
+        self.assertEqual(code, 0)
+        self.assertIn("tornado-zz", out)
+        self.assertIn("NOT met: test card: none", out)
+
+    def test_fleet_refuses_an_unknown_contract_name(self):
+        self.run_cli("register", "tornado-zz", "--hazard", "tornado")
+        code, out = self.run_cli("fleet", "--contracts", "tornado-zz,nope", "--status")
+        self.assertEqual(code, 2)
+        self.assertIn("no registered contract named ['nope']", out)
+
+    def test_fleet_national_and_contracts_are_exclusive(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                cli.build_parser().parse_args(
+                    ["fleet", "--national", "--contracts", "a", "--status"]
+                )
+
     def test_contract_shows_the_selected_one(self):
         self.run_cli("register", "tornado-zz", "--hazard", "tornado")
         code, out = self.run_cli("contract", "-c", "tornado-zz", "--json")
@@ -437,6 +481,25 @@ class TestCanaryPanelAndLoop(DataCase):
         self.assertIn("take action", out)
         self.assertIn("ledger: ", out)
         self.assertTrue(self.where.ledger.exists())
+
+    def test_fleet_runs_the_named_contract_and_prints_the_status_table(self):
+        code, out = self.run_cli("fleet", "--contracts", "flood-zz", "--queue", "baseline",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("fleet  (1 contract(s), queue=baseline)", out)
+        self.assertIn("ran 4 experiment(s) against flood-zz", out)
+        self.assertIn("fleet status  (1 contract(s))", out)
+        self.assertIn("flood-zz", out)
+        self.assertTrue(self.where.ledger.exists())
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_fleet_reports_a_contract_it_could_not_build_and_exits_one(self):
+        with mock.patch.object(data_mod, "build", side_effect=RuntimeError("no data")):
+            code, out = self.run_cli("fleet", "--contracts", "flood-zz", "--quiet")
+        self.assertEqual(code, 1)
+        self.assertIn("flood-zz: not run (RuntimeError: no data)", out)
+        self.assertIn("fleet status", out)
+        self.assertFalse(self.where.ledger.exists())
 
     def test_loop_quiet_silences_progress_but_prints_the_result(self):
         code, out = self.run_cli("loop", "-c", "flood-zz", "--quiet")

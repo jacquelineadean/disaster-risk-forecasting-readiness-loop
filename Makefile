@@ -1,4 +1,4 @@
-.PHONY: help install snapshot panel features score loop promote backtest phase1 canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
+.PHONY: help install snapshot panel features score loop promote backtest phase1 loop-all backtest-all fleet-status canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
 
 PY ?= python3
 # Which registered contract to run against. Leave empty to let the CLI resolve
@@ -65,6 +65,17 @@ phase1:          ## snapshot, features, the Phase 1 queue with promotion, the ba
 	$(PY) -m readiness.cli loop $(CFLAG) $(FFLAG) --queue phase1 --promote
 	$(PY) -m readiness.cli backtest $(CFLAG)
 	$(PY) -m readiness.cli verify $(CFLAG) --phase 1
+
+loop-all:        ## the fleet: every national contract through the Phase 2 queue, promoting each first validate pass
+	$(PY) -m readiness.cli fleet --national --queue phase2 --promote $(FFLAG)
+
+backtest-all:    ## write every registered contract's backtest report from its committed files
+	for c in $$($(PY) -m readiness.cli contracts --names); do \
+	  $(PY) -m readiness.cli backtest -c $$c || exit 1; \
+	done
+
+fleet-status:    ## where every registered contract stands, from the ledgers alone
+	$(PY) -m readiness.cli fleet --status
 
 canary:          ## demonstrate the harness rejecting a leaked model
 	$(PY) -m readiness.cli canary $(CFLAG)

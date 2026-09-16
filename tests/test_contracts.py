@@ -342,5 +342,61 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(c.reliability_tolerance_pp, 0.05)  # None means default
 
 
+class TestNationalContracts(unittest.TestCase):
+    """The six Phase 2 contracts: registered as data, national, digests pinned.
+
+    Pinned the way `test_repro_guard` pins the three state contracts: a
+    digest that moves means a criterion moved, and every card written
+    against the old one would be visibly incomparable with the new.
+    """
+
+    NATIONAL = {
+        "inland-flood-us": ("inland_flood", "quarter", "drop", "a4b5c7b4dd2804d2"),
+        "tornado-us": ("tornado", "quarter", "drop", "8a63025f6ca8c8a5"),
+        "hail-us": ("hail", "quarter", "drop", "1343cbc001c74d51"),
+        "severe-wind-us": ("severe_wind", "quarter", "drop", "ec252a590cf66cad"),
+        "winter-storm-us": ("winter_storm", "month", "expand", "b247720c4661c278"),
+        "heat-us": ("heat", "month", "expand", "28efcaf8861a6f45"),
+    }
+
+    def test_all_six_are_registered_and_validate(self):
+        registry = contracts.registered()
+        for name in self.NATIONAL:
+            with self.subTest(contract=name):
+                self.assertIn(name, registry)
+                self.assertEqual(registry[name].name, name)
+                registry[name].validate()
+
+    def test_digests_are_pinned(self):
+        for name, (hazard, period, policy, digest) in self.NATIONAL.items():
+            with self.subTest(contract=name):
+                c = contracts.load(name)
+                self.assertEqual((c.hazard, c.period, c.zone_policy),
+                                 (hazard, period, policy))
+                self.assertEqual(c.digest(), digest)
+
+    def test_they_are_national_and_otherwise_default(self):
+        for name, (hazard, period, policy, _) in self.NATIONAL.items():
+            with self.subTest(contract=name):
+                c = contracts.load(name)
+                self.assertEqual(c.states, ())
+                self.assertEqual(c.scope_key, "US:all")
+                want = contracts.new(name, hazard=hazard, period=period,
+                                     zone_policy=policy)
+                self.assertEqual(c.digest(), want.digest())
+
+    def test_describe_names_the_national_scope(self):
+        for name in self.NATIONAL:
+            with self.subTest(contract=name):
+                text = contracts.load(name).describe()
+                self.assertIn("geography       US, every region", text)
+                self.assertIn(name, text)
+
+    def test_the_registry_holds_nine(self):
+        self.assertEqual(len(contracts.registered()), 9)
+        national = [n for n, c in contracts.registered().items() if not c.states]
+        self.assertEqual(sorted(national), sorted(self.NATIONAL))
+
+
 if __name__ == "__main__":
     unittest.main()

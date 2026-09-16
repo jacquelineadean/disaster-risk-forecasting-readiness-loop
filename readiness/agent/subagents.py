@@ -11,7 +11,9 @@ Report §4:
 
 A loop runs against one contract, so it instantiates one hazard analyst — for
 that contract's hazard. Phase 2 ("parallelize with subagents: hurricane wind,
-wildfire, tornado, heat") is a loop over registered contracts, not a redesign.
+wildfire, tornado, heat") is a loop over registered contracts, not a redesign:
+`all_hazard_analysts` builds one analyst per *registered* contract, because an
+analyst with no contract has nothing to be judged against.
 
 Note the tool grants. No subagent has Write or Edit. The agent plane reads the
 harness and never writes to it.
@@ -19,7 +21,9 @@ harness and never writes to it.
 
 from __future__ import annotations
 
-from readiness.config import HAZARDS
+from typing import Mapping
+
+from readiness import contracts as contracts_mod
 from readiness.contracts import Contract
 
 READ_ONLY_TOOLS = ["Read", "Grep", "Glob", "Bash"]
@@ -136,6 +140,17 @@ def subagents_for(contract: Contract) -> dict[str, dict]:
     }
 
 
-def all_hazard_analysts() -> dict[str, dict]:
-    """Phase 2: one analyst per catalogued peril, run in parallel against one harness."""
-    return {f"hazard-analyst-{h.replace('_', '-')}": hazard_analyst(h) for h in HAZARDS}
+def all_hazard_analysts(
+    registry: Mapping[str, Contract] | None = None,
+) -> dict[str, dict]:
+    """Phase 2: one analyst per registered contract, keyed by the contract's name.
+
+    The fleet is a loop over contracts, not over the hazard catalogue: a
+    catalogued peril nobody has registered a contract for has no panel, no
+    splits and no thresholds, so an analyst for it could only be judged
+    against a feeling. `registry` defaults to `contracts.registered()`.
+    """
+    known = contracts_mod.registered() if registry is None else registry
+    return {
+        name: hazard_analyst(c.hazard, name, c) for name, c in sorted(known.items())
+    }

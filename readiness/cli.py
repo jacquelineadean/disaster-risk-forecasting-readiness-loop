@@ -6,7 +6,7 @@ works). If the flag is omitted, `READINESS_CONTRACT` is consulted, then the
 sole registered contract if there is exactly one; otherwise the command
 refuses and lists the choices.
 
-    readiness contracts         list the registered contracts
+    readiness contracts         list the registered contracts (--names: one per line)
     readiness contract          print one contract and its hash
     readiness register NAME     pre-register a new contract from options
     readiness hazards           list the hazard catalogue
@@ -16,6 +16,7 @@ refuses and lists the choices.
     readiness features          load the feature sources, print admission and audit
     readiness score MODEL       fit and score one model on train or validate
     readiness loop              run the full experimental loop
+    readiness fleet             run the loop over many contracts in turn, or --status
     readiness promote MODEL     the one test touch, after a validate pass
     readiness canary            demonstrate the harness rejecting a leaked model
     readiness ledger            show and verify the experiment ledger
@@ -155,9 +156,40 @@ def parse_params(model: str, pairs) -> dict:
 
 
 def cmd_contracts(args) -> int:
+    if args.names:
+        # One name per line and nothing else, so a shell loop can read it:
+        #     for c in $(readiness contracts --names); do ...; done
+        for name in sorted(_registry(args)):
+            _p(name)
+        return 0
     _rule(f"registered contracts  ({data_mod.relative(contracts.contracts_dir())})")
     _p(contracts.describe_registry())
     return 0
+
+
+def _registry(args) -> dict[str, Contract]:
+    """The registered contracts a fleet command runs over, after its filters.
+
+    `--national` keeps the contracts whose scope is the whole country;
+    `--contracts a,b` keeps the named ones and refuses an unknown name rather
+    than running the rest, because a fleet that silently dropped a contract
+    would report a status for a set nobody asked for.
+    """
+    from readiness import fleet
+
+    known = contracts.registered()
+    if getattr(args, "national", False):
+        return fleet.national(known)
+    named = getattr(args, "contracts", None)
+    if named:
+        wanted = [n.strip() for n in named.split(",") if n.strip()]
+        unknown = sorted(set(wanted) - set(known))
+        if unknown:
+            raise UsageError(
+                f"no registered contract named {unknown}; registered: {sorted(known)}"
+            )
+        return {n: known[n] for n in wanted}
+    return known
 
 
 def cmd_contract(args) -> int:
@@ -421,6 +453,37 @@ def cmd_loop(args) -> int:
         _p(str(refusal))
         return 2
     return 0
+
+
+def cmd_fleet(args) -> int:
+    """Run the loop over a set of contracts in turn, then show where each stands.
+
+    `--status` alone reads the ledgers and prints the table without running
+    anything. Without it the fleet runs first; a contract whose data could
+    not be built is reported and the exit status is 1, but the other
+    contracts still run and still appear in the table.
+    """
+    from readiness import fleet
+
+    registry = _registry(args)
+    if args.status:
+        _rule(f"fleet status  ({len(registry)} contract(s))")
+        _p(fleet.format_status(fleet.status(registry)))
+        return 0
+    progress = (lambda _m: None) if args.quiet else _p
+    _rule(f"fleet  ({len(registry)} contract(s), queue={args.queue})")
+    results = fleet.run_fleet(
+        list(registry.values()),
+        queue=args.queue,
+        features=lambda c: _features(args, c),
+        promote=args.promote,
+        progress=progress,
+    )
+    _p()
+    _p(fleet.format_results(results))
+    _rule(f"fleet status  ({len(registry)} contract(s))")
+    _p(fleet.format_status(fleet.status(registry)))
+    return 1 if any(isinstance(r, Exception) for r in results.values()) else 0
 
 
 def cmd_promote(args) -> int:
@@ -700,9 +763,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         return sp
 
-    sub.add_parser("contracts", help="list the registered contracts").set_defaults(
-        func=cmd_contracts
-    )
+    sp = sub.add_parser("contracts", help="list the registered contracts")
+    sp.add_argument("--names", action="store_true",
+                    help="print one name per line and nothing else, for shell loops")
+    sp.add_argument("--national", action="store_true",
+                    help="with --names: only contracts whose scope is the whole country")
+    sp.set_defaults(func=cmd_contracts)
 
     sp = contract_flag(sub.add_parser("contract", help="print one contract and its hash"))
     sp.add_argument("--json", action="store_true", help="also print the JSON spec")
@@ -792,13 +858,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test is refused: use `readiness promote`")
     sp.set_defaults(func=cmd_score)
 
+    from readiness.agent.orchestrator import QUEUES
+
+    queue_names = list(QUEUES)
     sp = features_flag(
         contract_flag(sub.add_parser("loop", help="run the experimental loop"))
     )
     sp.add_argument("--backend", default="local", choices=["local", "claude"])
     sp.add_argument("--split", default="validate", choices=["train", "validate"])
-    sp.add_argument("--queue", default="baseline", choices=["baseline", "phase1"],
-                    help="phase1 runs the baselines and then the Phase 1 candidates")
+    sp.add_argument("--queue", default="baseline", choices=queue_names,
+                    help="phase1 runs the baselines and then the Phase 1 candidates; "
+                         "phase2 the baselines and the capped national candidates")
     sp.add_argument("--promote", action="store_true",
                     help="after the queue, spend the test touch on the first validate "
                          "pass in queue order")
@@ -806,6 +876,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the leaked-model demonstration")
     sp.add_argument("--quiet", action="store_true", help="suppress data-plane chatter")
     sp.set_defaults(func=cmd_loop)
+
+    sp = features_flag(sub.add_parser(
+        "fleet", help="run the loop over many contracts in turn, or show their status"
+    ))
+    which = sp.add_mutually_exclusive_group()
+    which.add_argument("--national", action="store_true",
+                       help="every registered contract whose scope is the whole country")
+    which.add_argument("--contracts", metavar="A,B",
+                       help="these registered contracts, comma-separated "
+                            "(default: every registered contract)")
+    sp.add_argument("--queue", default="phase2", choices=queue_names,
+                    help="the queue each contract runs (default phase2)")
+    sp.add_argument("--promote", action="store_true",
+                    help="per contract, spend the test touch on the first validate pass")
+    sp.add_argument("--status", action="store_true",
+                    help="print the status table from the ledgers and exit; run nothing")
+    sp.add_argument("--quiet", action="store_true", help="suppress the loops' chatter")
+    sp.set_defaults(func=cmd_fleet)
 
     sp = param_flag(features_flag(data_flags(sub.add_parser(
         "promote", help="spend the one test touch on a model that passed on validate"

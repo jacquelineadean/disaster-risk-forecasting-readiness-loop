@@ -1,0 +1,42 @@
+{
+  "name": "hail-us",
+  "version": "1.0.0",
+  "description": "Damaging hail, every US county, quarterly.",
+  "hazard": "hail",
+  "event_types": [
+    "Hail"
+  ],
+  "scope": {
+    "country": "US",
+    "states": []
+  },
+  "period": "quarter",
+  "damaging": {
+    "property_usd_min": 10000.0,
+    "count_casualties": true
+  },
+  "zone_policy": "drop",
+  "splits": {
+    "train": [
+      1996,
+      2015
+    ],
+    "validate": [
+      2016,
+      2020
+    ],
+    "test": [
+      2021,
+      2025
+    ]
+  },
+  "test_touch_budget": 1,
+  "reference_model": "climatology-pooled",
+  "thresholds": {
+    "min_brier_skill_score": 0.0,
+    "reliability_tolerance_pp": 0.05,
+    "reliability_min_bin_count": 30,
+    "min_auc": 0.7,
+    "n_reliability_bins": 10
+  }
+}
