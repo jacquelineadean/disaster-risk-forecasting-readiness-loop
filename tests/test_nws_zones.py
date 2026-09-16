@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from readiness.connectors import nws_zones
-from readiness.connectors.base import Manifest
+from readiness.connectors.base import Manifest, sha256_bytes
 
 SAMPLE = b"""\
 AA|001|XYZ|Alpha Zone|AA001|Alpha|97001|C|nw|30.0|-90.0
@@ -107,6 +107,37 @@ class TestLoad(unittest.TestCase):
         self.fetches.clear()
         nws_zones.load(self.dir / "nws", self.manifest)
         self.assertEqual(len(self.fetches), 2)
+
+    def test_cache_that_no_longer_matches_the_manifest_is_refetched(self):
+        # A record alone is not provenance for whatever is on disk now.
+        nws_zones.load(self.dir / "nws", self.manifest)
+        cache = self.dir / "nws" / "zone_county.dbx"
+        cache.write_bytes(b"ZZ|001|XYZ|Z|ZZ001|Z|99001|C|nw|0|0\n")
+        self.fetches.clear()
+        cw = nws_zones.load(self.dir / "nws", self.manifest)
+        self.assertEqual(len(self.fetches), 2)
+        self.assertEqual(cw.counties_for("97", "1"), ("97001", "97003"))
+        self.assertEqual(cache.read_bytes(), SAMPLE)
+
+    def test_mismatch_is_an_error_when_fetching_is_not_allowed(self):
+        nws_zones.load(self.dir / "nws", self.manifest)
+        cache = self.dir / "nws" / "zone_county.dbx"
+        cache.write_bytes(b"tampered")
+        self.fetches.clear()
+        with self.assertRaises(nws_zones.ConnectorError) as ctx:
+            nws_zones.load(self.dir / "nws", self.manifest, allow_fetch=False)
+        msg = str(ctx.exception)
+        self.assertIn(str(cache), msg)
+        self.assertIn(sha256_bytes(b"tampered"), msg)
+        self.assertIn(sha256_bytes(SAMPLE), msg)
+        self.assertEqual(self.fetches, [])
+
+    def test_pinned_cache_is_fine_when_fetching_is_not_allowed(self):
+        nws_zones.load(self.dir / "nws", self.manifest)
+        self.fetches.clear()
+        cw = nws_zones.load(self.dir / "nws", self.manifest, allow_fetch=False)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(cw.edition, "bp16ap26.dbx")
 
 
 if __name__ == "__main__":

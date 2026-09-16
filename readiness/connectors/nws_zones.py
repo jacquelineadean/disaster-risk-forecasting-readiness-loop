@@ -33,6 +33,7 @@ from readiness.connectors.base import (
     Manifest,
     SourceRecord,
     fetch,
+    pinned_bytes,
     sha256_bytes,
     utc_now,
 )
@@ -117,14 +118,25 @@ def parse(data: bytes, edition: str = "unknown") -> Crosswalk:
 
 
 def load(
-    snapshot_dir: pathlib.Path, manifest: Manifest, *, refresh: bool = False
+    snapshot_dir: pathlib.Path,
+    manifest: Manifest,
+    *,
+    refresh: bool = False,
+    allow_fetch: bool = True,
 ) -> Crosswalk:
-    """Fetch (or reuse) the current correlation file and return the crosswalk."""
+    """Fetch (or reuse) the current correlation file and return the crosswalk.
+
+    Same rule as every other source: the cached file is reused only when its
+    bytes hash to the manifest record. Bytes with no record, or that no longer
+    match it, are unpinned and re-fetched rather than trusted; with
+    `allow_fetch=False` that is an error instead.
+    """
     cache = snapshot_dir / "zone_county.dbx"
     record = manifest.records.get(MANIFEST_KEY)
-    # Same rule as every other source: bytes on disk with no manifest record
-    # are unpinned, and unpinned data is re-fetched rather than trusted.
-    if refresh or not cache.exists() or record is None:
+    data = None
+    if not refresh:
+        data = pinned_bytes(cache, record, allow_fetch=allow_fetch)
+    if data is None:
         url = discover_current()
         data = fetch(url)
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +151,4 @@ def load(
             notes=f"edition {url.rsplit('/', 1)[1]}",
         )
         manifest.add(MANIFEST_KEY, record)
-    else:
-        data = cache.read_bytes()
     return parse(data, edition=record.url.rsplit("/", 1)[1])

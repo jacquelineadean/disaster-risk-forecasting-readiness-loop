@@ -10,18 +10,26 @@ or the whole country, without a second download.
 import csv
 import gzip
 import io
+import os
 import pathlib
 import socket
+import socketserver
+import ssl
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
 from readiness.connectors import census, storm_events
 from readiness.connectors.base import (
     CONNECT_TIMEOUT,
+    ConnectorError,
     Manifest,
+    Session,
     SourceRecord,
     _connect_socket,
+    _proxy_auth,
+    proxy_for,
     sha256_bytes,
     utc_now,
 )
@@ -354,6 +362,190 @@ class TestCensus(unittest.TestCase):
         counties = census.parse(self.DATA)
         with self.assertRaises(KeyError):
             census.for_states(counties, ["ZZ"])
+
+
+class TestCensusCache(unittest.TestCase):
+    """A cached county file is trusted only when it hashes to its manifest record."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name) / "census"
+        self.manifest = Manifest(path=pathlib.Path(self.tmp.name) / "manifest.json")
+        self.fetches = 0
+
+        def fake_fetch(_url, **_kw):
+            self.fetches += 1
+            return TestCensus.DATA
+
+        self.patch = mock.patch.object(census, "fetch", fake_fetch)
+        self.patch.start()
+        census.load(self.dir, self.manifest)
+        self.cache = self.dir / "national_county2020.txt"
+        self.fetches = 0
+
+    def tearDown(self):
+        self.patch.stop()
+        self.tmp.cleanup()
+
+    def test_pinned_cache_is_reused(self):
+        census.load(self.dir, self.manifest)
+        self.assertEqual(self.fetches, 0)
+
+    def test_cache_that_no_longer_matches_the_manifest_is_refetched(self):
+        # Same bug class as the storm_events raw-file check: a record existed,
+        # so the bytes were trusted without ever being hashed.
+        self.cache.write_bytes(b"STATE|STATEFP|COUNTYFP|COUNTYNS|COUNTYNAME\nZZ|99|001|1|X\n")
+        counties = census.load(self.dir, self.manifest)
+        self.assertEqual(self.fetches, 1)
+        self.assertEqual([c.fips for c in counties], ["97001", "97003", "98001"])
+        self.assertEqual(self.cache.read_bytes(), TestCensus.DATA)
+
+    def test_mismatch_is_an_error_when_fetching_is_not_allowed(self):
+        self.cache.write_bytes(b"tampered")
+        with self.assertRaises(ConnectorError) as ctx:
+            census.load(self.dir, self.manifest, allow_fetch=False)
+        msg = str(ctx.exception)
+        self.assertIn(str(self.cache), msg)
+        self.assertIn(sha256_bytes(b"tampered"), msg)
+        self.assertIn(sha256_bytes(TestCensus.DATA), msg)
+        self.assertEqual(self.fetches, 0)
+
+    def test_unpinned_cache_is_an_error_when_fetching_is_not_allowed(self):
+        self.manifest.records.clear()
+        with self.assertRaises(ConnectorError):
+            census.load(self.dir, self.manifest, allow_fetch=False)
+        self.assertEqual(self.fetches, 0)
+
+    def test_pinned_cache_is_fine_when_fetching_is_not_allowed(self):
+        census.load(self.dir, self.manifest, allow_fetch=False)
+        self.assertEqual(self.fetches, 0)
+
+
+class _FakeProxyHandler(socketserver.StreamRequestHandler):
+    """Records the request line it receives, then answers like an origin.
+
+    A CONNECT is acknowledged and the next request line on the same socket —
+    the one the client believes it is sending through the tunnel — is
+    recorded too. TLS is patched out by the tests, so the "tunnel" carries
+    plain HTTP, which is enough to prove what was sent to whom.
+    """
+
+    BODY = b"hello via proxy"
+
+    def _read_request(self) -> str:
+        line = self.rfile.readline().decode().rstrip("\r\n")
+        while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+            pass
+        return line
+
+    def handle(self):
+        line = self._read_request()
+        self.server.lines.append(line)
+        if line.startswith("CONNECT "):
+            self.wfile.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            self.wfile.flush()
+            self.server.lines.append(self._read_request())
+        self.wfile.write(
+            b"HTTP/1.1 200 OK\r\nContent-Length: "
+            + str(len(self.BODY)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + self.BODY
+        )
+        self.wfile.flush()
+
+
+class _FakeProxy(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self):
+        super().__init__(("127.0.0.1", 0), _FakeProxyHandler)
+        self.lines: list[str] = []
+        self.thread = threading.Thread(
+            target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
+        )
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def stop(self):
+        self.shutdown()
+        self.server_close()
+
+
+class TestProxy(unittest.TestCase):
+    """`Session` honours HTTP(S)_PROXY / NO_PROXY the way urllib does."""
+
+    def setUp(self):
+        self.proxy = _FakeProxy()
+        self.env = mock.patch.dict(os.environ, {}, clear=True)
+        self.env.start()
+        # The fake proxy cannot terminate TLS; the origin it "reaches" is the
+        # fake itself. Record what SNI the client asked for and hand the plain
+        # socket back so the tunnel carries readable HTTP.
+        self.sni: list[str | None] = []
+
+        def no_tls(_ctx, sock, **kw):
+            self.sni.append(kw.get("server_hostname"))
+            return sock
+
+        self.tls = mock.patch.object(ssl.SSLContext, "wrap_socket", no_tls)
+        self.tls.start()
+
+    def tearDown(self):
+        self.tls.stop()
+        self.env.stop()
+        self.proxy.stop()
+
+    def test_https_goes_through_a_connect_tunnel(self):
+        os.environ["HTTPS_PROXY"] = self.proxy.url
+        body = Session(retries=1).get("https://example.invalid/data/file.txt?x=1")
+        self.assertEqual(body, _FakeProxyHandler.BODY)
+        # http.client writes the CONNECT line as HTTP/1.0 on 3.11 and 1.1 on
+        # 3.12; the target is what matters.
+        connect, inner = self.proxy.lines
+        self.assertTrue(connect.startswith("CONNECT example.invalid:443 HTTP/1."))
+        self.assertEqual(inner, "GET /data/file.txt?x=1 HTTP/1.1")
+        self.assertEqual(self.sni, ["example.invalid"], "TLS must name the origin")
+
+    def test_http_sends_the_absolute_uri(self):
+        os.environ["HTTP_PROXY"] = self.proxy.url
+        body = Session(retries=1).get("http://example.invalid/index.html?a=b")
+        self.assertEqual(body, _FakeProxyHandler.BODY)
+        self.assertEqual(
+            self.proxy.lines, ["GET http://example.invalid/index.html?a=b HTTP/1.1"]
+        )
+        self.assertEqual(self.sni, [])
+
+    def test_no_proxy_host_is_dialled_directly(self):
+        # The proxy is also the "origin" here; with the host excluded the
+        # request must reach it as a plain origin request, not a proxy one.
+        os.environ["HTTP_PROXY"] = "http://192.0.2.1:9"  # unroutable: must be skipped
+        os.environ["NO_PROXY"] = "localhost,127.0.0.1"
+        body = Session(retries=1).get(f"{self.proxy.url}/direct")
+        self.assertEqual(body, _FakeProxyHandler.BODY)
+        self.assertEqual(self.proxy.lines, ["GET /direct HTTP/1.1"])
+
+    def test_no_proxy_environment_keeps_the_direct_path(self):
+        body = Session(retries=1).get(f"{self.proxy.url}/direct")
+        self.assertEqual(body, _FakeProxyHandler.BODY)
+        self.assertEqual(self.proxy.lines, ["GET /direct HTTP/1.1"])
+
+    def test_proxy_credentials_become_a_proxy_authorization_header(self):
+        os.environ["HTTP_PROXY"] = "http://u:p%40w@proxy.invalid:3128"
+        proxy = proxy_for("http", "example.invalid")
+        self.assertEqual(proxy.username, "u")
+        self.assertEqual(_proxy_auth(proxy), {"Proxy-Authorization": "Basic dTpwQHc="})
+
+    def test_proxy_for_resolves_the_environment(self):
+        self.assertIsNone(proxy_for("https", "example.invalid"))
+        os.environ["HTTPS_PROXY"] = "http://proxy.invalid:3128"
+        os.environ["NO_PROXY"] = ".noaa.gov"
+        self.assertEqual(proxy_for("https", "example.invalid").port, 3128)
+        self.assertIsNone(proxy_for("https", "www.ncei.noaa.gov"))
+        self.assertIsNone(proxy_for("http", "example.invalid"))
 
 
 class TestConnect(unittest.TestCase):
