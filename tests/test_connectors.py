@@ -592,3 +592,25 @@ class TestDamageColumnContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRefreshWithoutFetching(unittest.TestCase):
+    """`refresh=True` means download; with fetching disallowed that is an error."""
+
+    def test_census_refuses(self):
+        from readiness.connectors import census
+        from readiness.connectors.base import ConnectorError, Manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(ConnectorError):
+                census.load(root, Manifest(path=root / "m.json"), refresh=True, allow_fetch=False)
+
+    def test_nws_zones_refuses(self):
+        from readiness.connectors import nws_zones
+        from readiness.connectors.base import ConnectorError, Manifest
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(ConnectorError):
+                nws_zones.load(root, Manifest(path=root / "m.json"), refresh=True, allow_fetch=False)
