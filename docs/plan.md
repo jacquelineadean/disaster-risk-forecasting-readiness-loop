@@ -6,8 +6,8 @@ records what was decided, what was built, and what each phase still owes.
 
 | phase | scope | status |
 |---|---|---|
-| R | refactor from the audit findings; reproducibility guard; CI | in progress |
-| 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | pending |
+| R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
+| 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
 | 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | pending |
 | 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | pending |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
@@ -160,6 +160,37 @@ Confirmed low-severity findings worth carrying, done as one pass after R1–R6:
   ground-truth sources, national scope in the site packer, hazard taxonomy) is
   handled in its phase below, not in R.
 
+### 1.9. Phase R outcome
+
+Done in three stages of parallel, file-disjoint clusters, each integrated
+only when the whole suite and the reproducibility guard were green, then
+reviewed adversarially: five review lenses (invariants, numbers, correctness,
+tests, documentation), every finding handed to two skeptics. Four findings
+survived and were fixed:
+
+- the agent guard compared only the tree before and after a run, so an agent
+  that edited a guarded file, scored, and restored it was invisible: every
+  card now carries the digest of the guarded code at scoring time and is
+  checked against the pre-run digest, and the cards that existed before the
+  run must be intact afterwards;
+- the guard did not cover the data plane that builds the labels: it now
+  covers `data.py`, the connectors, the manifest and the pinned extracts
+  (the derived combined extract excepted, since every build rewrites it);
+- `run_experiment` spent the test touch after scoring while the CLI had been
+  changed to spend it first; both now pay first;
+- the guard hashed a derived file the first build of a run legitimately
+  rewrites, which would have reported an honest run as tampered.
+
+Sixteen more findings were refuted as immaterial, and the cheap ones were
+taken anyway: a JSON-RPC request whose `params` is not an object no longer
+kills the MCP server; `refresh` with fetching disallowed is an error, not a
+download; `readiness loop --split test` can no longer spend a touch per queued
+candidate silently (Phase 1 replaces it with `promote`); and the README, the
+licence manifest, the verification protocol and this plan say what the guard
+and the loop actually do. The suite went from 277 tests with one failure to
+505 tests, green on Python 3.10 and 3.12 in CI; the committed ledgers,
+fingerprints and digests are byte-identical to `main`.
+
 ## 2. Phase 1: the loop, on one hazard
 
 **Exit (report §6):** BSS > 0 against climatology on untouched test years with
@@ -201,6 +232,39 @@ provenance, model determinism, the calibrator's train-only construction, that
 promote spends exactly one touch, that `verify --phase 1` accepts and rejects
 the right synthetic ledgers. **Needs the data run:** whether any candidate
 clears the contract on Louisiana or Oklahoma 2021–2025.
+
+### 2.1. Phase 1 status
+
+Built and integrated, green with the guard:
+
+- `readiness/harness/features.py`: the channel and the firewall. One
+  deliberate reading of "lag": the cutoff is the period's first month minus
+  the lag, and only months strictly before it reach a transform, so the
+  minimum lag of one withholds the month just before the period (a July
+  forecast is built from data through May). The audit hands every transform
+  the *uncut* series with every month at or after the cutoff poisoned and
+  requires the same answer as the honest, cut run.
+- The plumbing: `TrainingView(features=)` refuses a frame carrying a holdout
+  unit and exposes `restrict(years)` for a calibrator; `PredictionRequest`
+  carries the scored units' rows; `scoring` builds and audits the frame from
+  units alone before the view exists and refuses to fit on an unclean audit;
+  three trailing defaulted fields on `Scorecard`; the canary's fifth check.
+- The engine: `seasonal_rates` extracted with identical arithmetic; history
+  features leave-one-year-out; `logistic`, `gbm`, and isotonic or Platt
+  `Calibrated` wrappers fitted on the last three training years. One
+  deviation from the annex, found by measurement: in the boosted model the
+  history logit is the boosting *offset*, not a split column, because trees
+  read the leave-one-year-out artefact back into the labels when it is a
+  column (history-only `gbm` scored below climatology as a column and
+  reproduces the seasonal climatology as an offset).
+- The connectors: Gazetteer centroids, Open-Meteo ERA5 monthly extract (the
+  pinned artefact is the extract, resumable per state), FEMA NRI (declares
+  `derived_through=2023`, refused under every current contract), the pinned
+  CLIMADA layer with its out-of-package tool stub; the connector registry as
+  data; `data.build(features=...)` with a separate `feature_version`.
+
+In progress: the Phase 1 queue and `promote`, `verify --phase 1`, the
+backtest report, the site and the documentation.
 
 ## 3. Phase 2: multi-hazard, national, with exposure
 
