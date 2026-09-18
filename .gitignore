@@ -37,3 +37,15 @@ site/generated/
 
 # Agent worktrees created by tooling during a session; never part of the repo.
 .claude/worktrees/
+
+# Phase 3. A facility record names a real building and its weaknesses; a gap
+# report and its blinded rendering carry the same; a review record binds a
+# named person's judgement to one of them. None of that belongs in a public
+# repository, so the trees carry their README, the fictional example facility
+# and nothing else. A case study is different: it is a published investigation,
+# added deliberately, and lives in plans/case-studies/.
+plans/facilities/*.json
+!plans/facilities/example-rural-hospital.json
+plans/reports/*
+!plans/reports/README.md
+plans/reviews/*.json

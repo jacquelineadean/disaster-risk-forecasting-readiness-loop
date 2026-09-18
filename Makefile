@@ -1,4 +1,4 @@
-.PHONY: help install snapshot panel features score loop promote backtest phase1 loop-all backtest-all fleet-status canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived exposure-snapshot exposure-show spot-check issue brief issue-all brief-all phase2
+.PHONY: help install snapshot panel features score loop promote backtest phase1 loop-all backtest-all fleet-status canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived exposure-snapshot exposure-show spot-check issue brief issue-all brief-all phase2 scenarios scenarios-check gap-report
 
 PY ?= python3
 # Which registered contract to run against. Leave empty to let the CLI resolve
@@ -6,7 +6,9 @@ PY ?= python3
 CONTRACT ?=
 CFLAG = $(if $(CONTRACT),-c $(CONTRACT),)
 # Which exit criteria `make verify` checks: 0 (baselines reproduce, canary
-# rejected) or 1 (ledger-only: the promoted test card and its record).
+# rejected), 1 (ledger-only: the promoted test card and its record), 2 (the
+# whole registry) or 3 (the gap reports and their blinded reviews). Phases 2
+# and 3 take no contract.
 PHASE ?= 0
 # Feature connectors for the Phase 1 targets, comma-separated. Leave empty to
 # load every connector whose pinned data is present.
@@ -38,6 +40,16 @@ STATE ?=
 # pinned Census county file.
 STATES ?=
 SFLAG = $(if $(STATES),--states $(STATES),--all-states)
+
+# Phase 3. FACILITY is a facility record JSON — a real one never enters git, so
+# this defaults to the fictional example. SCENARIO picks a scenario from
+# plans/scenarios/; empty means the CLI's default (96-hour isolation).
+FACILITY ?= plans/facilities/example-rural-hospital.json
+SCENARIO ?=
+SCFLAG = $(if $(SCENARIO),--scenario $(SCENARIO),)
+# Where `make gap-report` writes; empty means plans/reports/ (gitignored).
+OUT ?=
+OUTFLAG = $(if $(OUT),--out $(OUT),)
 
 # The promoted model and its arguments for one contract, spelled as `issue`
 # takes them: the first passing test card under the current contract digest, or
@@ -149,11 +161,21 @@ phase2:          ## the fleet, the exposure join, issuance, the briefs, verify -
 	$(MAKE) brief-all PERIOD=$(PERIOD)
 	$(PY) -m readiness.cli verify --phase 2
 
+scenarios:       ## list the scenario library: ids, injects, questions
+	$(PY) -m readiness.cli scenarios list
+
+scenarios-check: ## run every committed case study through its scenario's rules; exit 1 on a mismatch
+	$(PY) -m readiness.cli scenarios check
+
+gap-report:      ## one facility's cited gap report (FACILITY=, PERIOD=, SCENARIO=, OUT=)
+	@test -n "$(PERIOD)" || { echo "gap-report: pass PERIOD=YYYY-Qn, the period the issued files carry"; exit 2; }
+	$(PY) -m readiness.cli gap-report --facility $(FACILITY) --period $(PERIOD) $(SCFLAG) $(OUTFLAG)
+
 canary:          ## demonstrate the harness rejecting a leaked model
 	$(PY) -m readiness.cli canary $(CFLAG)
 
-verify:          ## check the exit criteria for PHASE (default 0)
-	$(PY) -m readiness.cli verify $(CFLAG) --phase $(PHASE)
+verify:          ## check the exit criteria for PHASE (0, 1, 2 or 3; default 0)
+	$(PY) -m readiness.cli verify $(if $(filter 2 3,$(PHASE)),,$(CFLAG)) --phase $(PHASE)
 
 ledger:          ## show the experiment ledger and verify its hash chain
 	$(PY) -m readiness.cli ledger $(CFLAG)

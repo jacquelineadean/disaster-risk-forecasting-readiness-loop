@@ -1,0 +1,131 @@
+{
+  "id": "96h-isolation-acute-care",
+  "title": "96-hour isolation of an acute-care facility",
+  "source_doc": "plans/scenarios/96h-isolation-acute-care.md",
+  "note": "Transcribed from the markdown beside it, which is the specification. The question texts are the markdown's 'The plan must answer' bullets with bold and italic markers stripped, in the markdown's order; tests/test_scenarios.py re-reads the markdown and fails if they drift. The constants are the numbers the injects imply, named so a rule can cite 96h-isolation-acute-care/isolation_hours instead of typing 96 into prose.",
+  "constants": {
+    "isolation_hours": 96,
+    "power_loss_hour": 0,
+    "water_loss_hour": 6,
+    "design_intensity_hour": 12,
+    "road_access_lost_hour": 12,
+    "road_access_restored_hour": 72,
+    "ambient_temperature_percentile": 90
+  },
+  "injects": [
+    {
+      "id": "i1",
+      "hour": 0,
+      "kind": "grid_power_lost",
+      "params": {
+        "restoration_hours": 96
+      },
+      "text": "Grid power lost at T+0. No restoration for 96 hours."
+    },
+    {
+      "id": "i2",
+      "hour": 6,
+      "kind": "municipal_water_lost",
+      "params": {},
+      "text": "Municipal water lost at T+6."
+    },
+    {
+      "id": "i3",
+      "hour": 12,
+      "kind": "design_intensity_reached",
+      "params": {
+        "recedes_before_hour": null,
+        "through_hour": 96
+      },
+      "text": "(water hazards) Standing water reaches the design flood elevation for this address by T+12, and does not recede before T+96. (Other hazards: the equivalent design-basis intensity for the address — wind, ice load, fire perimeter — is reached by T+12.)"
+    },
+    {
+      "id": "i4",
+      "hour": 12,
+      "kind": "road_access_lost",
+      "params": {
+        "until_hour": 72
+      },
+      "text": "No road access for resupply or evacuation between T+12 and T+72."
+    },
+    {
+      "id": "i5",
+      "hour": 0,
+      "kind": "ambient_temperature",
+      "params": {
+        "percentile": 90
+      },
+      "text": "External ambient temperature at the 90th percentile for the season."
+    },
+    {
+      "id": "i6",
+      "hour": 0,
+      "kind": "communications_degraded",
+      "params": {},
+      "text": "Mobile networks degraded but not absent."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "text": "Where is the electrical switchgear relative to the design intensity in inject 3 — and what fails when it is reached? (Generators that survive are irrelevant if the transfer switches that connect them do not.)",
+      "rule": "switchgear_vs_intensity",
+      "requires": [
+        "design_intensity.flood_elevation_ft",
+        "design_intensity.flood_elevation_source",
+        "power.switchgear_elevation_ft",
+        "power.transfer_switch_elevation_ft"
+      ]
+    },
+    {
+      "id": "q2",
+      "text": "What is the written trigger for evacuating before the hazard arrives, who holds the authority to pull it, and by when must it be pulled for transport to still be available?",
+      "rule": "written_trigger",
+      "requires": [
+        "evacuation.trigger_written",
+        "evacuation.authority",
+        "evacuation.transport_lead_hours"
+      ]
+    },
+    {
+      "id": "q3",
+      "text": "What is the occupant priority order, written down in advance — sickest first or sickest last? Who decided, and when? (A priority order decided under duress on day four is the finding, not the answer.)",
+      "rule": "priority_order_in_advance",
+      "requires": [
+        "evacuation.priority_order_written",
+        "evacuation.priority_decided_on"
+      ]
+    },
+    {
+      "id": "q4",
+      "text": "Which receiving facilities have signed transfer agreements, and do they fail in the same scenarios you do? (Correlated failure is the trap: the nearest partner is usually in the same floodplain, on the same grid, behind the same roads.)",
+      "rule": "partner_correlated_failure",
+      "requires": [
+        "transfer_agreements"
+      ]
+    },
+    {
+      "id": "q5",
+      "text": "What is the plan for occupants under a different operator on the same campus? (The seam between two operators in one building is where plans are thinnest.)",
+      "rule": "campus_seam",
+      "requires": [
+        "co_located_operators"
+      ]
+    },
+    {
+      "id": "q6",
+      "text": "At what hour does the plan first break, and what is the fallback?",
+      "rule": "first_break",
+      "requires": [
+        "power.generator",
+        "power.fuel_hours",
+        "water.on_site_storage_hours"
+      ]
+    }
+  ],
+  "fail_closed_on": [
+    "design_intensity.flood_elevation_ft",
+    "power.switchgear_elevation_ft",
+    "power.transfer_switch_elevation_ft"
+  ]
+}

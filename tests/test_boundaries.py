@@ -75,6 +75,26 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "the citation validator checks model prose; it must see neither labels, "
         "scores, the agent plane nor an LLM client",
     ),
+    (
+        "readiness/plans",
+        ("readiness.harness.labels", "readiness.harness.scoring",
+         "readiness.agent.orchestrator", "readiness.agent.subagents",
+         "claude_agent_sdk", "anthropic"),
+        "the planning thought-partner reasons over a facility record and the "
+        "issued risk layer: it sees no labels, no scoring and no agent control "
+        "flow, and it never calls an LLM — the optional drafter lives in "
+        "readiness/agent/planner.py and is reached only through an explicit "
+        "`--drafter claude`, at which point every sentence it returns still has "
+        "to pass readiness.cite.validate",
+    ),
+)
+
+#: Modules that may import an optional SDK, and only inside a `try:`. Checked
+#: by `TestStdlibOnly`; listed here so a new file under `readiness/agent/`
+#: cannot quietly become a second import site.
+SDK_IMPORT_SITES: tuple[str, ...] = (
+    "readiness/agent/orchestrator.py",
+    "readiness/agent/planner.py",
 )
 
 #: Non-stdlib, non-package modules tolerated anywhere, and where. Each must be
@@ -163,6 +183,16 @@ class TestStdlibOnly(unittest.TestCase):
             for module, _ in imports_of(ast.parse(file.read_text()))
         }
         self.assertIn("claude_agent_sdk", seen)
+
+    def test_the_sdk_is_imported_only_where_the_table_says(self):
+        sites = set()
+        for file in python_files("readiness"):
+            rel = file.relative_to(REPO_ROOT).as_posix()
+            for module, guarded in imports_of(ast.parse(file.read_text())):
+                if module == "claude_agent_sdk":
+                    sites.add(rel)
+                    self.assertTrue(guarded, f"{rel} imports the SDK outside a try:")
+        self.assertEqual(sorted(sites), sorted(SDK_IMPORT_SITES))
 
 
 if __name__ == "__main__":

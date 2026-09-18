@@ -23,7 +23,10 @@ refuses and lists the choices.
     readiness exposure          pull, show and spot-check the USA Structures counts
     readiness issue MODEL       refit the promoted model and write one period's file
     readiness brief             one cited, validated brief per county
-    readiness verify            check the Phase 0, 1 or 2 exit criteria
+    readiness scenarios         list the scenario library, or run the case studies
+    readiness gap-report        one cited, validated gap report for a facility
+    readiness review            record a rating of a blinded gap report
+    readiness verify            check the Phase 0, 1, 2 or 3 exit criteria
     readiness backtest          write the backtest report from committed files
     readiness dashboard         render a contract's ledger as a static HTML page
     readiness report            rebuild the static research report
@@ -50,6 +53,9 @@ from readiness.harness import features as features_mod
 from readiness.harness import scoring, splits
 from readiness.harness.contract import Check
 from readiness.harness.ledger import Ledger
+from readiness.plans import gap_report as plans_gap_report
+from readiness.plans import reviews as plans_reviews
+from readiness.plans import scenarios as plans_scenarios
 
 #: The Phase 0 fingerprint definition lives in `readiness.verify`; these names
 #: stay for anything that still reaches it through the CLI.
@@ -615,6 +621,10 @@ def cmd_verify(args) -> int:
     to be rebuilt from its card and rescored on test, which spends no touch.
     The checks are `readiness.verify`'s; this prints them.
     """
+    if args.phase == 3:
+        # Phase 3 is a statement about gap reports and their reviews, so like
+        # Phase 2 it takes no contract.
+        return _verify_phase3(args)
     if args.phase == 2:
         # Phase 2 is a statement about the whole registry ("at least four
         # hazards pass nationally"), so it takes no contract at all.
@@ -685,6 +695,27 @@ def _verify_phase2(args) -> int:
     _rule("Phase 2 exit criteria  (the registry)")
     result = verify.phase2(registry=contracts.registered())
     return _print_phase(2, "", result.checks)
+
+
+def _verify_phase3(args) -> int:
+    """The Phase 3 criteria: the blinded reviews, the reports they name, the library.
+
+    Real facility files, gap reports and review records never enter git, so
+    `--reports` and `--reviews` point at the planner's own tree; the case
+    studies and the no-coordinates scan read `plans/` itself.
+    """
+    if getattr(args, "contract", None):
+        raise UsageError(
+            f"`verify --phase 3` takes no contract (got -c {args.contract}): its "
+            "criteria are about gap reports and the blinded reviews of them, which "
+            "no single contract can answer."
+        )
+    _rule("Phase 3 exit criteria  (the gap reports and their reviews)")
+    result = verify.phase3(
+        reports_dir=pathlib.Path(args.reports) if args.reports else None,
+        reviews_dir=pathlib.Path(args.reviews) if args.reviews else None,
+    )
+    return _print_phase(3, "", result.checks)
 
 
 # ---------------------------------------------------------------------------
@@ -1046,6 +1077,136 @@ def cmd_dashboard(args) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# the planning thought-partner (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def cmd_scenarios_list(args) -> int:
+    """The scenario library: ids, titles and how many questions each asks."""
+    from readiness.plans import scenarios as scenarios_mod
+
+    library = scenarios_mod.load_all()
+    _rule(f"scenario library  ({len(library)} scenario(s))")
+    if not library:
+        _p("  nothing in plans/scenarios/")
+        return 0
+    for scenario in library:
+        _p(f"  {scenarios_mod.summarise(scenario)}")
+        _p(f"    specification  {scenario.source_doc}")
+        for inject in scenario.injects:
+            _p(f"    T+{inject.hour:<3} {inject.kind}")
+        for question in scenario.questions:
+            _p(f"    {question.id}  {question.rule:<26} {question.text[:60]}...")
+        _p()
+    return 0
+
+
+def cmd_scenarios_check(args) -> int:
+    """Run every committed case study through its scenario's rules."""
+    from readiness.plans import case_studies as case_studies_mod
+
+    directory = pathlib.Path(args.case_studies) if args.case_studies else None
+    root = case_studies_mod.case_studies_dir(directory)
+    results = case_studies_mod.check_all(directory)
+    _rule(f"case studies  ({data_mod.relative(root)}: {len(results)} study/studies)")
+    if not results:
+        _p("  none committed, which is the default: a case study is an example added")
+        _p("  deliberately, and every fact in it cites a published investigation.")
+        _p("  The mechanism is exercised by tests/fixtures_plans.py.")
+        return 0
+    for result in results:
+        _p(result.format())
+    failed = [r for r in results if not r.passed]
+    _p()
+    _p(f"{len(results) - len(failed)}/{len(results)} case study/studies reproduce "
+       f"their expected findings")
+    return 1 if failed else 0
+
+
+def cmd_scenarios(args) -> int:
+    return args.scenarios_func(args)
+
+
+def cmd_gap_report(args) -> int:
+    """One facility's gap report, written only when every citation validates."""
+    from readiness.plans import facility as facility_mod
+    from readiness.plans import gap_report as gap_report_mod
+    from readiness.plans import scenarios as scenarios_mod
+
+    path = pathlib.Path(args.facility)
+    out = pathlib.Path(args.out) if args.out else None
+    _rule(f"gap report  ({path.name}, {args.period}, {args.scenario})")
+    try:
+        report = gap_report_mod.run(
+            path, args.period, scenario_id=args.scenario, out_dir=out,
+            drafter=args.drafter,
+        )
+    except facility_mod.FacilityError as exc:
+        # A record we will not read is a refusal with the field that broke it,
+        # not a traceback: the file is written by a person, by hand.
+        _p()
+        _p(str(exc))
+        return 2
+    except (scenarios_mod.ScenarioError, gap_report_mod.GapReportError) as exc:
+        _p()
+        _p(str(exc))
+        return 2
+    except gap_report_mod.GapReportRefused as exc:
+        _p()
+        _p(f"{path.name}: not written")
+        for violation in exc.violations:
+            _p(f"  {violation}")
+        return 1
+    for question_id, status in report.statuses().items():
+        _p(f"  {question_id}  {status}")
+    _p()
+    for written in (report.html_path, report.json_path, report.blind_path):
+        _p(f"  wrote {data_mod.relative(written)}")
+    _p(f"  blinded sha256   {report.blind_sha256}")
+    _p()
+    _p("A practising emergency manager reviews every finding above; this report "
+       "exists to make that review cheap, not to take it over.")
+    _p(f"next: readiness review record --report {data_mod.relative(report.blind_path)} "
+       f'--rating useful --role "practising emergency manager" --org-type hospital '
+       f"--years 10")
+    return 0
+
+
+def cmd_review_record(args) -> int:
+    """Bind a rating to the sha256 of a blinded rendering, or refuse."""
+    from readiness.plans import reviews as reviews_mod
+
+    reviews_dir = pathlib.Path(args.reviews) if args.reviews else None
+    _rule(f"review  ({pathlib.Path(args.report).name}, {args.rating!r})")
+    try:
+        path, review = reviews_mod.record(
+            args.report, rating=args.rating, reviewer_role=args.role,
+            organisation_type=args.org_type, years_in_role=args.years,
+            comments=args.comments or "", reviews_dir=reviews_dir,
+        )
+    except reviews_mod.ReviewError as exc:
+        _p()
+        _p(str(exc))
+        return 2
+    _p(f"  facility         {review.facility_hash}")
+    _p(f"  period           {review.period}")
+    _p(f"  report sha256    {review.report_sha256}")
+    _p(f"  rating           {review.rating}")
+    _p(f"  reviewer         {review.reviewer_role} "
+       f"({review.organisation_type}, {review.years_in_role} year(s))")
+    _p()
+    _p(f"  wrote {data_mod.relative(path)}")
+    _p()
+    _p("This record is an attestation bound to one blinded rendering: change the "
+       "report and its sha moves, and `verify --phase 3` stops counting this review.")
+    return 0
+
+
+def cmd_review(args) -> int:
+    return args.review_func(args)
+
+
 def cmd_report(args) -> int:
     script = data_mod.REPO_ROOT / "tools" / "build_report.py"
     return subprocess.call([sys.executable, str(script)])
@@ -1333,13 +1494,99 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write under this directory instead of briefs/")
     sp.set_defaults(func=cmd_brief)
 
+    sp = sub.add_parser(
+        "scenarios",
+        help="list the scenario library, or run the committed case studies",
+        description=(
+            "The scenarios a blessed plan must survive. Each is a markdown "
+            "specification written before anything executed it and a JSON "
+            "transcription beside it; a test keeps the two in step. `check` runs "
+            "every committed case study through its scenario's rules and compares "
+            "the findings with the ones the study records."
+        ),
+    )
+    ssub = sp.add_subparsers(dest="scenarios_command", required=True)
+    sp.set_defaults(func=cmd_scenarios)
+
+    s = ssub.add_parser("list", help="ids, titles and question counts")
+    s.set_defaults(scenarios_func=cmd_scenarios_list)
+
+    s = ssub.add_parser(
+        "check",
+        help="run every committed case study through its scenario's rules",
+    )
+    s.add_argument("--case-studies", metavar="DIR",
+                   help="read the studies from here instead of plans/case-studies/")
+    s.set_defaults(scenarios_func=cmd_scenarios_check)
+
+    sp = sub.add_parser(
+        "gap-report",
+        help="one cited, validated gap report for one facility record",
+        description=(
+            "Runs a scenario's rules over a facility JSON and the issued risk layer "
+            "for that facility's county and period, and writes "
+            "<out>/<slug>/<period>.html, .json and .blind.html — but only when every "
+            "sentence cites a claim that resolves. A missing design intensity is a "
+            "fail-closed finding naming the document that would supply it; no county "
+            "probability is ever substituted for it."
+        ),
+    )
+    sp.add_argument("--facility", required=True, metavar="PATH",
+                    help="the facility record JSON (never committed: see plans/facilities/)")
+    sp.add_argument("--period", required=True, metavar="YYYY-Qn",
+                    help="the period label the issued files carry")
+    sp.add_argument("--scenario", default=plans_scenarios.DEFAULT_SCENARIO,
+                    metavar="ID",
+                    help=f"scenario id (default {plans_scenarios.DEFAULT_SCENARIO})")
+    sp.add_argument("--out", metavar="DIR",
+                    help="write under this directory instead of plans/reports/")
+    sp.add_argument("--drafter", default="local", choices=list(plans_gap_report.DRAFTERS),
+                    help="local is deterministic and needs no API key; claude rewrites "
+                         "the same sentences and drops any that stop validating "
+                         "(default local)")
+    sp.set_defaults(func=cmd_gap_report)
+
+    sp = sub.add_parser(
+        "review",
+        help="record a practising emergency manager's rating of a blinded report",
+        description=(
+            "A review record binds a rating to the sha256 of one blinded rendering, "
+            "recomputed from the file. Change the report and the sha moves, and "
+            "`verify --phase 3` stops counting the review."
+        ),
+    )
+    rsub = sp.add_subparsers(dest="review_command", required=True)
+    sp.set_defaults(func=cmd_review)
+
+    r = rsub.add_parser("record", help="write plans/reviews/<sha256 of the report>.json")
+    r.add_argument("--report", required=True, metavar="PATH.blind.html",
+                   help="the blinded rendering the reviewer read")
+    r.add_argument("--rating", required=True, choices=list(plans_reviews.RATINGS))
+    r.add_argument("--role", required=True, metavar="TEXT",
+                   help='what the reviewer does, in their words (the exit criterion '
+                        'looks for "emergency manager")')
+    r.add_argument("--org-type", required=True, dest="org_type",
+                   choices=list(plans_reviews.ORG_TYPES))
+    r.add_argument("--years", required=True, type=int, metavar="N",
+                   help="years in the role")
+    r.add_argument("--comments", metavar="TEXT")
+    r.add_argument("--reviews", metavar="DIR",
+                   help="write under this directory instead of plans/reviews/")
+    r.set_defaults(review_func=cmd_review_record)
+
     sp = features_flag(data_flags(
-        sub.add_parser("verify", help="check the Phase 0, 1 or 2 exit criteria")
+        sub.add_parser("verify", help="check the Phase 0, 1, 2 or 3 exit criteria")
     ))
-    sp.add_argument("--phase", type=int, default=0, choices=[0, 1, 2],
+    sp.add_argument("--phase", type=int, default=0, choices=[0, 1, 2, 3],
                     help="0 scores the baselines against the pinned data; 1 reads one "
-                         "contract's ledger; 2 reads the whole registry and takes no "
-                         "-c (default 0)")
+                         "contract's ledger; 2 reads the whole registry and 3 the gap "
+                         "reports and their reviews, both taking no -c (default 0)")
+    sp.add_argument("--reports", metavar="DIR",
+                    help="with --phase 3: the blinded reports the reviews name "
+                         "(default plans/reports/; real reports are never committed)")
+    sp.add_argument("--reviews", metavar="DIR",
+                    help="with --phase 3: the review records "
+                         "(default plans/reviews/)")
     sp.add_argument("--replay", action="store_true",
                     help="with --phase 1: rebuild the promoted model from its card and "
                          "rescore it on test without spending a touch")
