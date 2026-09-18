@@ -2558,8 +2558,18 @@ class TestEmdatNumbersAndBounds(unittest.TestCase):
         self.assertEqual(list(emdat.rows(blob))[0], list(emdat.COLUMNS))
 
     def test_a_deeply_nested_admin_cell_is_counted_not_a_recursion_error(self):
+        # Whether a given depth exhausts the parser's stack depends on the
+        # interpreter (3.12's decoder reads 3,000 levels; 3.11's does not),
+        # so the exhaustion path is driven explicitly and the real deep cell
+        # is only required not to raise: no name, and a unit count that is
+        # the parser's (0 when it gave up, 1 when it read the outer list).
+        with mock.patch.object(emdat.json, "loads", side_effect=RecursionError), \
+                mock.patch.object(emdat.ast, "literal_eval", side_effect=RecursionError):
+            self.assertEqual(emdat.admin_names("[[]]", "ADM1"), ([], 0))
         deep = "[" * 3000 + "]" * 3000
-        self.assertEqual(emdat.admin_names(deep, "ADM1"), ([], 0))
+        names, count = emdat.admin_names(deep, "ADM1")
+        self.assertEqual(names, [])
+        self.assertIn(count, (0, 1))
 
 
 class TestEmdatCrosswalkRootIsTheSnapshotDir(unittest.TestCase):

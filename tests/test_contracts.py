@@ -717,7 +717,7 @@ class TestPilotRegionsSha(unittest.TestCase):
 
 
 class TestContractPatternsEndAtTheString(unittest.TestCase):
-    """`$` also matches before a final newline; `\Z` does not.
+    r"""`$` also matches before a final newline; `\Z` does not.
 
     A country code with a trailing newline would reach a manifest key, a cache
     filename and the geoBoundaries URL; a sha256 with one can never match any
