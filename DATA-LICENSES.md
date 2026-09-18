@@ -96,11 +96,11 @@ Weather data by Open-Meteo.com (CC BY 4.0); ERA5 by ECMWF/Copernicus.
 [if NRI shown] Baseline risk: FEMA National Risk Index (public domain).
 [if exposure joined] Exposure: FEMA / Oak Ridge National Laboratory USA
   Structures (public domain), county counts only.
-[if exposure joined] Building footprints: (c) Microsoft / Overture Maps
+[if footprints joined] Building footprints: (c) Microsoft / Overture Maps
   contributors, ODbL 1.0. This derived database is available under ODbL 1.0.
 [if risk engine used] Risk computation: CLIMADA, ETH Zurich, GPL-3.0.
 Not an official warning product. Official alerts come from the US National
-Weather Service and IPAWS.
+  Weather Service and IPAWS.
 ```
 
 That last line is not a licence obligation. It is in this file because it should

@@ -9,11 +9,18 @@ predictions of specific events.
 
 So a `Document` is sentences plus the claims they cite, and `validate` checks
 what rules can check: every sentence cites at least one claim, every cited
-claim exists, every claim's source resolves through a `Resolver`, every
-number in the prose is the rendered value of a cited claim, and no forbidden
-phrasing appears. It is a smoke alarm for words — it proves a number was not
-invented, not that the citation supports the sentence; that remains a human's
-job, and the brief and the gap report both say so.
+claim exists, every claim's source resolves through a `Resolver`, every cited
+value equals what the artefact holds where the reference names one number,
+every number in the prose is the rendered value of a cited claim, and no
+forbidden phrasing appears. It is a smoke alarm for words — it proves a
+number was not invented, not that the citation supports the sentence; that
+remains a human's job, and the brief and the gap report both say so.
+
+Two things are the caller's, not this module's: the guidance registry (the
+browser sandbox has no `plans/` directory, so it passes one in) and the
+`identifiers` a document may spell out although they look like numbers — a
+brief passes the county FIPS it is about, and a document that passes nothing
+has every five-digit number read as a number.
 
 This module knows nothing about ledgers, issued files, manifests or facilities
 beyond what a `Resolver` answers. Standard library only, no LLM client, no
@@ -26,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import html
 import json
+import math
 import pathlib
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence
@@ -42,6 +50,8 @@ KINDS: frozenset[str] = frozenset(
 UNCITED = "UNCITED"
 UNKNOWN_CLAIM = "UNKNOWN_CLAIM"
 UNRESOLVED = "UNRESOLVED"
+#: The claim resolved, and the artefact holds a different number.
+VALUE_MISMATCH = "VALUE_MISMATCH"
 NUMBER_WITHOUT_CLAIM = "NUMBER_WITHOUT_CLAIM"
 FORBIDDEN_PHRASE = "FORBIDDEN_PHRASE"
 
@@ -69,13 +79,18 @@ _FORBIDDEN = re.compile(
     r"\b(?:" + "|".join(re.escape(p) for p in FORBIDDEN_PHRASES) + r")\w*", re.IGNORECASE
 )
 #: Identifier exemptions: strings that contain digits but are names, not
-#: quantities. Guidance aliases are added at validation time.
+#: quantities, whatever the document is. Guidance aliases and the caller's own
+#: `identifiers` are added at validation time.
 #: Each may end a sentence, so a trailing "." is fine but ".5" or ",000" is not.
+#:
+#: A bare five-digit number is *not* here. It is a county FIPS only in a
+#: document that is about that county, and the document says which one: a
+#: brief passes its own FIPS to `validate`, and a document that passes
+#: nothing has five-digit numbers read as numbers, like any other.
 _IDENTIFIERS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?!\w|\.\d)"),  # semantic versions ("v1.2.0")
     re.compile(r"(?<!\w)exp-\d{4}(?!\w)"),  # card ids
     re.compile(r"(?<![\w.])\d{4}-[QMP]\d+(?!\w|\.\d)"),  # period labels
-    re.compile(r"(?<![\d.,])\d{5}(?!\d|[.,]\d|%)"),  # five-digit FIPS codes
     re.compile(r"(?<![\d.,])(?:19|20)\d{2}(?!\d|[.,]\d|%)"),  # bare years 1900-2099
 )
 
@@ -194,9 +209,20 @@ class Violation:
 
 
 class Resolver(Protocol):
-    """Answers whether a source exists. None means it does; a string says why not."""
+    """Answers what a source holds, in three ways.
 
-    def resolve(self, source: Source) -> str | None: ...
+    A **string** is a refusal: the source does not exist, and it says why.
+    A **number** is the leaf the reference names — the field of a card, the
+    county's probability in an issued file — and `validate` checks the claim's
+    value against it. **None** means the source resolves but there is no single
+    value under it to check (a whole card, a manifest key, a guidance entry),
+    which is "resolvable, unchecked".
+
+    Only numbers come back as leaves: a failure is a string on this channel,
+    so a string leaf could not be told from one.
+    """
+
+    def resolve(self, source: Source) -> str | int | float | None: ...
 
 
 def load_guidance(path: pathlib.Path = GUIDANCE_PATH) -> dict[str, dict]:
@@ -226,25 +252,35 @@ def guidance_aliases(guidance: Mapping[str, Mapping]) -> tuple[str, ...]:
     return tuple(sorted(aliases, key=lambda a: (-len(a), a)))
 
 
-def _lookup(mapping: Mapping, path: str) -> bool:
-    """Whether a dotted field path exists in nested mappings."""
-    node: object = mapping
+def _walk(node: object, path: str) -> tuple[bool, object]:
+    """Follow a dotted field path through nested mappings: (found, what is there)."""
     for part in path.split("."):
         if not isinstance(node, Mapping) or part not in node:
-            return False
+            return False, None
         node = node[part]
-    return True
+    return True, node
+
+
+def _leaf(value: object) -> int | float | None:
+    """The value a claim can be checked against: a number, or nothing at all."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value
 
 
 class DictResolver:
     """A resolver over in-memory sets, for tests and simple callers.
 
     `known` maps a kind to what exists: a collection of refs, or a mapping from
-    a base ref to either a nested mapping (a card, a facility) whose field paths
-    may be cited with `#field`, or a collection of accepted qualifiers (the
-    periods an issued file covers). Guidance ids come from `plans/guidance.json`
-    unless given. `computed` claims are checked against the document by
-    `validate`, not here.
+    a base ref to either a nested mapping (a card, a facility, an issued file's
+    periods and the probability each holds per county) whose field paths may be
+    cited with `#field` or `#field.subfield`, or a collection of accepted
+    qualifiers. Guidance ids come from `plans/guidance.json` unless given.
+    `computed` claims are checked against the document by `validate`, not here.
+
+    Where a reference lands on a number, that number is returned, so the claim
+    that cites it is checked against it rather than merely against the fact
+    that something is there.
     """
 
     def __init__(
@@ -255,7 +291,7 @@ class DictResolver:
         self.known = dict(known or {})
         self.guidance = dict(guidance) if guidance is not None else load_guidance()
 
-    def resolve(self, source: Source) -> str | None:
+    def resolve(self, source: Source) -> str | int | float | None:
         if source.kind == "computed":
             return None
         if source.kind == "guidance":
@@ -266,17 +302,26 @@ class DictResolver:
         if refs is None:
             return f"no {source.kind} sources are known"
         base, _, qualifier = source.ref.partition("#")
-        if base not in refs and not (isinstance(refs, Mapping) and _lookup(refs, base)):
+        if isinstance(refs, Mapping):
+            # The whole base first: a path is a key here ("issued/x/2026-Q4.json"
+            # has dots in it), and only then a dotted walk ("power.fuel_hours").
+            found, target = (True, refs[base]) if base in refs else _walk(refs, base)
+        else:
+            found, target = base in refs, None
+        if not found:
             return f"{source.kind} {base!r} not found"
-        if qualifier and isinstance(refs, Mapping):
-            return _check_qualifier(source, refs.get(base), qualifier)
-        return None
+        if qualifier:
+            return _check_qualifier(source, target, qualifier)
+        return _leaf(target)
 
 
-def _check_qualifier(source: Source, target: object, qualifier: str) -> str | None:
+def _check_qualifier(
+    source: Source, target: object, qualifier: str
+) -> str | int | float | None:
     if isinstance(target, Mapping):
-        if _lookup(target, qualifier):
-            return None
+        found, value = _walk(target, qualifier)
+        if found:
+            return _leaf(value)
         return f"{source.kind} {source.ref!r}: no field {qualifier!r}"
     if isinstance(target, Collection) and not isinstance(target, str):
         if qualifier in target:
@@ -311,18 +356,26 @@ def _normalise(token: str) -> str:
     return token.lstrip("+").rstrip(".,")
 
 
-def numbers_in(text: str, aliases: Iterable[str] = ()) -> list[str]:
+def numbers_in(
+    text: str, aliases: Iterable[str] = (), identifiers: Iterable[str] = ()
+) -> list[str]:
     """Numeric tokens in prose, once markers and identifiers are set aside.
 
     Identifiers contain digits but are not quantities: guidance aliases such
     as "CPG 101" or "42 CFR 482.15", semantic versions, card ids, period
-    labels, five-digit FIPS codes and bare four-digit years. A scenario
+    labels and bare four-digit years. `identifiers` are the caller's own — the
+    county FIPS a brief is about, say — because whether "48201" is a name or a
+    number depends on the document, not on the shape of the digits. A scenario
     constant ("96" in "96-hour") is deliberately not an identifier — it is a
     number the plan leans on, so it must be a claim.
     """
     clean = strip_markers(text)
     for alias in aliases:
         clean = re.sub(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", " ", clean)
+    for name in identifiers:
+        clean = re.sub(
+            r"(?<![\w.,])" + re.escape(str(name)) + r"(?![\w]|[.,]\d)", " ", clean
+        )
     for pattern in _IDENTIFIERS:
         clean = pattern.sub(" ", clean)
     tokens = (_normalise(m.group(0)) for m in _NUMBER.finditer(clean))
@@ -349,41 +402,107 @@ def validate(
     doc: Document,
     resolver: Resolver,
     guidance: Mapping[str, Mapping] | None = None,
+    *,
+    identifiers: Sequence[str] = (),
 ) -> list[Violation]:
     """Every rule, in order; an empty list means the document may be shown.
 
     `guidance` supplies the alias exemptions and defaults to the registry on
     disk; a caller without the file (the browser sandbox) passes it in.
+    `identifiers` are strings this document may spell out although they look
+    like numbers — the county FIPS a brief is about. A caller that passes
+    none gets no such exemption, which is the point: the exemption belongs to
+    a document that names its subject, not to every five-digit number.
     """
     guidance = guidance if guidance is not None else load_guidance()
     aliases = guidance_aliases(guidance)
     claims = doc.claim_index()
     found = _claim_violations(doc, resolver)
     for index, sentence in enumerate(doc.sentences):
-        found.extend(_sentence_violations(index, sentence, claims, aliases))
+        found.extend(
+            _sentence_violations(index, sentence, claims, aliases, identifiers)
+        )
     return found
+
+
+def _grounded(claim_id: str, claims: Mapping[str, Claim], seen: frozenset[str]) -> bool:
+    """Whether a claim's `+` chain reaches a source outside the document.
+
+    A `computed` claim is arithmetic on other claims, so somewhere under it
+    there must be a card, a file or a document — otherwise it is a number
+    derived from nothing, and two claims computed from each other are exactly
+    that. Walking the graph is also what catches the cycle.
+    """
+    claim = claims.get(claim_id)
+    if claim is None:
+        return False
+    if claim.source.kind != "computed":
+        return True
+    if claim_id in seen:
+        return False
+    seen = seen | {claim_id}
+    return any(_grounded(part, claims, seen) for part in claim.source.ref.split("+"))
 
 
 def _claim_violations(doc: Document, resolver: Resolver) -> list[Violation]:
-    """Every claim resolves: through the resolver, or for `computed`, in the document."""
-    ids = set(doc.claim_index())
+    """Every claim resolves, and every value is the one the artefact holds.
+
+    `computed` claims resolve inside the document: their inputs must be claims
+    it carries, and the chain must bottom out in something outside it.
+    """
+    claims = doc.claim_index()
     found: list[Violation] = []
     for claim in doc.claims:
+        where = f"claim {claim.id} ({claim.source.kind} {claim.source.ref!r})"
         if claim.source.kind == "computed":
-            missing = [p for p in claim.source.ref.split("+") if p not in ids or p == claim.id]
-            reason = f"computed from unknown claims {missing}" if missing else None
-        else:
-            reason = resolver.resolve(claim.source)
-        if reason:
-            found.append(Violation(
-                UNRESOLVED, None,
-                f"claim {claim.id} ({claim.source.kind} {claim.source.ref!r}): {reason}",
-            ))
+            parts = claim.source.ref.split("+")
+            missing = [p for p in parts if p not in claims or p == claim.id]
+            if missing:
+                reason = f"computed from unknown claims {missing}"
+            elif not _grounded(claim.id, claims, frozenset()):
+                reason = (
+                    "computed from claims that are themselves computed, with nothing "
+                    "outside the document under them (a cycle, or a derivation with "
+                    "no source)"
+                )
+            else:
+                reason = None
+            if reason:
+                found.append(Violation(UNRESOLVED, None, f"{where}: {reason}"))
+            continue
+        outcome = resolver.resolve(claim.source)
+        if isinstance(outcome, str):
+            found.append(Violation(UNRESOLVED, None, f"{where}: {outcome}"))
+        elif outcome is not None and claim.value is not None:
+            if not _same_value(claim.value, outcome):
+                found.append(Violation(
+                    VALUE_MISMATCH, None,
+                    f"{where}: the document says {claim.value!r}, the source holds "
+                    f"{outcome!r}",
+                ))
     return found
 
 
+def _same_value(claimed: int | float | str, resolved: int | float) -> bool:
+    """Numbers to a tolerance, everything else exactly.
+
+    Floats because a JSON round trip and a recomputation need not agree in the
+    last bit; a string or an int must match exactly, so a claim whose value is
+    a word cannot pass against a number that happens to be there.
+    """
+    if isinstance(claimed, bool):
+        return False
+    if isinstance(claimed, (int, float)):
+        return math.isclose(claimed, resolved, rel_tol=1e-9, abs_tol=1e-9)
+    return claimed == resolved
+
+
 def _sentence_violations(
-    index: int, sentence: Sentence, claims: Mapping[str, Claim], aliases: Sequence[str]
+    index: int,
+    sentence: Sentence,
+    claims: Mapping[str, Claim],
+    aliases: Sequence[str],
+    identifiers: Sequence[str] = (),
 ) -> list[Violation]:
     found: list[Violation] = []
     cited = sentence.cited()
@@ -394,7 +513,7 @@ def _sentence_violations(
         found.append(Violation(UNKNOWN_CLAIM, index, f"claim {claim_id!r} is not in the document"))
     known = [claims[c] for c in cited if c in claims]
     accepted = _accepted_numbers(known)
-    for token in numbers_in(sentence.text, aliases):
+    for token in numbers_in(sentence.text, aliases, identifiers):
         if token not in accepted:
             found.append(Violation(
                 NUMBER_WITHOUT_CLAIM, index,

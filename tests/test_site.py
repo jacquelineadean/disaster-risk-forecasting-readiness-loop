@@ -10,6 +10,7 @@ import base64
 import contextlib
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -20,6 +21,8 @@ import unittest
 import zipfile
 from unittest import mock
 
+from readiness import brief as brief_mod
+from readiness import fleet as fleet_mod
 from readiness import cite, contracts, data as data_mod
 from readiness.connectors.base import Manifest
 from readiness.connectors import usa_structures
@@ -291,22 +294,31 @@ class TestBuildSite(unittest.TestCase):
                 {"fips", "period", "title", "contracts", "html", "generated_at", "inputs"},
             )
             self.assertTrue((self.out / entry["html"]).exists())
-        # With a briefs/ tree: the validating brief is listed with its HTML
-        # copied; the one with an uncited sentence is not, whatever its file says.
+        # With a briefs/ tree: the validating brief is listed and its page is
+        # rendered from the document that validated — never the committed
+        # sibling .html, which is bytes nobody re-checked. The one with an
+        # uncited sentence is not listed, whatever its file says, and neither
+        # is one whose JSON names something below the county.
         nws = cite.Claim("g1", "official alerting", None, cite.Source("guidance", "nws-ipaws"))
         total = cite.Claim("n", "structures", 1234, cite.Source("manifest", "fema/x"), "{:,}")
-        prob = cite.Claim("p", "chance", 0.12, cite.Source("issued", "issued/hail-us/2026-Q4.json#2026-Q4"), "{:.0%}")
+        prob = cite.Claim("p", "chance", 0.12, cite.Source("issued", "issued/hail-us/2026-Q4.json#2026-Q4.40001"), "{:.0%}")
         good = cite.Document(
             "Adair County, OK — 2026-Q4", "county-brief",
             [cite.Sentence.from_text("12% chance of at least one damaging hail event [c:p]."),
              cite.Sentence.from_text("The county holds 1,234 structures [c:n]."),
              cite.Sentence.from_text(f"{cite.NOT_A_WARNING_SENTENCE} [c:g1].")],
-            [prob, total, nws], "2026-09-16T00:00:00+00:00", {"contract": "hail-us"},
+            [prob, total, nws], "2026-09-16T00:00:00+00:00",
+            {"county": "40001", "period": "2026-Q4", "contract": "hail-us"},
         )
         bad = cite.Document("Bad", "county-brief", [cite.Sentence("No citation here.")],
                             [nws], "2026-09-16T00:00:00+00:00")
+        finer = cite.Document(
+            good.title, good.kind, good.sentences, good.claims, good.generated_at,
+            {**good.inputs, "county": "40005", "parcel": "0123-45"},
+        )
         resolver = cite.DictResolver({
-            "issued": {"issued/hail-us/2026-Q4.json": {"2026-Q4"}}, "manifest": {"fema/x"},
+            "issued": {"issued/hail-us/2026-Q4.json": {"2026-Q4": {"40001": 0.12}}},
+            "manifest": {"fema/x"},
         })
         with tempfile.TemporaryDirectory() as tmp:
             briefs = pathlib.Path(tmp) / "briefs"
@@ -315,6 +327,8 @@ class TestBuildSite(unittest.TestCase):
             (briefs / "40001" / "2026-Q4.html").write_text("<html>the committed page</html>")
             (briefs / "40003").mkdir()
             (briefs / "40003" / "2026-Q4.json").write_text(cite.to_json(bad))
+            (briefs / "40005").mkdir()
+            (briefs / "40005" / "2026-Q4.json").write_text(cite.to_json(finer))
             out = pathlib.Path(tmp) / "generated"
             self.build.build_briefs(out, contracts.registered(), briefs_dir=briefs,
                                     resolver=resolver)
@@ -323,14 +337,22 @@ class TestBuildSite(unittest.TestCase):
             self.assertEqual(listed[0]["period"], "2026-Q4")
             self.assertEqual(listed[0]["contracts"], ["hail-us"])
             self.assertEqual(listed[0]["html"], "briefs/40001/2026-Q4.html")
-            self.assertIn("the committed page", (out / listed[0]["html"]).read_text())
+            page = (out / listed[0]["html"]).read_text()
+            self.assertNotIn("the committed page", page)
+            self.assertIn("12% chance of at least one damaging hail event", page)
+            # Escaped on the page, so match the part without the apostrophe.
+            self.assertIn(brief_mod.READING_CAVEAT.split(";")[0], page)
+            self.assertIn("NOAA National Centers for Environmental Information", page)
             self.assertFalse((out / "briefs" / "40003").exists())
+            self.assertFalse((out / "briefs" / "40005").exists())
 
     def test_the_brief_resolver_knows_the_ledgers_issued_files_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             issued = pathlib.Path(tmp) / "issued" / "tornado-ok"
             issued.mkdir(parents=True)
-            (issued / "2026-Q4.json").write_text(json.dumps({"period": "2026-Q4"}))
+            (issued / "2026-Q4.json").write_text(json.dumps(
+                {"period": "2026-Q4", "probabilities": {"40001": 0.12}}
+            ))
             r = self.build.brief_resolver(contracts.registered(), issued_dir=issued.parent)
         # A committed card, by bare id and qualified by its contract.
         self.assertIsNone(r.resolve(cite.Source("ledger", "exp-0001")))
@@ -338,6 +360,15 @@ class TestBuildSite(unittest.TestCase):
         self.assertIsNotNone(r.resolve(cite.Source("ledger", "exp-9999")))
         self.assertIsNone(r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2026-Q4")))
         self.assertIsNotNone(r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2027-Q1")))
+        # A county qualifier resolves to that county's probability, so a brief
+        # that quotes it is checked against it.
+        self.assertEqual(
+            r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2026-Q4.40001")),
+            0.12,
+        )
+        self.assertIsNotNone(
+            r.resolve(cite.Source("issued", "issued/tornado-ok/2026-Q4.json#2026-Q4.40003"))
+        )
         self.assertIsNotNone(r.resolve(cite.Source("manifest", "not/a/key")))
         self.assertIsNone(r.resolve(cite.Source("guidance", "nws-ipaws")))
 
@@ -379,6 +410,28 @@ class TestBuildSite(unittest.TestCase):
         for name in ("briefs.json", "fleet.json", "exposure.json"):
             self.assertIn(f'"{name}"', js)
         self.assertIn("readiness brief", js)  # the empty state says how one is produced
+
+    def test_every_button_sits_inside_its_row(self):
+        # A button after the row's closing </div> is laid out on its own,
+        # wider and out of line with the two beside it.
+        for page in sorted(SITE.glob("*.html")):
+            text = page.read_text(encoding="utf-8")
+            stray = re.findall(r'</div>\s*<a class="btn[^"]*"', text)
+            self.assertEqual(stray, [], f"{page.name}: a button sits outside .btn-row")
+        walkthrough = (SITE / "walkthrough.html").read_text(encoding="utf-8")
+        rows = re.findall(r'<div class="btn-row">(.*?)</div>', walkthrough, re.S)
+        self.assertTrue(any("briefs.html" in row for row in rows))
+
+    def test_the_site_says_the_fleet_runs_the_phase_2_queue(self):
+        # `fleet` and `run_fleet` default to queue="phase2"; the page that
+        # tells a reader what Phase 2 does must not name the Phase 1 queue.
+        text = (SITE / "index.html").read_text(encoding="utf-8")
+        self.assertIn("runs them through the Phase 2 queue", text)
+        self.assertNotIn("runs them through the Phase 1 queue", text)
+        self.assertEqual(
+            inspect.signature(fleet_mod.run_fleet).parameters["queue"].default,
+            "phase2",
+        )
 
     def test_pages_share_one_top_bar_and_one_typeface(self):
         top = re.compile(r'<header class="top".*?</header>', re.S)
@@ -539,6 +592,24 @@ class TestSandboxModule(unittest.TestCase):
             self.assertEqual(code, 0, text)
             self.assertFalse((pathlib.Path(tmp) / "flood-zz"
                               / "test_touches.json").exists())
+
+    def test_fleet_promote_is_refused_exactly_like_loop_promote(self):
+        # `fleet --promote` spends the same one touch as `promote`, once per
+        # contract. Every spelling argparse would accept is refused.
+        for argv in (("fleet", "--promote"),
+                     ("fleet", "--contracts", "flood-zz", "--promote"),
+                     ("fleet", "--national", "--queue", "phase2", "--promote"),
+                     ("fleet", "--prom")):  # argparse abbreviation
+            with self.subTest(argv=argv):
+                code, text = self.cli(*argv)
+                self.assertEqual(code, 2, text)
+                self.assertIn("`readiness fleet --promote` is not available in the "
+                              "browser sandbox", text)
+                self.assertIn("spent budget with no card in the repository", text)
+        experiments = pathlib.Path(os.environ["READINESS_EXPERIMENTS_DIR"])
+        self.assertFalse((experiments / "flood-zz" / "test_touches.json").exists())
+        # The fleet's read-only view still runs.
+        self.assertEqual(self.cli("fleet", "--status")[0], 0)
 
     def test_phase2_writers_are_refused_and_fleet_status_runs(self):
         # `issue` and `brief` write records the repository commits; `exposure

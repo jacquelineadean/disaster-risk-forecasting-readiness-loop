@@ -139,6 +139,41 @@ class TestRunFleet(FleetCase):
         self.assertIn("tornado-us: not run (FileNotFoundError:", text)
         self.assertIn("ran 1 experiment(s) against hail-us", text)
 
+    def test_a_refused_promotion_keeps_the_loop_that_ran(self):
+        # The second run over the same contracts: every queue runs again and
+        # writes its cards, and every promotion is refused because the ledger
+        # already holds a test card. That is a verdict about the touch, not a
+        # contract that could not run, so both loops are reported with their
+        # refusal and nothing lands in the exception map.
+        datasets = {c.name: signal_dataset(c, self.dir) for c in (self.flood, self.tornado)}
+        first = self.run_fleet([self.flood, self.tornado], lambda c: datasets[c.name])
+        self.assertEqual(first.refusals, {})
+        self.lines.clear()
+
+        again = self.run_fleet([self.flood, self.tornado], lambda c: datasets[c.name])
+        self.assertEqual(sorted(again), ["flood-us", "tornado-us"])
+        for name in ("flood-us", "tornado-us"):
+            with self.subTest(contract=name):
+                self.assertIsInstance(again[name], orchestrator.LoopResult)
+                self.assertIsNone(again[name].promoted)
+                self.assertIn("already holds a test card", again.refusals[name])
+                self.assertIn(f"fleet        [{name}] promotion refused: ", "\n".join(
+                    line for line in self.lines if line.startswith("fleet")
+                ))
+        # `readiness fleet`'s exit status is about datasets that could not be
+        # built; nothing here is an exception, so it stays 0.
+        self.assertFalse(any(isinstance(r, Exception) for r in again.values()))
+
+        text = fleet.format_results(again)
+        for name in ("flood-us", "tornado-us"):
+            self.assertIn(f"ran {len(QUICK_PHASE2) + 1} experiment(s) against {name}", text)
+        self.assertEqual(text.count("promotion refused: refusing to promote"), 2)
+        self.assertNotIn("not run", text)
+        # One test card per ledger, still: the refusal is what kept it at one.
+        for contract in (self.flood, self.tornado):
+            cards = list(Ledger(self.where(contract).ledger).read())
+            self.assertEqual([c.split for c in cards].count("test"), 1)
+
     def test_queue_by_name_and_unknown_names_refused(self):
         results = fleet.run_fleet(
             [self.flood], queue="baseline", experiments_dir=self.experiments,

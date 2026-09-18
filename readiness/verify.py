@@ -772,6 +772,26 @@ def _first_test_card(
     return None
 
 
+def _brief_identity(doc, fips: str, label: str) -> str:
+    """Why this document is not the brief for this county and period, or "".
+
+    Read from the document itself — its kind and the inputs it was built from
+    — never from the path it was found at, because the path is what a person
+    chose to call a file.
+    """
+    from readiness import brief as brief_mod
+
+    if doc.kind != brief_mod.KIND:
+        return f"kind is {doc.kind!r}, not {brief_mod.KIND!r}"
+    got_county = doc.inputs.get("county")
+    if got_county != fips:
+        return f"inputs name county {got_county!r}, not {fips!r}"
+    got_period = doc.inputs.get("period")
+    if got_period != label:
+        return f"inputs name period {got_period!r}, not {label!r}"
+    return ""
+
+
 def _brief_check(
     known: dict[str, Contract],
     label: str,
@@ -810,6 +830,13 @@ def _brief_check(
             doc = cite.from_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             tried.append(f"{data_mod.relative(path)}: unreadable ({exc})")
+            continue
+        # The file's path is not evidence of what is in it. A document that
+        # is not a county brief, or is one for another county or period,
+        # would otherwise pass this criterion from the right filename.
+        mismatch = _brief_identity(doc, fips, label)
+        if mismatch:
+            tried.append(f"{data_mod.relative(path)}: {mismatch}")
             continue
         violations = brief_mod.check(doc, resolve)
         if not violations:

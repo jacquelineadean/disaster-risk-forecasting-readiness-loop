@@ -447,7 +447,12 @@ def run_experiment(
     )
     # Provenance, not a criterion: the annex budgets a national card in
     # minutes, and the only way to know what a queue costs is to write down
-    # what each card cost. Nothing hashes or judges it.
+    # what each card cost. It goes inside `data_snapshot`, so it is inside
+    # `card_hash` like every field there — the cost is tamper-evident — but
+    # no check compares it and no reproducibility fingerprint contains it.
+    # The consequence to know: two runs of the same queue on the same data no
+    # longer produce identical card hashes, because they took different
+    # numbers of milliseconds. The committed ledgers predate the field.
     wall_clock_s = round(time.perf_counter() - started, 3)
     verdict = contract_mod.evaluate(card_scorecard, contract)
 

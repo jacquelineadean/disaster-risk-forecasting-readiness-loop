@@ -2,7 +2,10 @@
 
 Plan §3: "Six national contracts registered as data; `readiness fleet` runs
 them sequentially through the Phase 1 queue; per-contract ledgers and
-budgets." Report §4 calls this work "embarrassingly parallel", and the design
+budgets." What was delivered runs the Phase 2 queue (plan §3.1): `run_fleet`
+and `readiness fleet` default to `queue="phase2"` — the logistic pair, a
+capped boosted model and its calibrated form — and any other queue is asked
+for by name. Report §4 calls this work "embarrassingly parallel", and the design
 annex says why the fleet is nonetheless sequential: every contract owns its
 ledger and its touch budget, and the snapshot manifest the data plane saves
 after each pull is not safe to write from two runs at once. Parallel
@@ -11,7 +14,8 @@ execution is deferred, not forgotten.
 Two things live here and nothing else. `run_fleet` walks the contracts and
 calls `orchestrator.run_local` for each, continuing past a contract whose
 data is missing so that one unpulled extract does not cost the other five
-their ledgers. `status` reads the fleet's record back — ledger, touch file
+their ledgers, and past a refused promotion with the loop that ran and the
+refusal beside it. `status` reads the fleet's record back — ledger, touch file
 and backtest report only, through `readiness.verify.phase1` — so the table
 it prints is the same evidence `readiness verify --phase 1` would accept,
 computed without building a panel or fitting anything.
@@ -166,6 +170,21 @@ def _features_of(features, contract: Contract) -> Sequence[str]:
     return features(contract) if callable(features) else features
 
 
+class FleetResults(dict):
+    """The results map, with the promotion refusals beside the loops that ran.
+
+    A plain `dict` of contract name -> `LoopResult` (or the exception that
+    stopped the contract before it could run), so every existing reader is
+    unchanged. `refusals[name]` holds the text of a promotion that was refused
+    *after* that contract's queue had run: its cards are written and worth
+    reporting, and "not run" would have been a lie about work that was done.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.refusals: dict[str, str] = {}
+
+
 def run_fleet(
     contracts: Sequence[Contract],
     *,
@@ -176,7 +195,7 @@ def run_fleet(
     progress: Progress = print,
     snapshot_dir: pathlib.Path = data_mod.SNAPSHOT_DIR,
     dataset_for: Callable[[Contract], data_mod.Dataset] | None = None,
-) -> dict[str, LoopResult | Exception]:
+) -> FleetResults:
     """Run the local loop for each contract in turn; never stop the fleet early.
 
     Sequential by design (see the module docstring). A contract whose data
@@ -188,9 +207,15 @@ def run_fleet(
     the contract, so the CLI can load, per contract, whatever is pinned.
     `dataset_for` is an injection seam for tests; left out, the loop builds
     each dataset from the snapshots.
+
+    A refused promotion is not a contract that could not run: the queue ran,
+    its cards are in the ledger, and only the test touch was refused. The loop
+    it carries goes into the map and the reason goes into `refusals`, so the
+    exception map stays what it says it is — the contracts whose dataset could
+    not be built, which is what the fleet's exit status is about.
     """
     work = _queue(queue)
-    results: dict[str, LoopResult | Exception] = {}
+    results = FleetResults()
     for i, contract in enumerate(contracts, 1):
         progress(f"fleet        [{contract.name}] {i}/{len(contracts)}")
         try:
@@ -204,18 +229,35 @@ def run_fleet(
                 dataset=dataset_for(contract) if dataset_for else None,
                 progress=lambda m: progress("  " + m),
             )
+        except orchestrator.PromotionRefused as exc:
+            progress(f"fleet        [{contract.name}] promotion refused: {exc}")
+            results.refusals[contract.name] = str(exc)
+            results[contract.name] = exc.result if exc.result is not None else exc
         except Exception as exc:  # recorded and reported, not swallowed
             progress(f"fleet        [{contract.name}] not run: {exc}")
             results[contract.name] = exc
     return results
 
 
-def format_results(results: Mapping[str, LoopResult | Exception]) -> str:
-    """One block per contract: the loop's own summary, or the error that stopped it."""
+def format_results(
+    results: Mapping[str, LoopResult | Exception],
+    refusals: Mapping[str, str] | None = None,
+) -> str:
+    """One block per contract: its loop's summary, or the error that stopped it.
+
+    A loop whose promotion was refused prints its summary and then the
+    refusal, because both happened. `refusals` defaults to the map
+    `run_fleet` returned alongside the results.
+    """
+    if refusals is None:
+        refusals = getattr(results, "refusals", {}) or {}
     blocks = []
     for name, result in results.items():
         if isinstance(result, Exception):
             blocks.append(f"{name}: not run ({type(result).__name__}: {result})")
         else:
-            blocks.append(result.format())
+            block = result.format()
+            if name in refusals:
+                block += f"\n  promotion refused: {refusals[name]}"
+            blocks.append(block)
     return "\n\n".join(blocks)

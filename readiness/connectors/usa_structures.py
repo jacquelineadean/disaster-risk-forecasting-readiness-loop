@@ -60,7 +60,9 @@ ATTRIBUTION = (
 )
 
 #: Records per statistics page. ArcGIS caps a page at the layer's
-#: `maxRecordCount` (commonly 1,000 or 2,000); asking for more is harmless.
+#: `maxRecordCount` (commonly 1,000 or 2,000); asking for more is harmless,
+#: because paging stops on the server's `exceededTransferLimit`, not on a
+#: page that came back as full as we asked for (see `_more`).
 PAGE = 2000
 
 #: The grouped fields, and the count field the query asks the server to name.
@@ -137,7 +139,10 @@ def parse_page(payload: Mapping) -> list[dict]:
 
     Every feature must carry the three group fields and the count; a layer
     whose vocabulary has changed is refused rather than silently emptied.
-    FIPS is zero-padded so the join to the Census universe is by value.
+    FIPS is zero-padded so the join to the Census universe is by value — and
+    refused outright above five digits: a ten-digit tract id is not a county
+    with a lost leading zero, it is a key finer than anything this repository
+    may hold, and `int()` would have quietly turned it into one.
     """
     features = payload.get("features")
     if not isinstance(features, list):
@@ -156,6 +161,12 @@ def parse_page(payload: Mapping) -> list[dict]:
         raw = str(attrs["FIPS"] or "").strip()
         if not raw.isdigit():
             raise ConnectorError(f"USA Structures FIPS is not numeric: {attrs['FIPS']!r}")
+        if not 1 <= len(raw) <= 5:
+            raise ConnectorError(
+                f"USA Structures FIPS {raw!r} is {len(raw)} digits; a county code is "
+                "five. Nothing finer than a county may enter this extract, so a "
+                "tract or block id is refused rather than truncated."
+            )
         rows.append(
             {
                 "fips": f"{int(raw):05d}",
@@ -167,9 +178,16 @@ def parse_page(payload: Mapping) -> list[dict]:
     return rows
 
 
-def _more(payload: Mapping, got: int, page: int) -> bool:
-    """Whether another page follows: a full page and the server says so."""
-    return got >= page and bool(payload.get("exceededTransferLimit", False))
+def _more(payload: Mapping, got: int) -> bool:
+    """Whether another page follows: the server says so, and this page moved.
+
+    The server's own `exceededTransferLimit` is the signal; the row count is
+    only a guard against an infinite loop on an empty page. A layer whose
+    `maxRecordCount` is below the page we asked for answers a short page *and*
+    sets the flag, so requiring a full page here would have stopped every such
+    pull after page one and pinned a fraction of a state as if it were all of it.
+    """
+    return got > 0 and bool(payload.get("exceededTransferLimit", False))
 
 
 def fetch_counts(
@@ -188,7 +206,7 @@ def fetch_counts(
         got = parse_page(payload)
         rows.extend(got)
         pages += 1
-        if not _more(payload, len(got), page):
+        if not _more(payload, len(got)):
             break
         offset += len(got)
     return sort_rows(rows), pages

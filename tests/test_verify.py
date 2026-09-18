@@ -43,7 +43,7 @@ CLEAN_AUDIT = {
 
 def synthetic_scorecard(
     contract, split, *, model="logistic+iso", version="1.0.0", bss=0.2, auc=0.8,
-    dev=0.01, columns=("precip_3m",), audit=CLEAN_AUDIT,
+    dev=0.01, columns=("precip_3m",), audit=CLEAN_AUDIT, train_digest="t" * 16,
 ) -> dict:
     """A scorecard dict in the card's shape, passing unless the numbers say otherwise."""
     bins = []
@@ -63,7 +63,7 @@ def synthetic_scorecard(
         "n_positive": 36, "base_rate": 0.2, "brier_score": 0.1,
         "brier_score_reference": 0.125, "brier_skill_score": bss, "auc": auc,
         "sharpness": 0.1, "reliability": 0.001, "resolution": 0.02, "uncertainty": 0.16,
-        "reliability_bins": bins, "panel_digest": "p" * 16, "train_digest": "t" * 16,
+        "reliability_bins": bins, "panel_digest": "p" * 16, "train_digest": train_digest,
         "feature_digest": "f" * 16 if columns else "", "feature_columns": list(columns),
         "feature_audit": audit if columns else None,
     }
@@ -691,12 +691,30 @@ class TestPhase2(unittest.TestCase):
         self.assertIn(">= 10 counties", check.detail)
 
     def test_requires_three_states(self):
-        one_state = {f: n for f, n in SPOT_COUNTIES["99"].items()}
-        one_state.update(SPOT_COUNTIES["98"])
-        counts_csv(self.counts_path, one_state)
+        # Ten in-band counties, so the count clause is met and the state
+        # clause is the only one left to fail: one assessor convention, or one
+        # state's layer vintage, cannot carry the exit on its own.
+        two_states = dict(SPOT_COUNTIES["99"])
+        two_states.update(SPOT_COUNTIES["98"])
+        two_states.update({"99009": 1300, "99011": 2300})  # ten from two states
+        counts_csv(self.counts_path, two_states)
+        pin_counts(self.snapshots, self.manifest, "99",
+                   {**SPOT_COUNTIES["99"], "99009": 1300, "99011": 2300})
+        self.manifest.save(force=True)
         check = self.by_name(self.phase2())["exposure spot-check"]
         self.assertFalse(check.passed)
-        self.assertIn("from 2 state(s)", check.detail)
+        self.assertIn("10/10 counties within the band from 2 state(s)", check.detail)
+        self.assertIn(">= 3 states", check.detail)
+
+    def test_the_spot_check_detail_leads_with_its_verdict(self):
+        # `Phase2Result.failures()` prints a failed check's first line, and
+        # every other check's first line says what it decided.
+        counts_csv(self.counts_path, self.every_county(), ratio=3.0)
+        result = self.phase2()
+        detail = self.by_name(result)["exposure spot-check"].detail
+        self.assertTrue(detail.startswith("spot-check -> NOT YET: 0/12 counties"), detail)
+        self.assertIn("ratio band", detail)
+        self.assertIn(detail.splitlines()[0], result.failures())
 
     def test_out_of_band_counties_do_not_count(self):
         # Ours over theirs outside [0.67, 1.5]: the row is printed and excluded.
@@ -734,6 +752,27 @@ class TestPhase2(unittest.TestCase):
         self.assertIn("3/4", check.detail)
         self.assertIn("hail-us: nothing issued for 2026-Q4", check.detail)
 
+    def test_the_issued_rule_is_four_of_the_passing_contracts(self):
+        # Five passing, four issued: the rule is "at least four of the passing
+        # contracts have an issued file for the same period", not "every one".
+        fifth = make_contract(name="heat-us", hazard="heat", scope={"states": []})
+        self.registry["heat-us"] = fifth
+        self.cards["heat-us"] = self.pass_phase1(fifth)
+        checks = self.by_name(self.phase2())
+        self.assertIn("5/5", checks["national contracts"].detail)
+        self.assertTrue(checks["issued"].passed, checks["issued"].detail)
+        self.assertIn("issued: 4/5 passing national contract(s) have an issued file "
+                      "for 2026-Q4", checks["issued"].detail)
+        self.assertIn("[..]  heat-us: nothing issued for 2026-Q4",
+                      checks["issued"].detail)
+        # Four passing, three issued: one short, and the check says so.
+        del self.registry["heat-us"], self.cards["heat-us"]
+        (self.issued_dir / "hail-us" / "2026-Q4.json").unlink()
+        check = self.by_name(self.phase2())["issued"]
+        self.assertFalse(check.passed)
+        self.assertIn("issued: 3/4 passing national contract(s) have an issued file "
+                      "for 2026-Q4; the exit needs >= 4", check.detail)
+
     def test_requires_the_same_period_for_every_contract(self):
         (self.issued_dir / "hail-us" / "2026-Q4.json").unlink()
         self.write_issued("hail-us", label="2027-Q1")
@@ -770,6 +809,30 @@ class TestPhase2(unittest.TestCase):
         check = self.by_name(self.phase2())["brief"]
         self.assertFalse(check.passed)
         self.assertIn("UNCITED", check.detail)
+
+    def test_the_brief_must_be_a_brief_for_that_county_and_period(self):
+        # The path is what someone chose to call the file; the document says
+        # what it is. A valid document of another kind, or a brief for another
+        # county or period, must not satisfy this criterion from its filename.
+        path = self.briefs_dir / "99001" / "2026-Q4.json"
+        original = json.loads(path.read_text())
+        for field, value, wanted in (
+            ("kind", "gap-report", "kind is 'gap-report'"),
+            ("county", "99003", "inputs name county '99003'"),
+            ("period", "2027-Q1", "inputs name period '2027-Q1'"),
+        ):
+            with self.subTest(field=field):
+                doctored = json.loads(json.dumps(original))
+                if field == "kind":
+                    doctored["kind"] = value
+                else:
+                    doctored["inputs"][field] = value
+                path.write_text(json.dumps(doctored))
+                check = self.by_name(self.phase2())["brief"]
+                self.assertFalse(check.passed)
+                self.assertIn(wanted, check.detail)
+        path.write_text(json.dumps(original))
+        self.assertTrue(self.by_name(self.phase2())["brief"].passed)
 
     def test_brief_must_not_name_anything_below_the_county(self):
         path = self.briefs_dir / "99001" / "2026-Q4.json"

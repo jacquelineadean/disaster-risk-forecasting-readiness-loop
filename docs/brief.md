@@ -84,20 +84,30 @@ that broke it:
 |---|---|
 | `UNCITED` | every sentence cites at least one claim, by marker or by id |
 | `UNKNOWN_CLAIM` | every citation names a claim the document lists |
-| `UNRESOLVED` | every claim's source resolves: the card exists in the ledger and has the cited field; the issued file exists and covers the cited period; the manifest key is in `snapshots/manifest.json`; the guidance id is in `plans/guidance.json`; a `computed` claim names the claims it was derived from |
+| `UNRESOLVED` | every claim's source resolves: the card exists in the ledger and has the cited field; the issued file exists and covers the cited period and county; the manifest key is in `snapshots/manifest.json`; the guidance id is in `plans/guidance.json`; a `computed` claim names claims the document carries, and its chain reaches something outside the document — two claims computed from each other are a number derived from nothing |
+| `VALUE_MISMATCH` | where a citation names one number — a card's `#scorecard.brier_skill_score`, an issued file's `#<period>.<county>` — the claim's value equals it: floats to a tolerance, strings and integers exactly. A number that is spelled consistently everywhere in the prose and is not the one in the artefact is caught here, and nowhere else |
 | `NUMBER_WITHOUT_CLAIM` | every numeric token in the prose equals the rendered value of a claim that sentence cites — the same digits, through the claim's format — so a number cannot be typed in, rounded differently or carried over from another sentence |
 | `FORBIDDEN_PHRASE` | no "will occur", "will hit", "will strike", "is predicted to hit", "warning" or "alert" anywhere, except the fixed disclaimer sentence with its `nws-ipaws` citation |
 
 Identifiers are not numbers: a card id (`exp-0007`), a model version
-(`1.2.0`), a period label (`2026-Q4`), a five-digit FIPS code, a bare year
-and the aliases listed in `plans/guidance.json` (`CPG 101`, `42 CFR 482.15`,
-`NFPA 110`) are exempt from the number rule. Everything else with a digit in
-it must be a cited value.
+(`1.2.0`), a period label (`2026-Q4`), a bare year and the aliases listed in
+`plans/guidance.json` (`CPG 101`, `42 CFR 482.15`, `NFPA 110`) are exempt
+from the number rule wherever they appear. A five-digit FIPS code is exempt
+only where the document names it: `validate(doc, resolver, guidance,
+identifiers=("40109",))`, and `readiness.brief.check` passes the county the
+brief's inputs name. So "Adair County, 40109" reads as a name in that
+county's brief, and "38000 structures" is a quantity that must be a claim,
+in that brief and every other document. Everything else with a digit in it
+must be a cited value.
 
 The validator is a smoke alarm for words. It proves that no number was
 invented and no sentence stands without a source; it does not prove that
 the source supports the sentence. That reading remains a person's job, and
-the brief says so in its footer.
+the brief says so in its footer, above the attribution block: "A citation
+here proves the number was not invented, not that the source supports the
+sentence; that reading remains a person's job." The sentence sits outside
+the `cite.Document`, because it cites nothing — it is a caveat about the
+apparatus, not a claim about the county.
 
 ## The issuance guards
 
@@ -117,13 +127,29 @@ has nowhere to put one.
   digest must equal the ones on the test card. A revised ERA5 extract, a
   changed county file or a different feature set changes the digest and the
   issue is refused rather than silently reissued from a fit nobody scored.
-- **The period must be issuable.** The target period's features are built
-  by `build_frame` under the same firewall the backtest used — the cutoff is
-  the period start minus the feature lag — and `audit_frame` runs on them.
-  If any series source's last pinned month is earlier than the cutoff, the
-  period cannot be issued yet, and the refusal names the month the data
-  would have to reach ("period cannot be issued yet: data through YYYY-MM
-  needed"). Issuance waits for the data; it never extrapolates.
+- **The frame must be clean.** The target period's features are built by
+  `build_frame` under the same firewall the backtest used — the cutoff is the
+  period start minus the feature lag — and `audit_frame` runs over the
+  training *and* target units together. An unclean audit (a source that fails
+  admission, a column that reads past its cutoff) refuses the issue and
+  nothing is written.
+- **The period must be issuable.** It must be after every year the contract
+  spans. Inside them there is nothing to forecast: a test-year "forecast"
+  would be a per-county reading of the holdout with no touch spent, and a
+  train- or validate-year one an in-sample fit published under the test
+  card's skill claim — so the refusal names the first issuable period, the
+  one after the contract's last year. It must also be a period the data
+  reaches: if any series source's last pinned month is earlier than the
+  cutoff, the refusal names the month the data would have to reach ("period
+  cannot be issued yet: data through YYYY-MM needed"). Issuance waits for the
+  data; it never extrapolates. A model with no feature sources has no series
+  to wait for, so its horizon is exactly one period: the first after the
+  contract's last year.
+
+An issued file is a published forecast, not a draft. `readiness issue`
+refuses to overwrite one, naming the file and when it was issued; `--reissue`
+replaces it on purpose, and the progress line then says which file was
+replaced and its previous `issued_at`. Every other guard still runs.
 
 What gets written, `issued/<contract>/<period>.json`, carries the contract
 and its digest, the model, version and kwargs, the test card it was

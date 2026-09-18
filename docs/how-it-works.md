@@ -392,9 +392,12 @@ readiness issue logistic -c tornado-us --period 2026-Q4 --features era5,terrain 
 ```
 
 Exit 2 with the reason on any refusal: no passing test card for that model
-and those arguments, a digest that does not match, or a period the pinned
-series do not reach yet ("period cannot be issued yet: data through YYYY-MM
-needed"). There is no parameter through which a label could arrive.
+and those arguments, a digest that does not match, an unclean feature audit,
+a period inside the years the contract spans (the refusal names the first
+issuable one) or a period the pinned series do not reach yet ("period cannot
+be issued yet: data through YYYY-MM needed"). An issued file that already
+exists is not overwritten; `--reissue` replaces it and says what it
+replaced. There is no parameter through which a label could arrive.
 
 **Brief.** One document per county from every issued file that covers it,
 validated by `readiness.cite` before it is written ([brief.md](brief.md)).
@@ -405,8 +408,9 @@ readiness brief --state OK --period 2026-Q4
 ```
 
 Exit 1, listing the violations, when a sentence is uncited, a citation does
-not resolve, a number is not a cited value or a forbidden phrase appears;
-nothing is written then.
+not resolve, a cited value is not the number the artefact holds
+(`VALUE_MISMATCH`), a number is not a cited value or a forbidden phrase
+appears; nothing is written then.
 
 **Verify.** The Phase 2 check takes no contract:
 
@@ -415,10 +419,13 @@ readiness verify --phase 2
 ```
 
 It exits 0 only if at least four national contracts meet the Phase 1
-criteria; the spot-check has ten in-band counties from three states; and
-each passing contract has an issued file for the same period, validated by
-that contract's first test card, from which one brief builds with zero
-violations and no sub-county key. `make phase2` chains the fleet, the
+criteria; the spot-check has ten in-band counties from three states; at
+least four of the passing contracts have an issued file for the same period,
+each validated by that contract's first test card (the rule is four of them,
+not all of them — a fifth contract that passes without an issued file does
+not fail the phase, and the check names it); and one brief for a
+spot-checked county builds from those files with zero violations and no
+sub-county key. `make phase2` chains the fleet, the
 backtests, the exposure snapshot and spot-check, an issue per passing
 contract, the briefs for the spot-checked states, and this check.
 

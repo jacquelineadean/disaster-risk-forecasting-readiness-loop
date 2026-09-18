@@ -444,14 +444,18 @@ in-band rows toward the ten the exit needs.
 
 Issuance and the brief (`readiness/issue.py`, `readiness/brief.py`,
 [`readiness/cite.py`](readiness/cite.py)) close the loop with a document.
-`issue` requires a passing, canary-clear test card for the model and its
-arguments, refits through `TrainingView` and refuses if the training or
-feature digest differs from the card, and refuses a period the pinned
-series do not reach; it has no parameter through which a label could
-arrive. `cite.validate` is the rule set every human-facing document passes:
-every sentence cites, every citation resolves, every number is a cited
-value, no warning language. The brief names nothing below the county and is
-written only when the list of violations is empty. The guidance documents a
+`issue` has four guards and no flag that skips one: a passing, canary-clear
+*test* card for exactly this model, version and arguments; the refit's
+training and feature digests equal to that card's; a clean feature audit of
+the target period's frame; and a period that is issuable — after every year
+the contract spans, and one the pinned series reach (a model with no feature
+sources may issue exactly the first period after the contract's last year).
+It has no parameter through which a label could arrive, and it will not
+overwrite an issued file without `--reissue`. `cite.validate` is the rule set
+every human-facing document passes: every sentence cites, every citation
+resolves, every cited value equals the number the artefact holds, every
+number is a cited value, no warning language. The brief names nothing below
+the county and is written only when the list of violations is empty. The guidance documents a
 sentence may cite are registered in [`plans/guidance.json`](plans/guidance.json).
 
 ---
@@ -504,8 +508,8 @@ readiness snapshot          pull and pin the data, print the manifest   [-c NAME
 readiness panel             build the labelled panel, print coverage   [-c NAME]
 readiness features          load the feature sources, print admission verdicts and the audit  [-c NAME] [--features era5,terrain,nri,climada]
 readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features ...] [--param k=v]*
-readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1] [--features ...] [--promote] [--backend local|claude]
-readiness fleet             the loop over many contracts in turn, or their status  [--national] [--queue phase2] [--features ...] [--promote] [--status]
+readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1|phase2] [--features ...] [--promote] [--backend local|claude]
+readiness fleet             the loop over many contracts in turn, or their status  [--national | --contracts A,B] [--queue baseline|phase1|phase2] [--features ...] [--promote] [--status]
 readiness promote MODEL     the one atomic test touch: spend the budget and write the test card  [-c NAME] --spend-test-touch
 readiness backtest          write experiments/<name>/backtest.html from committed files only  [-c NAME] [-o PATH]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
@@ -513,7 +517,7 @@ readiness ledger            show and verify the experiment ledger  [-c NAME] [--
 readiness exposure snapshot pull and pin USA Structures county counts per state  [--states A,B | --all-states] [--layer-url URL]
 readiness exposure show     print CountyExposure rows from the pinned extracts  [--county FIPS | --state XX]
 readiness exposure spot-check  ours / assessor for every row of exposure_expected/assessor_counts.csv; exit 1 below ten in-band counties from three states  [--counts PATH]
-readiness issue MODEL       refit the promoted model, write issued/<contract>/<period>.json; exit 2 on a refusal  -c NAME --period YYYY-Qn|YYYY-Mnn|YYYY [--features ...] [--param k=v]*
+readiness issue MODEL       refit the promoted model, write issued/<contract>/<period>.json; exit 2 on a refusal  -c NAME --period YYYY-Qn|YYYY-Mnn|YYYY [--features ...] [--param k=v]* [--reissue]
 readiness brief             one cited, validated brief per county; exit 1 listing the violations  (--county FIPS | --state XX) --period YYYY-Qn [--out DIR]
 readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2] [--replay] [--bless]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
@@ -574,7 +578,7 @@ readiness/
   fleet.py           the loop over every registered contract in turn, and --status from the ledgers
   issue.py           refit the promoted model, write the issued probabilities per county; parse_period/period_label
   brief.py           the county brief: one cited paragraph per hazard, validated before it is written
-  cite.py            the citation rules every human-facing document passes (five violation codes)
+  cite.py            the citation rules every human-facing document passes (six violation codes)
   exposure/          USA Structures county counts: occupancy.py (classes), table.py (county-only), spotcheck.py
   connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server,
                      gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources),
@@ -588,6 +592,10 @@ readiness/
   cli.py             the `readiness` command
 contracts/           registered contracts, one JSON file each; three examples and six national ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
+issued/              what `readiness issue` writes: issued/<contract>/<period>.json, one probability per
+                     county; outputs, not sources, so only issued/README.md is committed
+briefs/              what `readiness brief` writes: briefs/<fips>/<period>.html and .json, the page and
+                     the validated document it was rendered from; only briefs/README.md is committed
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
 exposure_expected/   assessor_counts.csv, the person-collected half of the exposure spot-check (ships header-only)

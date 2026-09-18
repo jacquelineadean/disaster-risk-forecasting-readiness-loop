@@ -465,7 +465,10 @@ def cmd_fleet(args) -> int:
     `--status` alone reads the ledgers and prints the table without running
     anything. Without it the fleet runs first; a contract whose data could
     not be built is reported and the exit status is 1, but the other
-    contracts still run and still appear in the table.
+    contracts still run and still appear in the table. A contract whose
+    promotion was refused ran: its summary is printed with the refusal under
+    it, and the exit status is 0, because the fleet did what it could — the
+    gate on a phase is `readiness verify`, not this command's exit code.
     """
     from readiness import fleet
 
@@ -834,7 +837,9 @@ def cmd_issue(args) -> int:
 
     There is no flag here through which a label could arrive, and none through
     which a guard could be skipped: the ledger's test card, the digests, the
-    audit and the data's reach decide whether anything is written.
+    audit and the data's reach decide whether anything is written. `--reissue`
+    is not such a flag either — it replaces a published file on purpose, and
+    every guard still runs.
     """
     from readiness import issue as issue_mod
 
@@ -854,6 +859,7 @@ def cmd_issue(args) -> int:
     try:
         issued = issue_mod.issue(
             c, ds, args.model, kwargs, (year, period),
+            reissue=args.reissue,
             progress=_p if not args.quiet else (lambda _m: None),
         )
     except issue_mod.IssueRefused as exc:
@@ -1303,6 +1309,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("model")
     sp.add_argument("--period", required=True, metavar="YYYY-Qn|YYYY-Mnn|YYYY",
                     help="the period to issue, in the contract's own shape")
+    sp.add_argument("--reissue", action="store_true",
+                    help="replace an issued file that already exists for this period")
     sp.set_defaults(func=cmd_issue)
 
     sp = sub.add_parser(

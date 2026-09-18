@@ -22,9 +22,15 @@ GUIDANCE_IDS = {
 }
 
 GUIDANCE = cite.load_guidance()
+#: What the artefacts hold, as a resolver sees them: an issued file is its
+#: periods and the probability each carries per county, a card is its record.
+#: Where a reference lands on a number, the claim citing it is checked
+#: against that number.
 KNOWN = {
     "ledger": {"exp-0007": {"scorecard": {"bss": 0.23}}, "exp-0003": {}},
-    "issued": {"issued/flood-zz/2026-Q4.json": {"2026-Q4"}},
+    "issued": {
+        "issued/flood-zz/2026-Q4.json": {"2026-Q4": {"48201": 0.12, "48203": 0.34}}
+    },
     "manifest": {"noaa/storm_events_2024"},
     "facility": {"power": {"fuel_hours": 72}},
     "scenario": {"96h-isolation": {"outage_hours", "water_loss_hour"}},
@@ -32,7 +38,7 @@ KNOWN = {
 RESOLVER = DictResolver(KNOWN, GUIDANCE)
 
 PROB = Claim("p", "chance of at least one damaging event", 0.12,
-             Source("issued", "issued/flood-zz/2026-Q4.json#2026-Q4"), "{:.0%}")
+             Source("issued", "issued/flood-zz/2026-Q4.json#2026-Q4.48201"), "{:.0%}")
 BSS = Claim("bss", "Brier skill score on the test split", 0.23,
             Source("ledger", "exp-0007#scorecard.bss"), "{:+.2f}")
 COUNT = Claim("n", "structures in the county", 12345,
@@ -103,6 +109,64 @@ class TestRules(unittest.TestCase):
         self.assertEqual(codes(found), [cite.UNRESOLVED])
         self.assertIn("iso-99999", found[0].detail)
 
+    def test_a_value_the_source_does_not_hold_is_a_mismatch(self):
+        # The citation resolves and the prose spells the value it claims: only
+        # the artefact disagrees, which is the failure a rule that checked
+        # resolvability alone could not see.
+        fake = Claim("bss", "Brier skill score on the test split", 0.99,
+                     Source("ledger", "exp-0007#scorecard.bss"), "{:+.2f}")
+        doc = document("The model scored BSS +0.99 [c:bss].", claims=(fake,))
+        found = cite.validate(doc, RESOLVER)
+        self.assertEqual(codes(found), [cite.VALUE_MISMATCH])
+        self.assertIsNone(found[0].sentence_index)
+        self.assertIn("0.99", found[0].detail)
+        self.assertIn("0.23", found[0].detail)
+        # The county's own probability, from the issued file, likewise.
+        wrong = Claim("p", "chance", 0.34,
+                      Source("issued", "issued/flood-zz/2026-Q4.json#2026-Q4.48201"),
+                      "{:.0%}")
+        doc = document("A 34% chance [c:p].", claims=(wrong,))
+        self.assertEqual(codes(cite.validate(doc, RESOLVER)), [cite.VALUE_MISMATCH])
+        # A word where the source holds a number is not "unchecked" either.
+        worded = Claim("bss", "skill", "high",
+                       Source("ledger", "exp-0007#scorecard.bss"))
+        doc = document("Skill was high [c:bss].", claims=(worded,))
+        self.assertEqual(codes(cite.validate(doc, RESOLVER)), [cite.VALUE_MISMATCH])
+
+    def test_a_value_within_float_tolerance_passes_and_a_leafless_ref_is_unchecked(self):
+        close = Claim("bss", "Brier skill score", 0.23 + 4e-17,
+                      Source("ledger", "exp-0007#scorecard.bss"), "{:+.2f}")
+        doc = document("The model scored BSS +0.23 [c:bss].", claims=(close,))
+        self.assertEqual(cite.validate(doc, RESOLVER), [])
+        # A reference to a whole card, a manifest key or a period covered by an
+        # issued file lands on no single number: resolvable, unchecked.
+        for claim in (
+            Claim("x", "the card", 1234, Source("ledger", "exp-0007")),
+            Claim("x", "the extract", 1234,
+                  Source("manifest", "noaa/storm_events_2024")),
+            Claim("x", "the period", 1234,
+                  Source("issued", "issued/flood-zz/2026-Q4.json#2026-Q4")),
+        ):
+            with self.subTest(ref=claim.source.ref):
+                doc = document("It holds 1234 [c:x].", claims=(claim,))
+                self.assertEqual(cite.validate(doc, RESOLVER), [])
+
+    def test_computed_claims_must_bottom_out(self):
+        # Two claims computed from each other resolve against the document
+        # forever and against nothing at all.
+        first = Claim("a", "hours until the first break", 1, Source("computed", "b"))
+        second = Claim("b", "hours of margin", 2, Source("computed", "a"))
+        doc = document("Power fails after 1 hour [c:a], with 2 to spare [c:b].",
+                       claims=(first, second))
+        found = cite.validate(doc, RESOLVER)
+        self.assertEqual(codes(found), [cite.UNRESOLVED, cite.UNRESOLVED])
+        self.assertIn("nothing outside the document under them", found[0].detail)
+        # A chain of any length is fine once it reaches a source.
+        near = Claim("near", "hours", 72, Source("computed", "fuel"))
+        far = Claim("far", "the same hours", 72, Source("computed", "near"))
+        doc = document("Power lasts 72 hours [c:far].", claims=(FUEL, near, far))
+        self.assertEqual(cite.validate(doc, RESOLVER), [])
+
     def test_computed_claim_names_its_inputs(self):
         first = Claim("first", "first break, hours", 72,
                       Source("computed", "fuel+s96"))
@@ -133,7 +197,6 @@ class TestRules(unittest.TestCase):
             "semver": "Issued by climatology@1.2.0 [c:g2].",
             "card id": "Recorded on card exp-0007 [c:g2].",
             "period": "For 2026-Q4 and 2027-M1 [c:g2].",
-            "fips": "County 48201 [c:g2].",
             "year": "Tested on 2021 through 2025 [c:g2].",
         }
         for name, text in cases.items():
@@ -143,6 +206,30 @@ class TestRules(unittest.TestCase):
     def test_five_digits_with_a_separator_are_a_number(self):
         doc = document("County 48,201 [c:g2].")
         self.assertEqual(codes(cite.validate(doc, RESOLVER)), [cite.NUMBER_WITHOUT_CLAIM])
+
+    def test_a_bare_five_digit_number_is_exempt_only_where_the_document_says_so(self):
+        # "48201" is a county code in a document about that county, and a
+        # number everywhere else. The document says which: a brief passes its
+        # own FIPS, and the Phase 3 gap report passes nothing.
+        doc = document("County 48201 [c:g2].")
+        self.assertEqual(codes(cite.validate(doc, RESOLVER)), [cite.NUMBER_WITHOUT_CLAIM])
+        self.assertEqual(cite.validate(doc, RESOLVER, identifiers=("48201",)), [])
+        # Another county's code is not this document's subject.
+        self.assertEqual(
+            codes(cite.validate(doc, RESOLVER, identifiers=("40109",))),
+            [cite.NUMBER_WITHOUT_CLAIM],
+        )
+        # And a five-digit quantity is a quantity, exemption or not.
+        counted = document("The county holds 38000 structures [c:g2].")
+        self.assertEqual(
+            codes(cite.validate(counted, RESOLVER, identifiers=("48201",))),
+            [cite.NUMBER_WITHOUT_CLAIM],
+        )
+        self.assertEqual(cite.numbers_in("County 48201 holds 38000"),
+                         ["48201", "38000"])
+        self.assertEqual(
+            cite.numbers_in("County 48201 holds 38000", (), ["48201"]), ["38000"]
+        )
 
     def test_scenario_constant_is_a_claim(self):
         doc = document("Grid power is lost for the 96-hour scenario [c:g2].")

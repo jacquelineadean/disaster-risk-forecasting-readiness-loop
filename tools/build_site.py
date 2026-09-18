@@ -67,6 +67,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from readiness import __version__, cite, config, contracts as contracts_mod  # noqa: E402
+from readiness import brief as brief_mod  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness import fleet as fleet_mod  # noqa: E402
 from readiness.agent import orchestrator  # noqa: E402
@@ -505,23 +506,35 @@ def _ledger_refs(registry: dict[str, contracts_mod.Contract]) -> dict[str, dict]
     return refs
 
 
-def _issued_periods(path: pathlib.Path) -> set[str]:
-    """The period labels an issued file covers: its stem, and what it says inside."""
-    labels = {path.stem}
+def _issued_periods(path: pathlib.Path) -> dict[str, dict]:
+    """What an issued file covers: its periods, and the probability per county.
+
+    The same shape `readiness.brief.issued_refs` builds, so a brief written by
+    the command and re-validated here resolves `#<period>.<county>` to the same
+    number both times.
+    """
+    periods: dict[str, dict] = {path.stem: {}}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return labels
+        return periods
+    if not isinstance(raw, dict):
+        return periods
+    probabilities = raw.get("probabilities")
+    per_county = (
+        {str(k): v for k, v in probabilities.items()}
+        if isinstance(probabilities, dict) else {}
+    )
     for key in ("period", "period_label"):
-        value = raw.get(key) if isinstance(raw, dict) else None
+        value = raw.get(key)
         if isinstance(value, str):
-            labels.add(value)
-    return labels
+            periods[value] = dict(per_county)
+    return periods
 
 
-def _issued_refs(issued_dir: pathlib.Path) -> dict[str, set[str]]:
+def _issued_refs(issued_dir: pathlib.Path) -> dict[str, dict[str, dict]]:
     """Issued files by every spelling of their path a brief may use."""
-    refs: dict[str, set[str]] = {}
+    refs: dict[str, dict[str, dict]] = {}
     for path in sorted(issued_dir.glob("*/*.json")):
         periods = _issued_periods(path)
         rel = path.relative_to(issued_dir).as_posix()
@@ -556,17 +569,42 @@ def _cited_contracts(doc: cite.Document) -> list[str]:
     return names
 
 
-def brief_view(path: pathlib.Path, doc: cite.Document, out: pathlib.Path) -> dict:
-    """One listed brief. The HTML is the file `readiness brief` wrote, copied as
-    is; it is rendered here only when the JSON came alone."""
+def _brief_contracts(
+    doc: cite.Document, registry: dict[str, contracts_mod.Contract]
+) -> list[contracts_mod.Contract]:
+    """The registered contracts this brief cites, for its attribution lines."""
+    return [registry[name] for name in _cited_contracts(doc) if name in registry]
+
+
+def _exposure_joined(doc: cite.Document) -> bool:
+    """Whether the brief reports structure counts from a pinned extract."""
+    return any(
+        claim.id.startswith("exposure-") and claim.source.kind == "manifest"
+        for claim in doc.claims
+    )
+
+
+def brief_view(
+    path: pathlib.Path,
+    doc: cite.Document,
+    out: pathlib.Path,
+    registry: dict[str, contracts_mod.Contract],
+) -> dict:
+    """One listed brief, with its page rendered from the document that validated.
+
+    Not the committed sibling `.html`: that file is bytes nobody re-checked,
+    and the whole point of re-validating here is that what is published is
+    the document the rules were run against. The page is `brief.render_html`,
+    the same renderer `readiness brief` uses, so it carries the caveat and the
+    attribution the command writes.
+    """
     fips, period = path.parent.name, path.stem
     rel = f"briefs/{fips}/{period}.html"
-    src = path.with_suffix(".html")
     (out / "briefs" / fips).mkdir(parents=True, exist_ok=True)
-    if src.exists():
-        shutil.copyfile(src, out / rel)
-    else:
-        (out / rel).write_text(cite.render_html(doc), encoding="utf-8")
+    lines = brief_mod.attribution(
+        _brief_contracts(doc, registry), exposure_joined=_exposure_joined(doc)
+    )
+    (out / rel).write_text(brief_mod.render_html(doc, lines), encoding="utf-8")
     return {
         "fips": fips,
         "period": period,
@@ -585,9 +623,11 @@ def build_briefs(
     """Every brief under briefs/ that validates today, and only those.
 
     `readiness brief` already refused to write a brief with a violation; the
-    site re-runs `cite.validate` against the repository as it stands, so a
-    brief whose card or issued file has since gone is dropped from the list
-    rather than shown with a citation that no longer resolves.
+    site re-runs `readiness.brief.check` — the citation rules *and* the
+    county-only rule, the same call the command made — against the repository
+    as it stands, so a brief whose card or issued file has since gone, or
+    whose JSON has grown a sub-county key since it was written, is dropped
+    from the list rather than shown.
     """
     resolver = resolver or brief_resolver(registry)
     listed: list[dict] = []
@@ -597,12 +637,12 @@ def build_briefs(
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log(f"briefs.json: {data_mod.relative(path)}: unreadable ({exc}), skipped")
             continue
-        violations = cite.validate(doc, resolver)
+        violations = brief_mod.check(doc, resolver)
         if violations:
             log(f"briefs.json: {data_mod.relative(path)}: {len(violations)} violation(s), "
                 f"first: {violations[0]}; not listed")
             continue
-        listed.append(brief_view(path, doc, out))
+        listed.append(brief_view(path, doc, out, registry))
     dump(out / "briefs.json", listed)
     log(f"briefs.json: {len(listed)} validated brief(s)")
 

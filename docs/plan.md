@@ -319,11 +319,14 @@ backtest.
 spot-validated against county assessor counts in ten sampled counties.
 
 - Six national contracts registered as data; `readiness fleet` runs them
-  sequentially through the Phase 1 queue; per-contract ledgers and budgets.
+  sequentially through the Phase 1 queue (delivered as the Phase 2 queue,
+  §3.1); per-contract ledgers and budgets.
 - Exposure: FEMA/ORNL USA Structures counts per county and occupancy class,
   pinned per state; `ExposureTable` has no sub-county field by construction.
   Spot-check against a committed `assessor_counts.csv` with ratio bounds; rows
-  outside the bounds do not count toward the ten.
+  outside the bounds do not count toward the ten, and the ten must come from
+  at least three states, so one state's assessor convention cannot carry the
+  criterion.
 - Issuance: `readiness issue` refits the validated model through TrainingView,
   requires the training and feature digests to match the test card, builds the
   target period's features under the same firewall, and writes a probability
@@ -357,28 +360,35 @@ no skips):
   construction, and the assessor spot-check over a header-only committed CSV
   with a declared ratio band; rows outside the band never count toward the
   ten.
-- `readiness/cite.py`: the five citation rules every human-facing document
-  passes (uncited sentence, unknown claim, unresolved source, number without
-  a claim, forbidden phrasing), with identifier exemptions and the fixed
-  alerts disclaimer; `plans/guidance.json` registers the guidance documents.
+- `readiness/cite.py`: the six citation rules every human-facing document
+  passes (uncited sentence, unknown claim, unresolved source, a cited value
+  the artefact does not hold, number without a claim, forbidden phrasing),
+  with identifier exemptions the document names and the fixed alerts
+  disclaimer; `plans/guidance.json` registers the guidance documents.
 - `readiness issue`: refits the validated model through the training view,
   requires the training and feature digests to match the test card, builds
   and audits the target period's frame under the firewall, refuses a period
-  the series data does not yet reach, and has no parameter through which a
-  label could arrive (a test flips every holdout label and gets a
-  byte-identical file).
+  inside the years the contract spans and one the series data does not yet
+  reach, refuses to overwrite an issued file without `--reissue`, and has no
+  parameter through which a label could arrive (a test flips every holdout
+  label and gets a byte-identical file).
 - `readiness brief`: one paragraph per contract covering the county, every
   number a cited claim, exposure stated or its absence stated (never
   substituted), the alerts disclaimer citing its guidance entry, written only
   when validation is clean; never below the county, never "would touch".
 - `readiness verify --phase 2`, the briefs page on the site, `docs/brief.md`.
 
-Two decisions taken while building: the "issued" check accepts the period
-label the most passing contracts issued (quarterly and monthly contracts
-cannot share one label) and requires at least four of them to name their
-first test card; the missing-exposure sentence cites a computed claim
-derived from the paragraph's own probability claim, because an absence has
-no artefact to point at.
+Four decisions taken while building: the fleet's default queue is the Phase
+2 queue, not Phase 1's, so `readiness fleet` and `make loop-all` run the four
+national candidates without being told to; the exposure spot-check needs its
+ten in-band counties to come from at least three states, so one state's
+assessor convention or layer vintage cannot carry the criterion on its own;
+the "issued" check accepts the period label the most passing contracts
+issued (quarterly and monthly contracts cannot share one label) and requires
+at least four of them to name their first test card; and the
+missing-exposure sentence cites a computed claim derived from the
+paragraph's own probability claim, because an absence has no artefact to
+point at.
 
 What Phase 2 still owes is the data run: which four hazards pass nationally,
 the USA Structures layer's vocabulary confirmed on the first pull, and the

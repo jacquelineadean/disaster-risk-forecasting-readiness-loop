@@ -163,8 +163,14 @@ def summary(checks: Sequence[SpotCheck]) -> SpotCheckSummary:
 
 
 def format(checks: Sequence[SpotCheck]) -> str:  # noqa: A001 - the module's verb
-    """Every ratio, then the summary: nothing is hidden behind the verdict."""
+    """The verdict, then the band, then every ratio: nothing is hidden behind it.
+
+    The verdict leads because this text is a check's detail, and `verify`
+    prints a failed check's *first* line as the failure — every other check
+    there says what it decided on its line one, and this one used to say
+    "exposure spot-check, ratio band [...]", which decides nothing.
+    """
     low, high = config.EXPOSURE_SPOTCHECK_RATIO
     head = f"exposure spot-check, ratio band [{low}, {high}] (ours / assessor)"
     body = [c.format() for c in checks] or ["  (no assessor counts committed)"]
-    return "\n".join([head, *body, summary(checks).format()])
+    return "\n".join([summary(checks).format(), head, *body])

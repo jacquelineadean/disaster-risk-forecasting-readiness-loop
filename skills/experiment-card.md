@@ -99,8 +99,15 @@ the `scorecard`, split by which one already carries the matching shape:
 - **`wall_clock_s`** — how long the fit and the screen took, in seconds, to
   three decimals. Provenance, not a criterion: the annex budgets a national
   card in minutes, and the only way to know what a fleet queue costs is to
-  write down what each card cost. Nothing hashes or judges it, and a card
-  with a different `wall_clock_s` is the same experiment.
+  write down what each card cost. Like every other `data_snapshot` field it
+  *is* inside `card_hash` — the card is sealed whole, so the cost is
+  tamper-evident too — but no check compares it and no reproducibility
+  fingerprint contains it (`verify.REPRO_FIELDS` is scorecard fields only).
+  What follows is that two runs of the same queue on the same data no longer
+  produce identical card hashes, because they did not take the same number
+  of milliseconds. The ledgers committed here were written before this field
+  existed and are unaffected; `tests/test_repro_guard.py` still re-checks
+  every one of their hashes.
 
 The scorecard also carries the frame's `feature_digest`, and the canary's
 fifth finding records whether the model's declared digest matched it (that

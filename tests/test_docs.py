@@ -13,7 +13,8 @@ import re
 import unittest
 from pathlib import Path
 
-from readiness import cite, contracts
+from readiness import cite, contracts, verify
+from readiness.harness.ledger import ExperimentCard
 from readiness.cli import build_parser
 from readiness.engine.features import FEATURE_SETS
 from readiness.harness.features import STATIC, TRANSFORMS
@@ -24,6 +25,8 @@ HOW_IT_WORKS = REPO_ROOT / "docs" / "how-it-works.md"
 FEATURES_DOC = REPO_ROOT / "docs" / "features.md"
 BACKTEST_DOC = REPO_ROOT / "docs" / "backtest.md"
 BRIEF_DOC = REPO_ROOT / "docs" / "brief.md"
+PLAN = REPO_ROOT / "docs" / "plan.md"
+CARD_SKILL = REPO_ROOT / "skills" / "experiment-card.md"
 
 # INTEGRATOR: the Phase 1 command surface. The subcommands and flags below are
 # implemented by the CLI cluster; the docs name them now. Until that parser is
@@ -57,6 +60,8 @@ PHASE2_FLAGS = (
     ("brief --county --period --out",
      ["brief", "--county", "40001", "--period", "2026-Q4", "--out", "d"]),
     ("brief --state", ["brief", "--state", "OK", "--period", "2026-Q4"]),
+    ("issue --reissue",
+     ["issue", "m", "-c", "x", "--period", "2026-Q4", "--reissue"]),
 )
 #: Paths the README map names that arrive with the CLI clusters.
 PENDING_PATHS = {"readiness/backtest.py"}
@@ -169,8 +174,12 @@ class TestReadmeCommandsExist(unittest.TestCase):
         self.assertRegex(block, r"(?m)^readiness issue MODEL .*--period YYYY-Qn\|YYYY-Mnn\|YYYY")
         self.assertRegex(block, r"(?m)^readiness brief .*--county FIPS \| --state XX")
         self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2")
+        # The queues the loop takes, and the fleet's own contract filter.
+        self.assertRegex(block, r"(?m)^readiness loop .*--queue baseline\|phase1\|phase2")
+        self.assertRegex(block, r"(?m)^readiness fleet .*--contracts A,B")
         issue = re.search(r"(?m)^readiness issue MODEL .*$", block).group(0)
         self.assertNotIn("label", issue)  # no parameter through which one could arrive
+        self.assertIn("--reissue", issue)  # the only way to replace a published file
 
     def test_phase2_subcommands_are_in_the_parser(self):
         missing = PHASE2_COMMANDS - parser_commands()
@@ -277,13 +286,13 @@ class TestBriefDocStatesTheRules(unittest.TestCase):
     refusal can find the rule without reading readiness/cite.py."""
 
     CODES = (cite.UNCITED, cite.UNKNOWN_CLAIM, cite.UNRESOLVED,
-             cite.NUMBER_WITHOUT_CLAIM, cite.FORBIDDEN_PHRASE)
+             cite.VALUE_MISMATCH, cite.NUMBER_WITHOUT_CLAIM, cite.FORBIDDEN_PHRASE)
 
-    def test_names_all_five_violation_codes(self):
+    def test_names_every_violation_code(self):
         text = BRIEF_DOC.read_text()
         for code in self.CODES:
             self.assertIn(f"`{code}`", text, f"docs/brief.md does not name {code}")
-        # The five above are the module's whole vocabulary.
+        # The codes above are the module's whole vocabulary.
         constants = {n for n, v in vars(cite).items()
                      if n.isupper() and isinstance(v, str) and v == n}
         self.assertEqual(constants, set(self.CODES))
@@ -307,6 +316,31 @@ class TestBriefDocStatesTheRules(unittest.TestCase):
                         "readiness issue", "readiness brief --county",
                         "readiness brief --state", "readiness verify --phase 2"):
             self.assertIn(command, text, f"how-it-works.md lacks {command!r}")
+
+    def test_how_it_works_states_the_issued_criterion_as_the_code_checks_it(self):
+        # `verify._issued_check` needs MIN_NATIONAL_PASSES of the passing
+        # contracts to have issued the same period, not all of them.
+        text = HOW_IT_WORKS.read_text()
+        self.assertIn(
+            "at least four of the passing contracts have an issued file for the "
+            "same period", text.replace("\n", " ").replace("  ", " "),
+        )
+        self.assertEqual(verify.MIN_NATIONAL_PASSES, 4)
+
+    def test_the_readme_states_the_four_issuance_guards(self):
+        text = README.read_text().replace("\n", " ")
+        self.assertIn("`issue` has four guards", text)
+        for guard in ("test* card", "training and feature digests",
+                      "clean feature audit", "after every year the contract spans"):
+            self.assertIn(guard, text, f"README does not state the guard {guard!r}")
+
+    def test_the_plan_states_what_the_fleet_runs_and_the_spot_check_rule(self):
+        text = PLAN.read_text().replace("\n", " ")
+        while "  " in text:
+            text = text.replace("  ", " ")
+        self.assertIn("(delivered as the Phase 2 queue, §3.1)", text)
+        self.assertIn("the ten must come from at least three states", text)
+        self.assertIn("the fleet's default queue is the Phase 2 queue", text)
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):
@@ -340,3 +374,30 @@ class TestQuotedDigestsMatchTheCode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExperimentCardSkillMatchesTheCard(unittest.TestCase):
+    """The card runbook's claims about `wall_clock_s`, checked against the card.
+
+    A runbook that says a field is not hashed, when it is, teaches a reader to
+    expect two runs of one queue to produce the same hashes. They do not.
+    """
+
+    def _card(self, seconds: float) -> ExperimentCard:
+        return ExperimentCard(
+            experiment_id="exp-0001", timestamp="2026-01-01T00:00:00+00:00",
+            model="logistic", version="1.0.0", split="validate", changed="",
+            hypothesis="", outcome="", scorecard={}, verdict={},
+            data_snapshot={"wall_clock_s": seconds},
+        )
+
+    def test_wall_clock_is_inside_the_card_hash_and_in_no_fingerprint(self):
+        self.assertNotEqual(
+            self._card(1.0).compute_hash(), self._card(2.0).compute_hash()
+        )
+        self.assertNotIn("wall_clock_s", verify.REPRO_FIELDS)
+        text = " ".join(CARD_SKILL.read_text().split())
+        self.assertIn("inside `card_hash`", text)
+        self.assertIn("no reproducibility fingerprint contains it", text)
+        self.assertNotIn("Nothing hashes or judges it", text)
+        self.assertNotIn("is the same experiment", text)

@@ -632,6 +632,26 @@ class TestPhase1Loop(FeatureCase):
         self.assertEqual(json.loads(self.where.touch_budget.read_text()),
                          {"logistic+iso@1.0.0": 1})
 
+    def test_the_fleet_reports_a_refused_promotion_and_still_exits_zero(self):
+        # `loop --promote` exits 2 on a refusal because one contract is all it
+        # was asked about. The fleet was asked about a set, and a spent touch
+        # in one of them is not a fleet that failed to run: the loop's summary
+        # and the refusal are printed, and the exit status stays 0. `verify`
+        # is the gate on the phase, not this.
+        code, out = self.run_cli("fleet", "--contracts", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("promoted to test  logistic+iso@1.0.0 -> PASS", out)
+        code, out = self.run_cli("fleet", "--contracts", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("not run", out)
+        self.assertIn("ran ", out)  # the loop that did run, first
+        self.assertIn("promotion refused: refusing to promote", out)
+        self.assertIn("already holds a test card", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+
     def test_baseline_queue_is_the_default_and_promotes_nothing(self):
         code, out = self.run_cli("loop", "-c", "flood-zz", "--promote", "--quiet")
         self.assertEqual(code, 0, out)
@@ -1055,6 +1075,36 @@ class TestIssueCommand(Phase2Case):
         code, out = self.issue(period="2026-M04")
         self.assertEqual(code, 2)
         self.assertIn("is not a quarterly label", out)
+
+    def test_issue_refuses_to_overwrite_and_reissue_replaces(self):
+        self.promote()
+        self.assertEqual(self.issue()[0], 0)
+        path = self.issued_dir / "flood-zz" / "2026-Q1.json"
+        first = issue_mod.Issued.read(path)
+        code, out = self.issue()
+        self.assertEqual(code, 2, out)
+        self.assertIn("already exists", out)
+        self.assertIn("--reissue", out)
+        self.assertEqual(issue_mod.Issued.read(path).to_dict(), first.to_dict())
+        code, out = self.run_cli(
+            "issue", CANDIDATE.model, "-c", "flood-zz", "--period", "2026-Q1",
+            "--reissue",
+            *(f for pair in sorted(CANDIDATE.kwargs.items())
+              for f in ("--param", f"{pair[0]}="
+                        + (",".join(map(str, pair[1])) if isinstance(pair[1], list)
+                           else str(pair[1])))),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("reissued", out)
+        self.assertIn(f"replacing the file issued at {first.issued_at}", out)
+
+    def test_issue_refuses_a_year_the_contract_spans(self):
+        self.promote()
+        code, out = self.issue(period="2024-Q1")
+        self.assertEqual(code, 2, out)
+        self.assertIn("2024 is a test year", out)
+        self.assertIn("The first issuable period is 2026-Q1", out)
+        self.assertFalse(self.issued_dir.exists())
 
     def test_issue_has_no_flag_through_which_labels_could_arrive(self):
         parser = cli.build_parser()

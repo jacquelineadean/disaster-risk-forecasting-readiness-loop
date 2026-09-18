@@ -12,13 +12,15 @@ PHASE ?= 0
 # load every connector whose pinned data is present.
 FEATURES ?=
 FFLAG = $(if $(FEATURES),--features $(FEATURES),)
-# The model `make score` and `make promote` run: the one `make promote` spends
-# the test touch on.
+# The model `make score`, `make promote` and `make issue` run: the one
+# `make promote` spends the test touch on, and the one `make issue` refits.
 MODEL ?= logistic
 # Constructor arguments for that model, space-separated `key=value` pairs, each
 # expanded into a --param flag: PARAMS='iters=800 feature_sets=era5-antecedent,terrain'.
 # A value may hold commas, which is why the separator here is a space. Left
-# empty, `promote` adopts the arguments of the validate card that passed.
+# empty, `promote` adopts the arguments of the validate card that passed;
+# `issue` does not adopt anything, so it needs the card's arguments spelled
+# out here (`make issue-all` reads them off each contract's card for you).
 PARAMS ?=
 PFLAG = $(foreach p,$(PARAMS),--param $(p))
 # Which split `make score` fits against. Never test: `promote` is the only way
@@ -110,7 +112,7 @@ spot-check:      ## our county totals over the committed assessor counts; exit 1
 
 issue:           ## refit MODEL and write issued/<contract>/<PERIOD>.json (MODEL=, PERIOD=, CONTRACT=)
 	@test -n "$(PERIOD)" || { echo "issue: pass PERIOD=YYYY-Qn (or YYYY-Mnn, or YYYY)"; exit 2; }
-	$(PY) -m readiness.cli issue $(MODEL) $(CFLAG) --period $(PERIOD) $(FFLAG)
+	$(PY) -m readiness.cli issue $(MODEL) $(CFLAG) --period $(PERIOD) $(FFLAG) $(PFLAG)
 
 brief:           ## write briefs/<fips>/<PERIOD>.html and .json (COUNTY= or STATE=, PERIOD=)
 	@test -n "$(PERIOD)" || { echo "brief: pass PERIOD=YYYY-Qn"; exit 2; }
@@ -134,7 +136,10 @@ brief-all:       ## a brief per county of every state the assessor counts sample
 
 phase2:          ## the fleet, the exposure join, issuance, the briefs, verify --phase 2 (PERIOD=)
 	@test -n "$(PERIOD)" || { echo "phase2: pass PERIOD=YYYY-Qn, the period to issue"; exit 2; }
-	$(MAKE) loop-all
+	# The fleet reports a contract whose data could not be built and carries
+	# on; `verify --phase 2` at the end is the gate, so a missing extract in
+	# one contract must not stop the other five from being issued and briefed.
+	-$(MAKE) loop-all
 	$(MAKE) backtest-all
 	$(PY) -m readiness.cli exposure snapshot --all-states
 	# The spot-check and the issue/brief refusals below report rather than stop:

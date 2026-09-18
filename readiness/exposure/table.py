@@ -50,6 +50,35 @@ class CountyExposure:
         }
 
 
+def _state_of(source_key: str) -> str | None:
+    """The two-digit state an extract's manifest key names, if it names one."""
+    prefix = usa_structures.KEY_PREFIX
+    tail = source_key[len(prefix):] if source_key.startswith(prefix) else ""
+    return tail if tail.isdigit() and len(tail) == 2 else None
+
+
+def _check_key(fips: str, source_key: str, state: str | None) -> str:
+    """Every county key is five digits of the extract's own state, or nothing is built.
+
+    The county is the finest key that exists here, so a key that is not a
+    county — a tract, a block, a truncated code — must fail loudly at the
+    door rather than travel into an exposure row, a brief or an issued file.
+    A key from another state means two extracts were mixed, which would put a
+    county's counts under a state that never pulled them.
+    """
+    if not (fips.isdigit() and len(fips) == 5):
+        raise ExposureError(
+            f"{source_key}: county key {fips!r} is not five digits; the county is the "
+            "finest key this repository holds"
+        )
+    if state is not None and not fips.startswith(state):
+        raise ExposureError(
+            f"{source_key}: county {fips} is not in state {state}, which this extract "
+            "covers"
+        )
+    return fips
+
+
 def _county(fips: str, counts: Mapping[str, int], vintage: int, key: str) -> CountyExposure:
     by_class = {name: int(counts.get(name, 0)) for name in class_names()}
     total = sum(by_class.values())
@@ -65,17 +94,25 @@ class ExposureTable:
 
     @classmethod
     def from_counts(
-        cls, rows: Iterable[Mapping], vintage: int, source_key: str
+        cls,
+        rows: Iterable[Mapping],
+        vintage: int,
+        source_key: str,
+        *,
+        state: str | None = None,
     ) -> "ExposureTable":
         """Roll extract rows `{fips, occ_cls, prim_occ, n}` up to counties.
 
         Every row lands in exactly one class; what the mapping does not know
-        goes to `unclassified` and still counts toward the total.
+        goes to `unclassified` and still counts toward the total. Every key is
+        checked to be five digits of the state `source_key` names, so nothing
+        finer than a county and nothing from another state can be rolled up.
         """
+        state = state if state is not None else _state_of(source_key)
         counts: dict[str, dict[str, int]] = {}
         for row in rows:
             name = classify(row.get("occ_cls"), row.get("prim_occ"))
-            per = counts.setdefault(str(row["fips"]), {})
+            per = counts.setdefault(_check_key(str(row["fips"]), source_key, state), {})
             per[name] = per.get(name, 0) + int(row["n"])
         return cls(
             {fips: _county(fips, per, vintage, source_key) for fips, per in sorted(counts.items())}
@@ -89,7 +126,9 @@ class ExposureTable:
 
         An extract with no manifest record, or whose bytes do not match it,
         is refused: the manifest is what pins an experiment, and a table
-        built from unpinned bytes could not be reproduced by anyone else.
+        built from unpinned bytes could not be reproduced by anyone else. So
+        is an extract holding a key that is not one of its own state's
+        five-digit counties.
         """
         table = cls()
         for state in states:
@@ -100,7 +139,9 @@ class ExposureTable:
             path = usa_structures.extract_path(snapshot_dir, state)
             data = pinned_bytes(path, record, allow_fetch=False)
             rows = usa_structures.read_extract(data, str(path))
-            part = cls.from_counts(rows, usa_structures.vintage_of(record), key)
+            part = cls.from_counts(
+                rows, usa_structures.vintage_of(record), key, state=_state_of(key)
+            )
             table.merge(part)
         return table
 

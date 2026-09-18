@@ -9,9 +9,10 @@ warning channel, and county aggregates only.
 So the prose here is not written by a language model at all. It is four
 sentence templates per contract, filled from values that each carry a source
 `readiness.cite` can resolve — an issued file, a ledger card, a manifest key,
-a guidance document — and the whole document goes through `cite.validate`
-before anything is written. A violation means nothing is written, and the
-command prints the rule that was broken.
+a guidance document — and the whole document goes through `check` (the
+`cite` rules plus the county-only rule) before anything is written. A
+violation means nothing is written, and the command prints the rule that was
+broken.
 
 What a brief never contains, by construction rather than by review:
 
@@ -30,7 +31,15 @@ What a brief never contains, by construction rather than by review:
 the implementation had to be more explicit than that page: every number
 carries its own marker (a sentence with two numbers cites two claims, because
 a claim has one value), and the tolerance sentence cites a `computed` claim
-derived from the contract's tolerance as the card applied it.
+derived from the tolerance the card's own verdict recorded.
+
+What the sentences lean on is checked, not assumed. The card `validated_by`
+names must be a passing, canary-clear *test* card under the same contract
+digest the issued file carries, or nothing is built (`_check_card`); the
+probability cites the county inside the issued file, so `cite` compares the
+number printed with the number stored; and the page's footer carries the
+caveat the rules cannot enforce — a citation proves the number was not
+invented, not that the source supports the sentence.
 """
 
 from __future__ import annotations
@@ -138,11 +147,53 @@ def _probability_claim(issued: Issued, fips: str) -> cite.Claim:
             f"{issued.period_label}, from the issued file"
         ),
         value=value,
+        # The reference names the county, so the validator resolves it to this
+        # county's probability and checks the number the sentence prints
+        # against the number the file holds.
         source=cite.Source(
-            "issued", issue_mod.issued_ref(issued.contract, issued.period_label)
+            "issued", issue_mod.issued_ref(issued.contract, issued.period_label, fips)
         ),
         fmt="{:.0%}",
     )
+
+
+#: `harness.contract.evaluate` writes the tolerance it applied into the
+#: reliability check's detail: "... deviates 0.0010, tolerance 0.0500 (2/10
+#: bins populated)". That number is the one the card was judged by.
+_TOLERANCE_IN_DETAIL = re.compile(r"tolerance\s+([0-9]*\.?[0-9]+)")
+
+
+def card_tolerance(card: ExperimentCard, contract: Contract) -> float:
+    """The reliability tolerance the card's own verdict applied.
+
+    Read from the verdict rather than from the contract in hand, because the
+    sentence is about what was done to this card. The contract is the fallback
+    only — and only ever reached after `build` has established that the card,
+    the issued file and the contract carry the same digest, which makes the two
+    the same number by construction.
+    """
+    for check in (card.verdict or {}).get("checks", ()):
+        if check.get("name") != "reliability":
+            continue
+        found = _TOLERANCE_IN_DETAIL.search(str(check.get("detail", "")))
+        if found:
+            return float(found.group(1))
+    return contract.reliability_tolerance_pp
+
+
+def card_test_years(card: ExperimentCard, contract: Contract) -> tuple[int, ...]:
+    """The test years the card was scored over, from the card where it says so.
+
+    No committed card records the split's years (`data_snapshot["years"]` is
+    the panel's span, which is not the same thing), so the usual answer is the
+    contract's — sound here, and only here, because `build` has already
+    required the card's digest to equal the contract's.
+    """
+    for source in (card.scorecard or {}, card.data_snapshot or {}):
+        years = source.get("test_years") or source.get("split_years")
+        if isinstance(years, (list, tuple)) and years:
+            return tuple(int(y) for y in years)
+    return tuple(contract.test_years)
 
 
 def _backtest_claims(
@@ -152,7 +203,7 @@ def _backtest_claims(
     bss = (card.scorecard or {}).get("brier_skill_score")
     if bss is None:
         raise BriefError(f"test card {card.experiment_id} carries no brier skill score")
-    tolerance = contract.reliability_tolerance_pp
+    tolerance = card_tolerance(card, contract)
     return [
         cite.Claim(
             id=f"{name}-bss",
@@ -180,7 +231,10 @@ def _backtest_claims(
             text="the same tolerance in percentage points",
             value=tolerance * 100,
             source=cite.Source("computed", f"{name}-tolerance"),
-            fmt="{:.0f}",
+            # `{:g}` because a tolerance is not always a whole number of
+            # points: 0.075 is 7.5 points, and "8 points" would be a claim
+            # about a contract nobody registered.
+            fmt="{:g}",
         ),
     ]
 
@@ -236,8 +290,8 @@ def _disclaimer_claim() -> cite.Claim:
     )
 
 
-def _test_years(contract: Contract) -> str:
-    years = contract.test_years
+def _test_years(card: ExperimentCard, contract: Contract) -> str:
+    years = card_test_years(card, contract)
     return f"{years[0]}-{years[-1]}" if len(years) > 1 else f"{years[0]}"
 
 
@@ -267,7 +321,7 @@ def _paragraph(
         cite.Sentence.from_text(
             f"This comes from {issued.model}@{issued.version}, which scored a Brier "
             f"skill score of {cite.render_value(bss)} on the untouched "
-            f"{_test_years(contract)} with every populated reliability bin within "
+            f"{_test_years(card, contract)} with every populated reliability bin within "
             f"{cite.render_value(tolerance_pp)} points "
             f"[c:{bss.id}][c:{tolerance_pp.id}]."
         ),
@@ -300,6 +354,54 @@ def _exposure_sentence(county: str, row: CountyExposure | None) -> cite.Sentence
         f"{cite.render_value(schools)} schools and {cite.render_value(hospitals)} "
         f"hospitals [c:{schools.id}][c:{hospitals.id}]."
     )
+
+
+def _check_card(issued: Issued, card: ExperimentCard, contract: Contract) -> None:
+    """The card the brief quotes must be the one the sentence claims it is.
+
+    The sentence says a model "scored a Brier skill score of X on the
+    untouched YYYY-YYYY": that is a claim about a passing, canary-clear *test*
+    card, judged under the very criteria the issued file names. Without these
+    the brief would happily quote a validate card's number, or a card rejected
+    by the canary, or one judged against criteria that have since changed —
+    and the tolerance and the test years it then reads off the contract would
+    be another contract's. The wording is `issue.validating_card`'s, because
+    it is the same refusal at the other end of the pipeline.
+    """
+    name = issued.contract
+    if card.split != "test":
+        raise BriefError(
+            f"refusing to write {name}: card {card.experiment_id} was scored on "
+            f"{card.split}, not test. The sentence is about the untouched years, so "
+            "only a test card can support it."
+        )
+    if card.canary and card.canary.get("rejected"):
+        tripped = ", ".join(
+            f["check"] for f in card.canary.get("findings", ()) if f.get("tripped")
+        )
+        raise BriefError(
+            f"refusing to write {name}: its test card {card.experiment_id} was "
+            f"rejected by the leakage canary (tripped: {tripped}). A rejected model's "
+            "probabilities are not believed, so they are not published."
+        )
+    if not (card.verdict or {}).get("passed"):
+        failed = ", ".join(
+            c["name"] for c in (card.verdict or {}).get("checks", ()) if not c["passed"]
+        )
+        raise BriefError(
+            f"refusing to write {name}: its test card {card.experiment_id} did not "
+            f"pass contract {name} (failed: {failed or 'unknown'}). The published "
+            "record is the result; a brief is written from a model that cleared it."
+        )
+    digest = contract.digest()
+    if not (card.contract_digest == issued.contract_digest == digest):
+        raise BriefError(
+            f"refusing to write {name}: the card is under contract "
+            f"sha256:{card.contract_digest}, the issued file under "
+            f"sha256:{issued.contract_digest}, and the contract in hand is "
+            f"sha256:{digest}. The skill, the tolerance and the test years the "
+            "brief quotes are only one contract's if all three agree."
+        )
 
 
 def build(
@@ -346,6 +448,7 @@ def build(
                 f"issued file for {one.contract} was validated by {one.validated_by}, "
                 f"but the card supplied is {card.experiment_id}"
             )
+        _check_card(one, card, contract)
         para, para_claims = _paragraph(one, contract, card, fips, county, exposure)
         sentences.extend(para)
         claims.extend(para_claims)
@@ -416,19 +519,27 @@ def ledger_refs(
     return refs
 
 
-def issued_refs(issued_dir: pathlib.Path | None = None) -> dict[str, set[str]]:
-    """Issued files by every spelling of their path a brief may use."""
+def issued_refs(issued_dir: pathlib.Path | None = None) -> dict[str, dict[str, dict]]:
+    """Issued files by every spelling of their path a brief may use.
+
+    Each one resolves to the periods it covers and, under a period, the
+    probability it carries per county — so `#2026-Q4` says the file covers the
+    period and `#2026-Q4.40001` says what it forecast there, and a brief that
+    quotes a number is checked against it.
+    """
     root = issue_mod.issued_root(issued_dir)
-    refs: dict[str, set[str]] = {}
+    refs: dict[str, dict[str, dict]] = {}
     for path in sorted(root.glob("*/*.json")) if root.exists() else []:
-        labels = {path.stem}
+        periods: dict[str, dict] = {path.stem: {}}
         try:
-            labels.add(issue_mod.Issued.read(path).period_label)
+            issued = issue_mod.Issued.read(path)
         except (OSError, ValueError, KeyError, TypeError):
-            pass
+            issued = None
+        if issued is not None:
+            periods = {path.stem: {}, issued.period_label: dict(issued.probabilities)}
         rel = path.relative_to(root).as_posix()
         for spelling in (f"issued/{rel}", rel, rel[: -len(".json")]):
-            refs[spelling] = labels
+            refs[spelling] = periods
     return refs
 
 
@@ -468,13 +579,31 @@ def sub_county_keys(payload: object, path: str = "") -> list[str]:
     return found
 
 
+def county_identifiers(doc: cite.Document) -> tuple[str, ...]:
+    """The strings this document may spell out although they look like numbers.
+
+    One: the FIPS of the county the brief is about, which its inputs name. A
+    brief titled "County 40109" is naming its subject, not quoting a count;
+    any other five-digit number in it is a number and must be a claim.
+    """
+    fips = doc.inputs.get("county")
+    return (fips,) if fips else ()
+
+
 def check(
     doc: cite.Document,
     resolve: cite.Resolver,
     guidance: Mapping[str, Mapping] | None = None,
+    *,
+    identifiers: Sequence[str] | None = None,
 ) -> list[cite.Violation]:
-    """Every citation rule, then the county-only rule, as one list of violations."""
-    found = cite.validate(doc, resolve, guidance)
+    """Every citation rule, then the county-only rule, as one list of violations.
+
+    `identifiers` defaults to the document's own county, so a brief's FIPS is
+    exempt from the number rule and nothing else is.
+    """
+    exempt = county_identifiers(doc) if identifiers is None else tuple(identifiers)
+    found = cite.validate(doc, resolve, guidance, identifiers=exempt)
     for key in sub_county_keys(cite.to_dict(doc)):
         found.append(
             cite.Violation(
@@ -522,28 +651,39 @@ def attribution(
         "[if zone events expanded]": any(c.zone_policy == "expand" for c in contracts),
         "[if NRI shown]": False,
         "[if exposure joined]": exposure_joined,
+        # Footprints are an ODbL layer this repository never downloads; the
+        # exposure join is USA Structures county counts and nothing else. It
+        # is a tag of its own in the licence file, so what keeps the line out
+        # is this map — not a search for the words in it.
+        "[if footprints joined]": False,
         "[if risk engine used]": False,
     }
     out = []
     for entry in entries:
         tag = re.match(r"\[if [^\]]+\]", entry)
-        rest = entry[tag.end():].strip() if tag else entry
         if tag is not None and not applies.get(tag.group(0), False):
             continue
-        # Footprints are an ODbL layer this repository never downloads; the
-        # exposure join is USA Structures county counts and nothing else.
-        if "Building footprints" in rest:
-            continue
-        out.append(rest)
+        out.append(entry[tag.end():].strip() if tag else entry)
     return out
 
 
+#: What the citation rules do not prove, said on the page that carries them.
+#: Outside the `cite.Document` on purpose: it cites nothing, because it is
+#: not a claim about this county — it is a caveat about the whole apparatus,
+#: and a sentence inside the document with no citation is a violation.
+READING_CAVEAT = (
+    "A citation here proves the number was not invented, not that the source "
+    "supports the sentence; that reading remains a person's job."
+)
+
+
 def render_html(doc: cite.Document, lines: Sequence[str]) -> str:
-    """The validator's page, with the licence block appended under the footer."""
+    """The validator's page, with the caveat and the licence block under the footer."""
     page = cite.render_html(doc)
     block = "\n".join(html.escape(line) for line in lines)
     footer = (
-        '<footer class="attribution"><p>Attribution and licences</p>'
+        f'<footer class="attribution"><p>{html.escape(READING_CAVEAT)}</p>'
+        "<p>Attribution and licences</p>"
         f"<pre>{block}</pre></footer>\n"
     )
     return page.replace("</body></html>", footer + "</body></html>")
@@ -604,11 +744,15 @@ __all__ = [
     "BriefError",
     "BriefRefused",
     "KIND",
+    "READING_CAVEAT",
     "SUB_COUNTY_KEYS",
     "attribution",
     "briefs_root",
     "build",
+    "card_test_years",
+    "card_tolerance",
     "check",
+    "county_identifiers",
     "county_label",
     "issued_refs",
     "ledger_refs",

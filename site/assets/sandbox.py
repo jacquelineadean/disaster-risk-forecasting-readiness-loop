@@ -65,10 +65,11 @@ def _fail(exc: BaseException) -> str:
 #: Commands the browser refuses outright, and why. `promote` is the one
 #: atomic test touch and writes a card the repository is meant to commit; a
 #: touch spent in a tab is a spent budget with no record, so it is refused
-#: here rather than budgeted — and so is `loop --promote`, which ends in the
-#: same touch by another route (see `_promotes`). `backtest` reads only
-#: committed files, but its report is the published record of that touch and
-#: belongs beside the ledger in git, not in a browser's memory.
+#: here rather than budgeted — and so are `loop --promote` and
+#: `fleet --promote`, which end in the same touch by another route (see
+#: `_promotes`). `backtest` reads only committed files, but its report is the
+#: published record of that touch and belongs beside the ledger in git, not in
+#: a browser's memory.
 NOT_IN_BROWSER = {
     "snapshot": "a network connection",
     "mcp": "a process",
@@ -103,17 +104,25 @@ def _refused_command(argv: list[str]) -> str | None:
             return key
     return None
 
-def _promotes(argv: list[str]) -> bool:
-    """True when this `loop` would spend the test touch.
+
+#: The subcommands that take `--promote` and end in the one test touch.
+PROMOTING_COMMANDS = ("loop", "fleet")
+
+
+def _promotes(argv: list[str]) -> str | None:
+    """The command spelling to refuse when this would spend the test touch.
 
     `loop --promote` ends in the very same atomic touch as `promote` — one
     test card, one line in the committed budget file — so the browser has to
     refuse it for the same reason, and has to do so for every spelling
-    argparse would accept, abbreviations included.
+    argparse would accept, abbreviations included. `fleet --promote` is the
+    same touch once per contract, which is worse, not better.
     """
-    return argv[:1] == ["loop"] and any(
+    if argv[:1] and argv[0] in PROMOTING_COMMANDS and any(
         len(arg) > 2 and "--promote".startswith(arg) for arg in argv
-    )
+    ):
+        return f"{argv[0]} --promote"
+    return None
 
 
 def _requested_features(argv: list[str]) -> list[str]:
@@ -164,8 +173,9 @@ def run_cli(argv_json: str) -> int:
     refused = _refused_command(argv)
     if refused:
         return _refuse(refused)
-    if _promotes(argv):
-        return _refuse("loop --promote", NOT_IN_BROWSER["promote"])
+    promoting = _promotes(argv)
+    if promoting:
+        return _refuse(promoting, NOT_IN_BROWSER["promote"])
     if argv and argv[0] == "features":
         return _features_in_browser(argv)
     try:

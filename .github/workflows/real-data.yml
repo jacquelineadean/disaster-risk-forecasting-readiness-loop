@@ -83,6 +83,7 @@ jobs:
       # own; `verify --phase 2` at the end is the gate.
       - name: Run the fleet over every national contract
         if: ${{ inputs.phase == '2' }}
+        continue-on-error: true
         run: >
           python -m readiness.cli fleet --national --queue phase2 --promote
           --features "${{ inputs.features }}"

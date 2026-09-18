@@ -1301,6 +1301,34 @@ class FakeLayer:
         return json.dumps(self.pages[index]).encode()
 
 
+class CappedLayer:
+    """A layer whose `maxRecordCount` is below the page the caller asks for.
+
+    ArcGIS answers `resultRecordCount=5` with two rows and sets
+    `exceededTransferLimit`, because the cap is the layer's, not the caller's.
+    A client that waits for a page as full as it asked for stops after the
+    first page and pins a fraction of a state as if it were the whole of it.
+    """
+
+    def __init__(self, groups: list[dict], cap: int = 2, metadata: dict | None = METADATA):
+        self.groups = list(groups)
+        self.cap = cap
+        self.metadata = metadata
+        self.urls: list[str] = []
+
+    def get(self, url: str) -> bytes:
+        self.urls.append(url)
+        if "/query?" not in url:
+            return json.dumps(self.metadata).encode()
+        params = dict(pair.split("=", 1) for pair in url.split("?", 1)[1].split("&"))
+        offset = int(params["resultOffset"])
+        page = self.groups[offset:offset + min(int(params["resultRecordCount"]), self.cap)]
+        return json.dumps({
+            "features": page,
+            "exceededTransferLimit": offset + len(page) < len(self.groups),
+        }).encode()
+
+
 class TestUsaStructures(unittest.TestCase):
     sample = (DATA / "usa_structures_sample.jsonl").read_bytes()
 
@@ -1326,6 +1354,7 @@ class TestUsaStructures(unittest.TestCase):
         self.assertIn("groupByFieldsForStatistics=FIPS%2COCC_CLS%2CPRIM_OCC", query)
         self.assertIn("resultOffset=40", query)
         self.assertIn("resultRecordCount=20", query)
+        self.assertIn("returnGeometry=false", query)  # counts only; no footprint
         self.assertIn("f=json", query)
         stats = "%5B%7B%22statisticType%22%3A%22count%22%2C%22onStatisticField%22%3A%22OBJECTID"
         self.assertIn(stats, query)
@@ -1353,6 +1382,41 @@ class TestUsaStructures(unittest.TestCase):
         self.assertEqual(rec.source, usa_structures.SOURCE)
         self.assertIn("2 page(s)", rec.notes)
         self.assertIn("2 counties, 5 groups", rec.notes)
+
+    def test_a_layer_cap_below_the_requested_page_still_pages_to_the_end(self):
+        # Seven groups, a layer that will not serve more than two at a time,
+        # and a caller asking for five: every page is short and every page but
+        # the last says more follow, so only the server's signal may stop it.
+        groups = [
+            _feature(f"9900{i}", "Residential", "Single Family Dwelling", i)
+            for i in range(1, 8)
+        ]
+        rows, pages = usa_structures.fetch_counts(
+            "99", session=CappedLayer(groups, cap=2), page=5
+        )
+        self.assertEqual([r["fips"] for r in rows], [f"9900{i}" for i in range(1, 8)])
+        self.assertEqual(pages, 4)  # 2 + 2 + 2 + 1
+        paths = self.snapshot(session=CappedLayer(groups, cap=2), page=5)
+        self.assertEqual(len(paths[0].read_text().splitlines()), 7)
+        notes = self.manifest.records["fema/usa_structures/99"].notes
+        self.assertIn("4 page(s)", notes)
+        self.assertIn("7 counties, 7 groups", notes)
+
+    def test_a_fips_finer_than_a_county_is_refused_not_truncated(self):
+        # `int()` on a ten-digit tract id drops its leading zero and yields
+        # something that is neither a tract nor a county. Nothing below the
+        # county may enter the extract, so the page is refused instead.
+        for raw in ("0100102010", "01001020100", "010010201001"):
+            with self.subTest(fips=raw), self.assertRaises(ConnectorError) as ctx:
+                usa_structures.parse_page(
+                    {"features": [_feature(raw, "Residential", "Dwelling", 3)]}
+                )
+            self.assertIn("county code is", str(ctx.exception))
+        # A short numeric code is still zero-padded to its county.
+        rows = usa_structures.parse_page(
+            {"features": [_feature(1001, "Residential", "Dwelling", 3)]}
+        )
+        self.assertEqual(rows[0]["fips"], "01001")
 
     def test_vintage_recorded(self):
         self.snapshot()

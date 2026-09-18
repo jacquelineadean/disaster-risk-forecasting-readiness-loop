@@ -12,7 +12,8 @@ and a period, and the only labels that exist anywhere in the call are the
 *training* labels the model has always been entitled to, handed over by the
 same `TrainingView` the backtest used.
 
-The guards, in the order they run:
+The guards. The calendar half of (4) runs first, because it needs nothing
+but the contract and refusing early costs no fit:
 
 1. **A validated model.** The contract's ledger must hold a passing,
    canary-clear *test* card for exactly this model, version and arguments
@@ -24,10 +25,20 @@ The guards, in the order they run:
 3. **The frame must be clean.** The target period's rows are built by
    `build_frame` under the same firewall (cutoff = period start - lag) and
    `audit_frame` runs over the training *and* target units together.
-4. **The period must be issuable.** If a series source's last pinned month is
-   earlier than the cutoff, the period cannot be issued yet and the refusal
-   names the month the data would have to reach. Issuance waits for the data;
-   it never extrapolates.
+4. **The period must be issuable.** It must be after every year the contract
+   spans: inside them, a test-year "forecast" is a per-county reading of the
+   holdout that spends no touch, and a train- or validate-year one is an
+   in-sample fit published under the test card's skill claim, so the refusal
+   names the first issuable period instead. And it must be a period the data
+   reaches: if a series source's last pinned month is earlier than the
+   cutoff, the refusal names the month the data would have to reach. Issuance
+   waits for the data; it never extrapolates. A model with no feature sources
+   has no series to wait for, so its horizon is exactly the first period
+   after the contract's last year.
+
+An issued file is a published forecast, so a second issue of a period that
+already has one is refused unless `reissue` asks for it; then the progress
+line names the file it replaced and when that one had been issued.
 
 Only then does the model predict, through a `PredictionRequest` that carries
 units and feature rows and — like every other request in this repository — no
@@ -85,14 +96,17 @@ def issued_path(
     return issued_root(issued_dir) / contract_name / f"{label}.json"
 
 
-def issued_ref(contract_name: str, label: str) -> str:
-    """How a brief cites an issued file: the path, then the period it covers.
+def issued_ref(contract_name: str, label: str, fips: str = "") -> str:
+    """How a brief cites an issued file: the path, the period, and the county.
 
     The spelling `tools/build_site.py`'s `brief_resolver` accepts, so a brief
     written here still validates when the website rebuilds it from the
-    committed tree.
+    committed tree. With a county, the reference names the one number the
+    sentence quotes — `#2026-Q4.40001` — so a validator can compare the two
+    rather than only confirm that the file exists.
     """
-    return f"issued/{contract_name}/{label}.json#{label}"
+    where = f"issued/{contract_name}/{label}.json#{label}"
+    return f"{where}.{fips}" if fips else where
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +412,96 @@ def _check_digests(model, card: ExperimentCard, contract: Contract) -> None:
         )
 
 
+def _existing(
+    contract: Contract, label: str, issued_dir: pathlib.Path | None, reissue: bool
+) -> "Issued | None":
+    """The issued file already on disk for this period, or a refusal to overwrite it.
+
+    An issued file is a published forecast: something may cite it, a brief may
+    quote it, and someone may have read it. Replacing one silently would leave
+    two different numbers under one name with nothing to say which was seen.
+    So a second issue of the same period is refused unless it is asked for,
+    and when it is asked for the progress line says what was replaced.
+    """
+    path = issued_path(contract.name, label, issued_dir)
+    if not path.exists():
+        return None
+    try:
+        prior: Issued | None = Issued.read(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        prior = None
+    if not reissue:
+        was = (
+            f"issued {prior.issued_at} from {prior.model}@{prior.version} "
+            f"({prior.validated_by})"
+            if prior is not None
+            else "unreadable"
+        )
+        raise IssueRefused(
+            f"refusing to issue {contract.name} {label}: "
+            f"{data_mod.relative(path)} already exists ({was}). An issued file is a "
+            "published forecast, not a draft; pass --reissue to replace it on purpose."
+        )
+    return prior
+
+
+def first_issuable(contract: Contract) -> tuple[int, int]:
+    """The earliest period this contract may issue: the one after its last year."""
+    return contract.splits.test.years[-1] + 1, 1
+
+
+def _check_spanned(contract: Contract, year: int, label: str) -> None:
+    """Refuse a period inside the years the contract spans, whichever split.
+
+    A test-year "forecast" is a per-county reading of the holdout that spends
+    no touch and leaves no card, and a train- or validate-year one is an
+    in-sample fit published under the test card's skill claim. Neither is a
+    forecast, and the issued file carries no word that would say so. So the
+    bound is the contract's own calendar: everything it scored is behind us.
+    """
+    last = contract.splits.test.years[-1]
+    if year > last:
+        return
+    where = next(
+        (s.name for s in contract.splits if year in s.years), "the contract's years"
+    )
+    raise IssueRefused(
+        f"refusing to issue {contract.name} {label}: {year} is a {where} year of this "
+        f"contract (train {contract.train_years[0]}-{contract.train_years[-1]}, "
+        f"validate {contract.validate_years[0]}-{contract.validate_years[-1]}, "
+        f"test {contract.test_years[0]}-{contract.test_years[-1]}). Issuing it would "
+        "publish an in-sample fit under the test card's skill claim, and for a test "
+        f"year it would be a per-county reading of the holdout with no touch spent. "
+        f"The first issuable period is "
+        f"{period_label(*first_issuable(contract), contract)}."
+    )
+
+
+def _check_reach_without_features(
+    contract: Contract, year: int, index: int, label: str
+) -> None:
+    """How far a model with no feature sources may forecast: one period.
+
+    A featured model's horizon is its data's: `_series_reach` refuses a period
+    whose feature window the pinned series do not reach. A featureless model
+    has no series to ask, so the same rule is applied to the only calendar it
+    has — the contract's — and it may issue the first period after the last
+    contract year and no further. Without this, `issue MODEL --period 2999-Q1`
+    is a probability for a period nothing in the repository knows anything
+    about.
+    """
+    limit = first_issuable(contract)
+    if (year, index) <= limit:
+        return
+    raise IssueRefused(
+        f"refusing to issue {contract.name} {label}: this model reads no feature "
+        "series, so there is no pinned data whose reach could justify a period "
+        f"further out. {period_label(*limit, contract)} is the first period after "
+        f"the contract's last year ({contract.test_years[-1]}), and that one period "
+        "is the whole horizon of a model with no sources."
+    )
+
+
 def _series_reach(
     specs: Sequence[FeatureSpec],
     sources: Mapping,
@@ -442,15 +546,19 @@ def issue(
     *,
     experiments_dir: pathlib.Path | None = None,
     issued_dir: pathlib.Path | None = None,
+    reissue: bool = False,
     progress: Progress = lambda _m: None,
 ) -> Issued:
     """Refit the validated model and forecast one period, or refuse and say why.
 
     `period` is a `(year, period)` pair or a label the contract's shape
-    accepts. Nothing here reads a holdout label: the panel's training split is
-    handed to the model through `TrainingView` exactly as the backtest did,
-    and the target units are bare `(region, year, period)` triples for a period
-    that has not happened.
+    accepts, and it must be after every year the contract spans. Nothing here
+    reads a holdout label: the panel's training split is handed to the model
+    through `TrainingView` exactly as the backtest did, and the target units
+    are bare `(region, year, period)` triples for a period that has not
+    happened. `reissue` is the only way to replace an issued file that is
+    already on disk, and it is not a way to skip a guard: everything else runs
+    exactly as it does for a first issue.
     """
     if isinstance(period, str):
         year, index = parse_period(period, contract)
@@ -463,6 +571,8 @@ def issue(
             f"{dataset.contract.name} (sha256:{dataset.contract.digest()}), not for "
             f"this contract (sha256:{contract.digest()})."
         )
+    _check_spanned(contract, year, label)
+    replaced = _existing(contract, label, issued_dir, reissue)
 
     where = data_mod.paths(contract, experiments_dir=experiments_dir)
     model = build_model(model_name, **dict(kwargs or {}))
@@ -505,7 +615,13 @@ def issue(
                 f"refusing to issue {contract.name} {label}: the feature audit is not "
                 f"clean.\n{audit.format()}"
             )
+    # How far ahead this model may forecast is a question about every model,
+    # not only the ones with features: a featured model's answer is its
+    # series' reach, and a featureless one's is the contract's own calendar.
+    if specs:
         _series_reach(specs, dataset.sources, units, ppy)
+    else:
+        _check_reach_without_features(contract, year, index, label)
 
     request = PredictionRequest(tuple(units), "issue", target_frame)
     probs = list(model.predict(request))
@@ -538,7 +654,13 @@ def issue(
         ),
     )
     path = issued.write(issued_dir)
-    progress(f"  wrote            {data_mod.relative(path)}")
+    if replaced is None:
+        progress(f"  wrote            {data_mod.relative(path)}")
+    else:
+        progress(
+            f"  reissued         {data_mod.relative(path)}, replacing the file "
+            f"issued at {replaced.issued_at}"
+        )
     return issued
 
 
@@ -548,6 +670,7 @@ __all__ = [
     "Issued",
     "IssueRefused",
     "covering",
+    "first_issuable",
     "issue",
     "issued_path",
     "issued_ref",

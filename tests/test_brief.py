@@ -7,6 +7,8 @@ file checks is that the document the brief builds passes them, that it is not
 written when it does not, and that nothing below the county can appear in it.
 """
 
+import dataclasses
+import html
 import importlib.util
 import json
 import pathlib
@@ -71,7 +73,8 @@ def make_resolver(cards, issued, *, manifest=("fema/usa_structures/99",)):
             f"{name}/{card.experiment_id}": card.record() for name, card in cards.items()
         } | {card.experiment_id: card.record() for card in cards.values()},
         "issued": {
-            f"issued/{one.contract}/{one.period_label}.json": {one.period_label}
+            f"issued/{one.contract}/{one.period_label}.json":
+                {one.period_label: dict(one.probabilities)}
             for one in issued
         },
         "manifest": set(manifest),
@@ -125,8 +128,11 @@ class TestSentences(BriefCase):
         )
         self.assertEqual(probability.cited(), ("tornado-zz-p",))
         self.assertEqual(claims["tornado-zz-p"].source.kind, "issued")
+        # The reference names the county, so the number in the sentence is
+        # checked against the number in the file, not merely against its
+        # existence.
         self.assertEqual(claims["tornado-zz-p"].source.ref,
-                         "issued/tornado-zz/2026-Q4.json#2026-Q4")
+                         f"issued/tornado-zz/2026-Q4.json#2026-Q4.{FIPS}")
 
         self.assertIn(
             "This comes from logistic+iso@1.0.0, which scored a Brier skill score of "
@@ -244,6 +250,124 @@ class TestSentences(BriefCase):
                         self.exposure, self.cards, "Adair County, ZZ", self.contracts)
 
 
+class TestTheValidatingCard(BriefCase):
+    """The card the sentence leans on must be the card the sentence claims."""
+
+    def card(self, **changes) -> ExperimentCard:
+        return dataclasses.replace(self.cards["tornado-zz"], **changes).seal()
+
+    def build_with(self, card):
+        return brief.build(FIPS, LABEL, [self.issued[0]], self.exposure,
+                           {"tornado-zz": card}, "Adair County, ZZ", self.contracts)
+
+    def test_a_validate_card_cannot_support_the_untouched_years_sentence(self):
+        with self.assertRaises(brief.BriefError) as ctx:
+            self.build_with(self.card(split="validate"))
+        self.assertIn("was scored on validate, not test", str(ctx.exception))
+
+    def test_a_canary_rejected_card_is_refused(self):
+        rejected = self.card(canary={
+            "rejected": True,
+            "findings": [{"check": "train provenance", "tripped": True}],
+        })
+        with self.assertRaises(brief.BriefError) as ctx:
+            self.build_with(rejected)
+        self.assertIn("rejected by the leakage canary", str(ctx.exception))
+        self.assertIn("train provenance", str(ctx.exception))
+
+    def test_a_card_that_failed_the_contract_is_refused(self):
+        failed = self.card(verdict={
+            "passed": False,
+            "checks": [{"name": "auc", "passed": False}],
+            "contract": "tornado-zz",
+        })
+        with self.assertRaises(brief.BriefError) as ctx:
+            self.build_with(failed)
+        self.assertIn("did not pass contract", str(ctx.exception))
+        self.assertIn("auc", str(ctx.exception))
+
+    def test_the_card_the_issued_file_and_the_contract_must_be_one_contract(self):
+        # The tolerance and the test years the brief quotes are read off this
+        # card and this contract; if they are not the same contract, the
+        # sentence is about two.
+        with self.assertRaises(brief.BriefError) as ctx:
+            self.build_with(self.card(contract_digest="0" * 16))
+        message = str(ctx.exception)
+        self.assertIn("the card is under contract sha256:0000", message)
+        self.assertIn(self.tornado.digest(), message)
+        elsewhere = make_issued(self.tornado)
+        elsewhere = dataclasses.replace(elsewhere, contract_digest="1" * 16)
+        with self.assertRaises(brief.BriefError) as ctx:
+            brief.build(FIPS, LABEL, [elsewhere], self.exposure, self.cards,
+                        "Adair County, ZZ", self.contracts)
+        self.assertIn("the issued file under sha256:1111", str(ctx.exception))
+
+    def test_the_tolerance_is_the_one_the_verdict_applied(self):
+        # `harness.contract.evaluate` writes the tolerance into the
+        # reliability check's detail; 0.075 is 7.5 points, not 8.
+        detail = ("worst populated bin [0.0,0.1) n=1,168 deviates 0.0010, "
+                  "tolerance 0.0750 (2/10 bins populated)")
+        card = self.card(verdict={
+            **self.cards["tornado-zz"].verdict,
+            "checks": [{"name": "reliability", "passed": True, "detail": detail}],
+        })
+        doc = self.build_with(card)
+        self.assertEqual(brief.check(doc, make_resolver({"tornado-zz": card},
+                                                        [self.issued[0]])), [])
+        self.assertIn("within 7.5 points", self.text(doc))
+        claims = doc.claim_index()
+        self.assertEqual(claims["tornado-zz-tolerance"].value, 0.075)
+        self.assertEqual(cite.render_value(claims["tornado-zz-tolerance-pp"]), "7.5")
+        self.assertEqual(brief.card_tolerance(card, self.tornado), 0.075)
+        # With no reliability detail on the card, the contract's own value —
+        # sound only because the digests above are equal.
+        self.assertEqual(brief.card_tolerance(self.cards["tornado-zz"], self.tornado),
+                         self.tornado.reliability_tolerance_pp)
+        self.assertIn("within 5 points", self.text(self.build()))
+        self.assertEqual(brief.card_test_years(card, self.tornado),
+                         tuple(self.tornado.test_years))
+
+
+class TestValuesAreChecked(BriefCase):
+    def test_a_probability_the_issued_file_does_not_hold_is_refused(self):
+        # Consistent prose and claim, so the number rule sees nothing wrong:
+        # only the artefact disagrees.
+        doctored = cite.to_dict(self.build(issued=[self.issued[0]]))
+        doctored["sentences"][0]["text"] = doctored["sentences"][0]["text"].replace(
+            "12%", "80%"
+        )
+        for claim in doctored["claims"]:
+            if claim["id"] == "tornado-zz-p":
+                claim["value"] = 0.8
+        found = brief.check(cite.from_dict(doctored), self.resolver)
+        self.assertEqual([v.code for v in found], [cite.VALUE_MISMATCH])
+        self.assertIn("0.8", found[0].detail)
+        self.assertIn("0.1234", found[0].detail)
+
+    def test_a_skill_score_the_card_does_not_hold_is_refused(self):
+        doctored = cite.to_dict(self.build(issued=[self.issued[0]]))
+        doctored["sentences"][1]["text"] = doctored["sentences"][1]["text"].replace(
+            "+0.23", "+0.95"
+        )
+        for claim in doctored["claims"]:
+            if claim["id"] == "tornado-zz-bss":
+                claim["value"] = 0.95
+        found = brief.check(cite.from_dict(doctored), self.resolver)
+        self.assertEqual([v.code for v in found], [cite.VALUE_MISMATCH])
+        self.assertIn("0.2345", found[0].detail)
+
+    def test_the_county_fips_is_exempt_because_the_document_names_it(self):
+        # The brief passes its own county; a caller that passes nothing gets
+        # no exemption, which is what the Phase 3 gap report will do.
+        doc = self.build(issued=[self.issued[0]], county="")
+        self.assertEqual(brief.county_identifiers(doc), (FIPS,))
+        self.assertEqual(brief.check(doc, self.resolver), [])
+        bare = brief.check(doc, self.resolver, identifiers=())
+        self.assertTrue(bare)
+        self.assertEqual({v.code for v in bare}, {cite.NUMBER_WITHOUT_CLAIM})
+        self.assertIn(f"'{FIPS}'", bare[0].detail)
+
+
 class TestCountyOnly(BriefCase):
     def test_never_names_sub_county(self):
         payload = cite.to_dict(self.build())
@@ -279,6 +403,9 @@ class TestWriting(BriefCase):
         self.assertIn("NOAA National Centers for Environmental Information", page)
         self.assertIn("USA Structures (public domain), county counts only", page)
         self.assertNotIn("Building footprints", page)  # none is ever downloaded
+        # What the citation rules do not prove, said on the page beside them.
+        self.assertIn(html.escape(brief.READING_CAVEAT), page)
+        self.assertNotIn(brief.READING_CAVEAT, cite.to_json(doc))  # not a sentence
         self.assertTrue(page.rstrip().endswith("</body></html>"))
         # The JSON is the document the page was rendered from.
         self.assertEqual(cite.from_json(json_path.read_text()).sentences, doc.sentences)

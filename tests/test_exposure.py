@@ -14,7 +14,7 @@ import unittest
 
 from readiness import config
 from readiness.connectors import usa_structures
-from readiness.connectors.base import ConnectorError, Manifest
+from readiness.connectors.base import ConnectorError, Manifest, sha256_bytes
 from readiness.exposure import CLASSES, UNCLASSIFIED, classify
 from readiness.exposure import spotcheck
 from readiness.exposure.occupancy import class_names
@@ -126,6 +126,30 @@ class TestFromCounts(unittest.TestCase):
         with self.assertRaises(ExposureError):
             self.table.merge(self.table)
 
+    def test_every_key_is_five_digits_of_the_extracts_own_state(self):
+        # The county is the finest key anywhere here, and an extract pinned
+        # under one state may not carry another's counties.
+        def rows(fips):
+            return [{"fips": fips, "occ_cls": "Residential",
+                     "prim_occ": "Single Family Dwelling", "n": 7}]
+
+        for fips in ("9900102", "990", "99001.0"):
+            with self.subTest(fips=fips), self.assertRaises(ExposureError) as ctx:
+                ExposureTable.from_counts(rows(fips), 2023, "fema/usa_structures/99")
+            self.assertIn("five digits", str(ctx.exception))
+        with self.assertRaises(ExposureError) as ctx:
+            ExposureTable.from_counts(rows("48001"), 2023, "fema/usa_structures/99")
+        self.assertIn("not in state 99", str(ctx.exception))
+        # A key the extract's own state covers is fine, with or without a state.
+        self.assertEqual(
+            list(ExposureTable.from_counts(rows("99009"), 2023, "fema/usa_structures/99").rows),
+            ["99009"],
+        )
+        self.assertEqual(
+            list(ExposureTable.from_counts(rows("48001"), 2023, "fema/usa_structures/test").rows),
+            ["48001"],
+        )
+
 
 class TestLoad(unittest.TestCase):
     def setUp(self):
@@ -155,6 +179,21 @@ class TestLoad(unittest.TestCase):
     def test_refuses_an_unpinned_state(self):
         with self.assertRaises(ExposureError):
             ExposureTable.load(self.dir, self.manifest, ["98"])
+
+    def test_load_refuses_an_extract_holding_a_key_below_the_county(self):
+        # Pinned bytes, so the hash check passes and the key check is the
+        # one that has to catch it.
+        path = self.paths[0]
+        blob = path.read_bytes().replace(b'"fips":"99001"', b'"fips":"9900123"')
+        path.write_bytes(blob)
+        key = usa_structures.manifest_key("99")
+        record = self.manifest.records[key]
+        self.manifest.add(key, dataclasses.replace(
+            record, sha256=sha256_bytes(blob), bytes=len(blob)
+        ))
+        with self.assertRaises(ExposureError) as ctx:
+            ExposureTable.load(self.dir, self.manifest, ["99"])
+        self.assertIn("five digits", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
