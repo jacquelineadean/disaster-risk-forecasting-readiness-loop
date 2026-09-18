@@ -124,8 +124,15 @@ def status(
 
 
 def national(registry: Mapping[str, Contract]) -> dict[str, Contract]:
-    """The contracts whose scope is the whole country (`states: []`)."""
-    return {name: c for name, c in registry.items() if not c.states}
+    """The US contracts whose scope is the whole country (`states: []`).
+
+    A pilot also has an empty `states` — outside the US the sub-national
+    universe is `regions.admin_level`, not a state list — so it is excluded
+    here explicitly. Plan §3's fleet is "six national contracts" over the
+    Storm Events record; a contract in another country is a Phase 4 pilot and
+    is counted by `verify --phase 4`.
+    """
+    return {name: c for name, c in registry.items() if not c.states and not c.is_pilot}
 
 
 def format_status(rows: Sequence[ContractStatus]) -> str:

@@ -24,8 +24,20 @@ PACKAGE = REPO_ROOT / "readiness"
 RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     (
         "readiness/engine",
-        ("readiness.harness.contract", "readiness.harness.canary", "readiness.contracts"),
-        "a model must not see the judge, the canary or the contract it is scored on",
+        ("readiness.harness.contract", "readiness.harness.canary", "readiness.contracts",
+         "readiness.connectors", "readiness.data"),
+        "a model must not see the judge, the canary or the contract it is scored "
+        "on, and it must not reach the ground truth through the connector that "
+        "read it — a model is handed a training view, never a data plane",
+    ),
+    (
+        "readiness/connectors",
+        ("readiness.engine", "readiness.agent", "claude_agent_sdk", "anthropic",
+         "readiness.plans"),
+        "a connector reads a source and pins it; it is below both the models it "
+        "feeds and the agent plane that drives them, and it never calls an LLM "
+        "(`readiness.cli` is the composition root that may see both planes: it is "
+        "what hands the MCP server its model-registry description)",
     ),
     (
         "readiness/harness",

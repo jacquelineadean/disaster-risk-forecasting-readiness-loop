@@ -28,6 +28,7 @@ BRIEF_DOC = REPO_ROOT / "docs" / "brief.md"
 PLAN = REPO_ROOT / "docs" / "plan.md"
 CARD_SKILL = REPO_ROOT / "skills" / "experiment-card.md"
 PLANS_DOC = REPO_ROOT / "docs" / "plans.md"
+GLOBAL_DOC = REPO_ROOT / "docs" / "global.md"
 
 # The Phase 1 command surface. The docs name these subcommands and flags and
 # the parser must accept every one of them.
@@ -77,6 +78,19 @@ PHASE3_FLAGS = (
         "--role", "practising emergency manager", "--org-type", "hospital",
         "--years", "5", "--comments", "text", "--reviews", "d",
     ]),
+)
+# The Phase 4 command surface: no new subcommand, only new flags on the
+# existing `register` (a pilot's two source sections) and the widened
+# `--phase` choice on the existing `verify`.
+PHASE4_FLAGS = (
+    ("register --country --ground-truth --records --record-start-year "
+     "--admin-level --regions-release --regions-sha256", [
+        "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+        "--ground-truth", "national_records", "--records", "x.csv",
+        "--record-start-year", "2000", "--admin-level", "ADM2",
+        "--regions-release", "gbOpen 6.0.0", "--regions-sha256", "b" * 64,
+    ]),
+    ("verify --phase 4", ["verify", "--phase", "4"]),
 )
 
 #: Paths the README map names that a not-yet-merged cluster will bring.
@@ -233,6 +247,32 @@ class TestReadmeCommandsExist(unittest.TestCase):
 
     def test_phase3_flags_are_in_the_parser(self):
         for label, argv in PHASE3_FLAGS:
+            with self.subTest(flag=label):
+                self.assertTrue(parser_accepts(argv), label)
+
+    def test_commands_block_names_the_phase4_surface(self):
+        # Text-only, so it runs in every tree: the README documents the
+        # Phase 4 register flags (a pilot's two source sections) and the
+        # widened --phase choice, on the same `register`/`verify` lines
+        # Phase 0-3 already named.
+        block = re.search(r"## Commands\n\n```\n(.*?)```", README.read_text(), re.S).group(1)
+        register = re.search(r"(?m)^readiness register NAME\b.*$", block).group(0)
+        for flag in ("--country CC", "--ground-truth", "--records PATH",
+                     "--record-start-year YYYY", "--admin-level ADM1|ADM2",
+                     "--regions-release RELEASE", "--regions-sha256 HEX"):
+            self.assertIn(flag, register, f"README's register line lacks {flag!r}")
+        self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2\|3\|4")
+
+    def test_phase4_subcommands_are_in_the_parser(self):
+        # Phase 4 adds no new subcommand, unlike Phases 1-3; register and
+        # verify already exist, so this only pins that fact.
+        self.assertIn("register", parser_commands())
+        self.assertIn("verify", parser_commands())
+        # `verify --phase 4` takes no contract, like `--phase 2` and `--phase 3`.
+        self.assertTrue(parser_accepts(["verify", "--phase", "4"]))
+
+    def test_phase4_flags_are_in_the_parser(self):
+        for label, argv in PHASE4_FLAGS:
             with self.subTest(flag=label):
                 self.assertTrue(parser_accepts(argv), label)
 
@@ -395,6 +435,12 @@ class TestBriefDocStatesTheRules(unittest.TestCase):
                        "never a path under the reports tree"):
             self.assertIn(phrase, text, f"how-it-works.md lacks {phrase!r}")
 
+    def test_how_it_works_names_the_phase4_commands(self):
+        text = HOW_IT_WORKS.read_text()
+        for command in ("readiness register flood-zz", "readiness register cyclone-zy",
+                        "readiness verify --phase 4"):
+            self.assertIn(command, text, f"how-it-works.md lacks {command!r}")
+
 
 class TestRoadmapBulletsHaveTheSameShape(unittest.TestCase):
     """Phases 1, 2 and 3 are each Built / Remaining / Exit, or the Roadmap is
@@ -524,6 +570,76 @@ class TestPlansDocStatesTheRules(unittest.TestCase):
 
         text = PLANS_DOC.read_text()
         self.assertIn(gap_report_mod.PERIOD_RE.pattern.strip("^$"), text)
+
+
+class TestGlobalDocStatesTheRules(unittest.TestCase):
+    """docs/global.md names the four `verify --phase 4` checks and the
+    never-committed rule, so a reader of a refusal or a pilot's ground truth
+    can find the rule without reading readiness/verify.py or the connectors."""
+
+    def test_names_the_four_verify_phase4_checks(self):
+        text = GLOBAL_DOC.read_text()
+        for check in ("pilots", "global inputs", "ground truth pinned", "us digests"):
+            self.assertIn(
+                f"`{check}`", text, f"docs/global.md does not name the {check!r} check"
+            )
+
+    def test_states_the_never_committed_rule_and_the_connectors(self):
+        text = GLOBAL_DOC.read_text()
+        for phrase in (
+            "never committed", "sha256", "basename", "snapshots/records",
+            "geoBoundaries", "EM-DAT", "national_records", "era5-antecedent",
+            "terrain", "nri", "record_start_year",
+        ):
+            self.assertIn(phrase, text, f"docs/global.md lacks {phrase!r}")
+
+    def test_states_the_rules_the_review_round_added(self):
+        text = GLOBAL_DOC.read_text()
+        for phrase in (
+            # where a record lives, and which name git would commit
+            "snapshots/records/<CC>/<basename>",
+            "!snapshots/records/??_emdat_regions.csv",
+            "CROSSWALK_BASENAME_RE",
+            # what the site and the manifest may publish
+            "The basename is published, and that is deliberate",
+            "name the file",
+            "publishes no pilot label bitmap",
+            "counts()",
+            # the contract schema
+            "refuse an unknown key",
+            "regions.sha256",
+            "RELEASE_RE",
+            "JSON **integer**",
+            "global_hazards()",
+            "--event-type",
+            # the connectors
+            "must be `https`",
+            "one country",
+            "shapeType",
+            "shapeGroup",
+            "leading",
+            "finite",
+            # the diagnostics
+            "unplaced rows",
+            "regions dropped",
+        ):
+            self.assertIn(phrase, text, f"docs/global.md lacks {phrase!r}")
+
+    def test_the_fictional_worked_example_quotes_a_digest_that_can_be_rebuilt(self):
+        # The one digest in this file is for a contract that is deliberately
+        # not registered, so `TestQuotedDigestsMatchTheCode` cannot check it.
+        # It is reproducible from a fixture, and this is the check that says so.
+        from tests.fixtures import make_pilot_contract
+
+        expected = make_pilot_contract(sha256="a" * 64, period="year").digest()
+        text = GLOBAL_DOC.read_text()
+        quoted = set(re.findall(r"sha256:([0-9a-f]{16})\b", text))
+        self.assertIn(expected, quoted, "docs/global.md quotes a stale digest")
+        self.assertEqual(
+            quoted - {expected, "a" * 16},
+            set(),
+            "docs/global.md quotes a digest nothing rebuilds",
+        )
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):

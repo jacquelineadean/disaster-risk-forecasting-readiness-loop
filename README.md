@@ -16,7 +16,7 @@ step-by-step tour with screenshots and a recording of a real run, see
 [website](#the-website), which walks through the design and runs the real
 code in your browser.
 
-**Status: Phase 0 complete; Phases 1–3 built; their exits need the data run
+**Status: Phase 0 complete; Phases 1–4 built; their exits need the data run
 and, for Phase 3, the blinded reviews.** The eval plane is built and its Phase 0 exit criteria are
 met on real NOAA data. The whole loop is *contract-driven*: the hazard, the
 geography, the forecast period, the damage definition, the locked splits and
@@ -64,6 +64,34 @@ record` binds a practising emergency manager's rating to the sha256 of the
 blinded report they read. Its exit — three real facilities' blinded gap
 reports rated useful or better — needs both the data run and those reviews
 ([docs/plans.md](docs/plans.md)).
+
+Phase 4 takes the same loop outside the United States: a **pilot** is a
+contract whose `country` is not `US`, and it runs unmodified through the
+Phase 1 queue, the firewall, the canary and the ledger. Its two new source
+fields, `ground_truth` and `regions`, are elided from the contract digest at
+their US defaults, so all nine contracts registered before this phase still
+hash to what they did. A pilot's ground truth is a partner's national
+record or an EM-DAT export, read by
+[`readiness/connectors/national_records.py`](readiness/connectors/national_records.py)
+or [`emdat.py`](readiness/connectors/emdat.py) and pinned by sha256 at
+`snapshots/records/<CC>/<basename>` — **neither the bytes nor the labels
+derived from them are ever committed, copied, packed or published**: the site
+publishes no pilot label bitmap, positive count, base rate or region name,
+and the committed manifest's notes carry counts and no text out of the file.
+What *is* published is the hash and the basename, because a panel cannot be
+reproduced without knowing which file it means — so operators are told to
+name the file neutrally ([DATA-LICENSES.md](DATA-LICENSES.md)). Its region
+universe comes from
+[`readiness/connectors/geoboundaries.py`](readiness/connectors/geoboundaries.py),
+ADM1 or ADM2 boundaries pinned to a named release, checked against the level
+and country that were asked for, and optionally pinned by their own sha256.
+Terrain and the National Risk Index are US-only and refused by name, so a
+pilot runs the Phase 1 queue on the `era5-antecedent` feature set alone; a
+pilot never counts toward Phase 2's national-contract total. Its exit — the Phase 1 contract
+passing in two non-US pilots on globally available data alone, checked by
+`readiness verify --phase 4` — needs the real-data run: a geoBoundaries
+release, a partner file or EM-DAT export with its crosswalk, and the ERA5
+pulls ([docs/global.md](docs/global.md)).
 
 ---
 
@@ -520,7 +548,7 @@ experiment.
 ```
 readiness contracts         list the registered contracts  [--names] [--national]
 readiness contract          print one contract and its hash        [-c NAME]
-readiness register NAME     pre-register a new contract from options
+readiness register NAME     pre-register a new contract from options  [--country CC] [--ground-truth storm_events|national_records|emdat --records PATH] [--record-start-year YYYY] [--admin-level ADM1|ADM2] [--regions-release RELEASE] [--regions-sha256 HEX]
 readiness hazards           list the hazard catalogue
 readiness models            list proposable models
 readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
@@ -541,7 +569,7 @@ readiness brief             one cited, validated brief per county; exit 1 listin
 readiness scenarios         list the scenario library, or check every case study against its expected findings  {list|check} [--case-studies DIR]
 readiness gap-report        one cited, blinded gap report for a facility; exit 1 listing violations, exit 2 unreadable  --facility PATH --period YYYY-Qn [--scenario ID] [--out DIR] [--drafter local|claude]
 readiness review record     bind a rating to a blinded report's sha256, plans/reviews/<sha16>-<digest12>.json  --report PATH.blind.html --rating {not useful,somewhat useful,useful,very useful} --role ROLE --org-type hospital|county|state|ngo|other --years N [--comments TEXT] [--reviews DIR]
-readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2|3] [--replay] [--bless] [--reports DIR] [--reviews DIR]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2|3|4] [--replay] [--bless] [--reports DIR] [--reviews DIR]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]
@@ -605,7 +633,9 @@ readiness/
   exposure/          USA Structures county counts: occupancy.py (classes), table.py (county-only), spotcheck.py
   connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server,
                      gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources),
-                     usa_structures.py (county counts, never footprints)
+                     usa_structures.py (county counts, never footprints), geoboundaries.py,
+                     national_records.py, emdat.py (the Phase 4 global region and ground-truth
+                     connectors; a partner's or EM-DAT's bytes are never committed)
   harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger,
                      features.py (the feature channel and its temporal firewall)
   engine/            proposable models: climatologies, persistence, the canary target,
@@ -628,7 +658,8 @@ snapshots/           pinned data; only manifest.json is committed
 exposure_expected/   assessor_counts.csv, the person-collected half of the exposure spot-check (ships header-only)
 docs/                how-it-works.md (the walkthrough), contracts.md (the reference), features.md (the
                      firewall), backtest.md (the report), brief.md (the county brief), plans.md (the
-                     gap report), plan.md and plan-design-annex.md, media/
+                     gap report), global.md (pilots outside the US), plan.md and plan-design-annex.md,
+                     media/
 skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
 tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media),
                      climada/ (run_event_set.py, the GPL tool that writes a pinned layer, never imported)
@@ -640,7 +671,8 @@ plans/               guidance.json (the documents a report may cite), scenarios/
                      recursively: each carries its own README, and facilities/ one fictional example
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
-tests/               unittest suite, no network required
+tests/               unittest suite, no network required (test_global.py: the Phase 4 loop, on
+                     a synthetic pilot, end to end)
 ```
 
 ---
@@ -685,8 +717,25 @@ redesign:
   none of which this repository can establish about itself. *Exit: three
   facilities' blinded gap reports rated useful or better by practising
   emergency managers.*
-- **Phase 4 — global scale-out.** Swap US layers for Open Buildings, Flood Hub,
-  EM-DAT. The architecture does not change; the connectors do.
+- **Phase 4 — global scale-out.** *Built:* the contract's `ground_truth` and
+  `regions` sources (elided from the digest at their US defaults, so every
+  contract registered before this phase hashes unchanged), the geoBoundaries,
+  partner-records and EM-DAT connectors (bytes never committed, pinned by
+  sha256 alone; one country per EM-DAT export), the generic `RecordEvent`
+  label path (US panels bit-identical), the pilots-not-national exclusion
+  from `readiness fleet`, and `verify --phase 4` with its `pilots`,
+  `global inputs`, `ground truth pinned` and `us digests` checks. The review
+  round added the publication rules (no pilot labels on the site, counts-only
+  manifest notes), the strict pilot contract schema (unknown keys, release
+  pattern, integer start year, hazard mapped for its own source, optional
+  `regions.sha256`) and the connector hardening (leading-comment-only
+  stripping, finite numbers, level and country checks, https-only mirror,
+  size caps). *Remaining:* the real-data
+  run — a geoBoundaries release, a partner file or EM-DAT export with its
+  crosswalk, the ERA5 pulls, and whether two pilots actually pass; the URL
+  pattern and EM-DAT columns are confirmed on the first real pull
+  ([docs/global.md](docs/global.md)). *Exit: the Phase 1 contract passes in
+  two non-US pilots using only globally available data.*
 
 ---
 

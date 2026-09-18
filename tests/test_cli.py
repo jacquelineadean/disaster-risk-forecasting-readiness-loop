@@ -24,14 +24,21 @@ from readiness import cite, cli, contracts, data as data_mod, verify
 from readiness import issue as issue_mod
 from readiness.agent import orchestrator
 from readiness.connectors import usa_structures
-from readiness.connectors.base import Manifest
+from readiness.connectors.base import Manifest, sha256_bytes
 from readiness.connectors.census import County
 from readiness.harness.contract import Check
 from readiness.harness.labels import diagnose
 from readiness.plans import gap_report as gap_report_mod
 from readiness.plans import reviews as reviews_mod
 from tests import fixtures_plans
-from tests.fixtures import make_panel
+from tests.fixtures import (
+    make_geojson,
+    make_panel,
+    make_pilot_contract,
+    make_records_csv,
+    record_row,
+    shape_id,
+)
 from tests.test_features import FakeStatic
 from tests.test_issue import CANDIDATE, with_regions
 from tests.test_orchestrator import quick, signal_dataset
@@ -1559,13 +1566,13 @@ class TestVerifyPhase3(Phase3Case):
         for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
             self.assertNotIn(slug, out.split("reports", 1)[1])
 
-    def test_the_phase_flag_accepts_zero_to_three(self):
+    def test_the_phase_flag_accepts_zero_to_four(self):
         parser = cli.build_parser()
-        for phase in (0, 1, 2, 3):
+        for phase in (0, 1, 2, 3, 4):
             self.assertEqual(parser.parse_args(
                 ["verify", "--phase", str(phase)]).phase, phase)
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            parser.parse_args(["verify", "--phase", "4"])
+            parser.parse_args(["verify", "--phase", "5"])
 
 
 class TestNoCommittedPlansJsonHasAddressOrLatLon(unittest.TestCase):
@@ -1623,6 +1630,389 @@ class TestNoCommittedPlansJsonHasAddressOrLatLon(unittest.TestCase):
                      "plans/reviews/review.JSON"):
             with self.subTest(path=path):
                 self.assertTrue(ignored(path), f"{path} would be committed")
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 4
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterOutsideTheUs(CliCase):
+    """`readiness register --country ZZ`, and the sha it computes at registration."""
+
+    def setUp(self):
+        super().setUp()
+        self.records = self.dir / "partner" / "zz_records.csv"
+        self.sha = make_records_csv(
+            self.records, make_pilot_contract(), record_row(damage_usd=50_000)
+        )
+
+    def register(self, *extra, name="flood-zz"):
+        return self.run_cli(
+            "register", name, "--hazard", "inland_flood", "--country", "zz",
+            "--ground-truth", "national_records", "--records", str(self.records),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+            *extra,
+        )
+
+    def test_register_writes_the_records_sha_into_the_contract(self):
+        code, out = self.register()
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.country, "ZZ")
+        self.assertEqual(c.ground_truth["source"], "national_records")
+        self.assertEqual(c.ground_truth["sha256"], self.sha)
+        self.assertEqual(c.ground_truth["file"], "zz_records.csv")
+        # ...read from the file's own `# record_start_year:` header.
+        self.assertEqual(c.ground_truth["record_start_year"], 2005)
+        self.assertEqual(c.regions["source"], "geoboundaries")
+        self.assertEqual(c.regions["admin_level"], "ADM1")
+        self.assertEqual(c.regions["release"], contracts.GEOBOUNDARIES_RELEASE)
+        self.assertIn("partner national records", out)
+        # Country-namespaced on disk, exactly as the manifest key is.
+        self.assertIn("snapshots/records/ZZ/zz_records.csv", out)
+        # ...and the note says plainly that the basename is published, so an
+        # operator cannot read the packer's redaction as a promise it is not.
+        self.assertIn("basename (zz_records.csv) is a criterion", out)
+        self.assertIn("Name the file neutrally", out)
+
+    def test_the_contract_file_round_trips(self):
+        self.register()
+        spec = json.loads((self.dir / "flood-zz.json").read_text())
+        self.assertEqual(
+            contracts.Contract.from_spec(spec).digest(),
+            contracts.load("flood-zz", self.dir).digest(),
+        )
+        # The records file itself was never copied into the registry.
+        self.assertEqual(
+            sorted(p.name for p in self.dir.glob("*")), ["flood-zz.json", "partner"]
+        )
+
+    def test_admin_level_release_and_period_are_settable(self):
+        code, _out = self.register(
+            "--admin-level", "ADM2", "--regions-release", "gbOpen 5.0.0",
+            "--period", "year",
+        )
+        self.assertEqual(code, 0)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual((c.admin_level, c.period), ("ADM2", "year"))
+        self.assertEqual(c.regions["release"], "gbOpen 5.0.0")
+
+    def test_an_emdat_contract_takes_the_sources_floor_and_says_so(self):
+        export = self.dir / "partner" / "zz_emdat.xlsx"
+        export.write_bytes(b"PK\x03\x04 not really a zip, but it hashes")
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "emdat", "--records", str(export),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.ground_truth["record_start_year"], 2000)
+        self.assertEqual(c.ground_truth["sha256"], sha256_bytes(export.read_bytes()))
+        self.assertIn("zz_emdat_regions.csv", out)
+
+    def test_a_country_outside_the_us_must_name_its_ground_truth(self):
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("Storm Events is a US archive", out)
+
+    def test_records_without_a_country_is_refused(self):
+        code, out = self.run_cli(
+            "register", "flood-us", "--hazard", "inland_flood",
+            "--ground-truth", "emdat", "--records", str(self.records),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--country", out)
+
+    def test_a_missing_records_file_is_named(self):
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(self.dir / "gone.csv"),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("no records file", out)
+
+    def test_a_file_without_a_start_year_header_needs_the_flag(self):
+        bare = self.dir / "partner" / "bare.csv"
+        bare.write_bytes(b"event_id,start_date,region_id,hazard,deaths,injured,"
+                         b"damage_usd,source\n")
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(bare),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--record-start-year", out)
+        code, _ = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(bare),
+            "--record-start-year", "2010",
+            "--train", "2010-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            contracts.load("flood-zz", self.dir).record_start_year, 2010
+        )
+
+    def test_a_hazard_with_no_global_mapping_is_refused(self):
+        code, out = self.register("--hazard", "dust_storm", name="dust-zz")
+        self.assertEqual(code, 2)
+        self.assertIn("no global mapping", out)
+
+    def test_a_us_registration_is_unchanged(self):
+        code, out = self.run_cli(
+            "register", "tornado-zz", "--hazard", "tornado", "--state", "zz"
+        )
+        self.assertEqual(code, 0, out)
+        spec = json.loads((self.dir / "tornado-zz.json").read_text())
+        self.assertNotIn("ground_truth", spec)
+        self.assertNotIn("regions", spec)
+
+
+class TestRegisterRefusesFlagsThatDoNotApply(CliCase):
+    """A flag that does not apply is refused, not ignored.
+
+    `--ground-truth`/`--records` were already refused for a US contract, which
+    shows the intent; `--admin-level`, `--regions-release` and
+    `--regions-sha256` describe a geoBoundaries universe and were silently
+    dropped, and `--event-type` names a NOAA vocabulary and was silently
+    hashed into a pilot's digest — so two pilots with identical panels carried
+    different digests and their ledgers were marked incomparable for nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.records = self.dir / "partner" / "zz_records.csv"
+        self.sha = make_records_csv(
+            self.records, make_pilot_contract(), record_row(damage_usd=50_000)
+        )
+
+    def pilot(self, *extra):
+        return self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(self.records),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+            *extra,
+        )
+
+    def test_a_us_contract_may_not_name_a_geoboundaries_universe(self):
+        for flag, value in (("--admin-level", "ADM2"),
+                            ("--regions-release", "gbOpen 5.0.0"),
+                            ("--regions-sha256", "b" * 64)):
+            with self.subTest(flag=flag):
+                code, out = self.run_cli(
+                    "register", "tornado-us", "--hazard", "tornado", flag, value
+                )
+                self.assertEqual(code, 2, out)
+                self.assertIn(flag, out)
+                self.assertIn("--country", out)
+
+    def test_a_us_contract_registers_as_before_when_it_names_none_of_them(self):
+        code, out = self.run_cli("register", "tornado-us", "--hazard", "tornado")
+        self.assertEqual(code, 0, out)
+        spec = json.loads((self.dir / "tornado-us.json").read_text())
+        self.assertNotIn("regions", spec)
+
+    def test_event_type_is_refused_outside_the_us(self):
+        code, out = self.pilot("--event-type", "Flood")
+        self.assertEqual(code, 2, out)
+        self.assertIn("--event-type", out)
+        self.assertIn("US", out)
+
+    def test_a_pilot_registered_twice_the_same_way_has_the_same_digest(self):
+        code, _ = self.pilot()
+        self.assertEqual(code, 0)
+        first = contracts.load("flood-zz", self.dir).digest()
+        (self.dir / "flood-zz.json").unlink()
+        code, _ = self.pilot()
+        self.assertEqual(code, 0)
+        self.assertEqual(contracts.load("flood-zz", self.dir).digest(), first)
+
+    def test_the_regions_sha_is_written_when_given(self):
+        code, out = self.pilot("--regions-sha256", "b" * 64)
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.regions["sha256"], "b" * 64)
+        # ...and it is a criterion, so it moves the digest.
+        (self.dir / "flood-zz.json").unlink()
+        self.pilot()
+        self.assertNotEqual(contracts.load("flood-zz", self.dir).regions.get("sha256"), "b" * 64)
+
+    def test_a_malformed_regions_sha_is_refused(self):
+        code, out = self.pilot("--regions-sha256", "nope")
+        self.assertEqual(code, 2, out)
+        self.assertIn("regions.sha256", out)
+
+
+class TestHazardsMarksWhatIsRegistrableGlobally(CliCase):
+    def test_the_catalogue_says_which_hazards_have_a_global_mapping(self):
+        from readiness import config
+
+        code, out = self.run_cli("hazards")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Registrable outside the US", out)
+        for hazard in config.global_hazards():
+            self.assertIn(hazard, out)
+        # dust_storm and lightning have no EM-DAT or partner mapping.
+        self.assertIn("not mapped, so US-only", out)
+        self.assertIn("dust_storm", out)
+
+
+class TestPilotThroughTheCliWithNoFeatureFlag(CliCase):
+    """A pinned pilot, driven the way an operator drives it: no `--features`.
+
+    The documented behaviour is that a pilot runs on `era5-antecedent` alone
+    and the terrain candidates are skipped with a progress line and no card.
+    `cli._features()` loads every connector whose data is already pinned, and
+    `pinned()` used to answer True for `terrain` outside the US — its file
+    list was empty, so the loop that would have said no had nothing to iterate
+    — so `terrain` was auto-selected and `build` refused the whole run with a
+    `ValueError`. By default a pilot was unusable the moment it was pinned.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from readiness.connectors import geoboundaries
+        from readiness.connectors.base import SourceRecord, utc_now
+
+        self.snapshots = self.dir / "snapshots"
+        source = self.dir / "partner" / "zz_records.csv"
+        draft = make_pilot_contract()
+        make_records_csv(
+            source, draft,
+            *[
+                record_row(
+                    event_id=f"E{i}",
+                    start_date=f"{year}-{1 + 3 * (i % 4):02d}-12",
+                    region_id=shape_id(i % 3),
+                    damage_usd=50_000,
+                )
+                for i, year in enumerate(range(2005, 2025))
+            ],
+        )
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(source),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0, out)
+        self.contract = contracts.load("flood-zz", self.dir)
+
+        record_path = data_mod.records_path(self.contract, self.snapshots)
+        record_path.parent.mkdir(parents=True)
+        record_path.write_bytes(source.read_bytes())
+        geojson = make_geojson(n_regions=3)
+        cache = geoboundaries.cache_path(self.snapshots, "ZZ", "ADM1")
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(geojson)
+        manifest = Manifest(path=self.snapshots / "manifest.json")
+        for key, blob in (
+            (data_mod.regions_key(self.contract), geojson),
+            (data_mod.records_key(self.contract), record_path.read_bytes()),
+        ):
+            manifest.add(key, SourceRecord(
+                source="synthetic", url="", sha256=sha256_bytes(blob),
+                bytes=len(blob), fetched_at=utc_now(), license="test",
+            ))
+        manifest.save()
+
+        def no_fetch(url):
+            raise AssertionError(f"went to the network for {url}")
+
+        real_pinned, real_build = data_mod.pinned, data_mod.build
+
+        def pinned_here(contract, snapshot_dir=None, features=()):
+            return real_pinned(contract, self.snapshots, features)
+
+        def build_here(contract, **kw):
+            return real_build(contract, **{**kw, "snapshot_dir": self.snapshots})
+
+        self._pinned_here, self._build_here = pinned_here, build_here
+
+        self.patches = [
+            mock.patch.dict(
+                os.environ, {data_mod.EXPERIMENTS_DIR_ENV: str(self.dir / "experiments")}
+            ),
+            # Forced, not defaulted: `orchestrator.run_local` passes
+            # `snapshot_dir=` explicitly, and a call keyword overrides a
+            # partial's.
+            mock.patch.object(data_mod, "pinned", self._pinned_here),
+            mock.patch.object(data_mod, "build", self._build_here),
+            mock.patch.object(geoboundaries, "fetch", no_fetch),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        super().tearDown()
+
+    def test_no_us_only_connector_is_auto_selected_for_a_pilot(self):
+        args = cli.build_parser().parse_args(["panel", "-c", "flood-zz"])
+        self.assertEqual(cli._features(args, self.contract), [])
+        # ...while the base data really is pinned, which is the condition that
+        # used to make the auto-selection fire.
+        self.assertTrue(data_mod.pinned(self.contract))
+
+    def test_panel_runs_against_the_pinned_pilot(self):
+        code, out = self.run_cli("panel", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("regions: 3", out)
+
+    def test_loop_runs_with_no_features_flag_rather_than_crashing(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "baseline",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("US-only", out)
+        self.assertTrue(data_mod.paths(self.contract).ledger.exists())
+
+    def test_fleet_runs_with_no_features_flag_rather_than_crashing(self):
+        code, out = self.run_cli("fleet", "--contracts", "flood-zz",
+                                 "--queue", "baseline", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("US-only", out)
+
+    def test_an_explicit_us_only_feature_is_still_refused_by_name(self):
+        # The graceful skip is for the default; asking for it outright still
+        # gets the refusal that names the connector.
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--features", "terrain",
+                                 "--queue", "baseline", "--quiet")
+        self.assertEqual(code, 2, out)
+        self.assertIn("US-only", out)
+        self.assertIn("terrain", out)
+
+
+class TestVerifyPhase4(CliCase):
+    def test_phase4_takes_no_contract(self):
+        code, out = self.run_cli("verify", "--phase", "4", "-c", "flood-zz")
+        self.assertEqual(code, 2)
+        self.assertIn("takes no contract", out)
+
+    def test_phase4_reports_every_check_and_exits_one_when_unmet(self):
+        code, out = self.run_cli("verify", "--phase", "4")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 4 exit criteria  (the registry)", out)
+        for name in ("pilots", "global inputs", "ground truth pinned", "us digests"):
+            self.assertIn(name, out)
+        self.assertIn("Phase 4 NOT met", out)
+
+    def test_the_us_digest_check_passes_against_the_committed_repository(self):
+        # It reads the committed contracts and fingerprints rather than this
+        # temporary registry, because it is a fact about the repository.
+        _code, out = self.run_cli("verify", "--phase", "4")
+        self.assertIn("[ok]   us digests", out)
+
+    def test_the_parser_offers_phase_4(self):
+        args = cli.build_parser().parse_args(["verify", "--phase", "4"])
+        self.assertEqual(args.phase, 4)
+        # The phases stop at 4: there is no fifth exit criterion to check.
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                cli.build_parser().parse_args(["verify", "--phase", "5"])
 
 
 if __name__ == "__main__":
