@@ -205,8 +205,9 @@ every clause — and the canary rejects it on every check.
 
 The canary is a smoke alarm over the model's output, not a proof. The real
 defence is structural: a model receives a `TrainingView` over training years
-only, `predict()` is handed bare units, and labels are fetched after it
-returns. The canary is for when that structure is breached by an accidental
+only, `predict()` is handed units (and, for a Phase 1 model, the harness-built
+and audited feature rows for exactly those units, never a label), and labels
+are fetched after it returns. The canary is for when that structure is breached by an accidental
 join or a file that should not have been read.
 
 ## 10. The same harness, three hazards

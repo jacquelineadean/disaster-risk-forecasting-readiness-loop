@@ -106,7 +106,7 @@
       <text class="sub" x="356" y="338">proposes</text>
       <path class="arrow" d="M670 330 C 700 290, 700 270, 728 250"/>
       <text class="sub" x="560" y="270">fit through TrainingView,</text>
-      <text class="sub" x="560" y="286">predict on bare units</text>
+      <text class="sub" x="560" y="286">predict on units + audited features</text>
       <path class="arrow" d="M875 290 V 328"/>
       <text class="sub" x="884" y="314">sealed card</text>
       <path class="arrow dashed" d="M728 372 C 600 372, 500 420, 350 384"/>
@@ -138,7 +138,7 @@
   <div class="cards cards--2 wide">
     <div class="card">
       <h3>No model ever receives a holdout label.</h3>
-      <p><code>TrainingView</code> is the only channel a model gets data through, and it raises if handed a panel containing a validate or test year. <code>predict()</code> receives bare units. Labels are fetched in <code>scoring.score()</code> <em>after</em> <code>predict()</code> has returned — one function, in one file, which is the point.</p>
+      <p><code>TrainingView</code> is the only channel a model gets data through, and it raises if handed a panel containing a validate or test year. <code>predict()</code> receives units and, for a Phase 1 model, the harness-built and audited feature rows for exactly those units, never a label. Labels are fetched in <code>scoring._fit_predict()</code> <em>after</em> <code>predict()</code> has returned — one function, in one file, which is the point.</p>
 <pre class="code"><code># readiness/harness/scoring.py
 view = TrainingView(train_panel, train_split)
 model.fit(view)
@@ -267,7 +267,7 @@ if leaked:
         </tbody>
       </table></div>
       <h3>The verdict</h3>
-      <p>Four checks, applied in order: skill relative to climatology; calibration in every populated bin; discrimination; and provenance — the card must carry the current contract's digest. A scorecard is never produced without its canary report: every command that scores anything goes through one function, <code>scoring.screen()</code>.</p>
+      <p>Five checks, applied in order: skill relative to climatology; calibration in every populated bin; discrimination; provenance — the card must carry the current contract's digest; and the split — a card scored on training years can never pass. A scorecard is never produced without its canary report: every command that scores anything goes through one function, <code>scoring.screen()</code>.</p>
       <div id="verdict-example" class="cards cards--2 wide"></div>
     </div>
     <aside class="aside"><strong>Pure standard library</strong><br>The eval plane is the one component that must produce identical numbers on any machine from a clean clone, so it takes no dependency whose version could move under it. The package has no runtime dependencies at all — which is also why the whole thing runs in your browser.</aside>
