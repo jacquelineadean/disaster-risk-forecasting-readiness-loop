@@ -553,7 +553,74 @@ practising emergency managers. A review record is an attestation, and
 `verify --phase 3`'s first check is the honest extent of what a machine can
 confirm about it.
 
-## 14. The research briefing
+## 14. Outside the US
+
+Phase 4's claim is architectural: *the architecture does not change, the
+connectors do* (plan §5). A **pilot** is a registered contract whose
+`country` is not `US`, and the same harness — the Phase 1 queue, the
+temporal firewall, the leakage canary, the ledger, the one atomic test
+touch, `readiness verify --phase 1` — runs against it unmodified. Full
+reference: [docs/global.md](global.md). No transcript of it exists yet, for
+the same reason as every phase above: nothing here has reached a real
+partner file, a real EM-DAT export or a real geoBoundaries release, and the
+demonstration is a synthetic pilot in [`tests/test_global.py`](../tests/test_global.py).
+
+**Register a pilot.** A contract's two source sections, `ground_truth` and
+`regions`, are elided from the digest at their US defaults, so every
+contract registered before this phase still hashes to what it did.
+
+```bash
+readiness register flood-zz --hazard inland_flood --country ZZ \
+    --ground-truth national_records --records /path/zz_records.csv \
+    --admin-level ADM2 --regions-release "gbOpen 6.0.0" --period year
+
+readiness register cyclone-zy --hazard tropical_cyclone --country ZY \
+    --ground-truth emdat --records /path/zy_emdat.xlsx --admin-level ADM1
+```
+
+Outside the US the contract must name `--ground-truth` (`national_records`
+or `emdat`; `storm_events` is a US archive and is refused) and `--records`
+PATH — the sha256 is computed now, at registration, and written into the
+contract as a criterion, and the file itself is never committed or copied.
+`readiness register` prints where the file has to be placed
+(`snapshots/records/<basename>`, git-ignored) and, for `--ground-truth
+emdat`, that the admin-name crosswalk
+(`snapshots/records/<cc>_emdat_regions.csv`) has to be written first.
+
+**What is US-only.** Terrain (the Census Gazetteer) and the National Risk
+Index read US-only sources and are refused by name for a pilot, so it runs
+the Phase 1 queue on the `era5-antecedent` feature set alone — the
+candidates that need terrain are skipped with a progress line and no card.
+A pilot's ground truth reaches the panel through the same code as Storm
+Events: `readiness.harness.labels.RecordEvent`, walked by the same
+`_walk_events` a `StormEvent` is, so every US panel stays bit-identical. A
+pilot also never counts toward Phase 2's national-contract total
+(`readiness.fleet.national()` excludes it explicitly).
+
+**Verify.** The Phase 4 check takes no contract:
+
+```bash
+readiness verify --phase 4
+```
+
+Four checks, in order: **`pilots`** — at least two registered contracts
+outside the US pass the Phase 1 checks; **`global inputs`** — every input
+on each passing pilot's test card resolves to a connector marked globally
+available, never one of `census`, `storm_events`, `nws_zones`, `nri`,
+`usa_structures` or `gazetteer`; **`ground truth pinned`** — each pilot's
+pinned record hashes to the sha256 its contract names, read from
+`snapshots/manifest.json` alone; **`us digests`** — the three US example
+contracts still hash to exactly what their blessed fingerprints record,
+proof that the new schema fields move nothing at their defaults. Nothing
+here opens a partner's file: partner ground-truth bytes are never
+committed, packed or published, and the check runs from committed ledgers
+and the pinned manifest alone.
+
+Not knowable offline: whether two real pilots pass. The geoBoundaries URL
+pattern and the EM-DAT column names are confirmed on the first real pull,
+not before.
+
+## 15. The research briefing
 
 The design the implementation follows is in [`report/index.html`](../report/index.html)
 (`make serve` to read it locally). Its second section is the argument for

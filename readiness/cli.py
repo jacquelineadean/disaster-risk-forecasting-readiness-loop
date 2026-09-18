@@ -26,7 +26,7 @@ refuses and lists the choices.
     readiness scenarios         list the scenario library, or run the case studies
     readiness gap-report        one cited, validated gap report for a facility
     readiness review            record a rating of a blinded gap report
-    readiness verify            check the Phase 0, 1, 2 or 3 exit criteria
+    readiness verify            check the Phase 0, 1, 2, 3 or 4 exit criteria
     readiness backtest          write the backtest report from committed files
     readiness dashboard         render a contract's ledger as a static HTML page
     readiness report            rebuild the static research report
