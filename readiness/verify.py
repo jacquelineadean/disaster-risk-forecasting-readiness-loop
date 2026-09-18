@@ -559,3 +559,279 @@ def replay(
         got = got_bins[i] if i < len(got_bins) else None
         rows.append((f"reliability_bins[{i}]", want, got, _same_bin(want, got)))
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Phase 2
+# ---------------------------------------------------------------------------
+
+#: Plan §3's exit: "at least four hazards pass the contract nationally".
+MIN_NATIONAL_PASSES = 4
+
+#: The person-collected half of the exposure spot-check.
+COUNTS_PATH = data_mod.REPO_ROOT / "exposure_expected" / "assessor_counts.csv"
+
+
+@dataclass(frozen=True)
+class Phase2Result:
+    """The Phase 2 exit criteria, each as a check with its evidence.
+
+    Fleet-wide rather than per contract, so it takes no `-c`: the criterion is
+    about the whole registry ("at least four hazards pass the contract
+    nationally; exposure joins spot-validated in ten sampled counties"), and a
+    per-contract answer could not state it. Like Phase 1 it reads committed
+    files only — ledgers, the counts file, the pinned extracts, the issued
+    files and the briefs — and builds nothing.
+    """
+
+    checks: tuple[Check, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(check.passed for check in self.checks)
+
+    def failures(self) -> list[str]:
+        """One line per failed check: the first line of its detail."""
+        return [c.detail.splitlines()[0] for c in self.checks if not c.passed]
+
+
+def phase2(
+    *,
+    registry: dict[str, Contract] | None = None,
+    experiments_dir: pathlib.Path | None = None,
+    counts_path: pathlib.Path | None = None,
+    issued_dir: pathlib.Path | None = None,
+    briefs_dir: pathlib.Path | None = None,
+    snapshot_dir: pathlib.Path | None = None,
+) -> Phase2Result:
+    """Evaluate the Phase 2 exit criteria across the registry."""
+    from readiness import contracts as contracts_mod
+
+    known = contracts_mod.registered() if registry is None else dict(registry)
+    snapshot_dir = snapshot_dir or data_mod.SNAPSHOT_DIR
+    counts_path = counts_path or COUNTS_PATH
+
+    national_check, passing = _national_check(known, experiments_dir)
+    exposure_check, counties = _spot_check(counts_path, snapshot_dir)
+    issued_check, label, issued = _issued_check(
+        known, passing, issued_dir, experiments_dir
+    )
+    brief_check = _brief_check(
+        known, label, issued, counties,
+        briefs_dir=briefs_dir, issued_dir=issued_dir, snapshot_dir=snapshot_dir,
+        experiments_dir=experiments_dir,
+    )
+    return Phase2Result((national_check, exposure_check, issued_check, brief_check))
+
+
+def _national_check(
+    known: dict[str, Contract], experiments_dir: pathlib.Path | None
+) -> tuple[Check, list[str]]:
+    """Which national contracts pass the Phase 1 checks, and whether four do."""
+    national = {name: c for name, c in known.items() if not c.states}
+    passing: list[str] = []
+    notes: list[str] = []
+    for name in sorted(national):
+        contract = national[name]
+        where = data_mod.paths(contract, experiments_dir=experiments_dir)
+        result = phase1(
+            contract,
+            ledger_path=where.ledger,
+            touch_path=where.touch_budget,
+            backtest_path=where.directory / "backtest.html",
+        )
+        if result.passed:
+            card = result.card
+            passing.append(name)
+            notes.append(
+                f"  [pass] {name:<18} {card.model}@{card.version} "
+                f"(BSS {card.scorecard['brier_skill_score']:+.4f}, {card.experiment_id})"
+            )
+        else:
+            notes.append(f"  [ .. ] {name:<18} {result.failures()[0]}")
+    head = (
+        f"national contracts: {len(passing)}/{len(national)} registered with "
+        f"scope 'every region' pass the Phase 1 checks; the exit needs "
+        f">= {MIN_NATIONAL_PASSES}"
+    )
+    return Check("national contracts", len(passing) >= MIN_NATIONAL_PASSES,
+                 "\n".join([head, *notes])), passing
+
+
+def _spot_check(
+    counts_path: pathlib.Path, snapshot_dir: pathlib.Path
+) -> tuple[Check, list[str]]:
+    """The exposure join against the assessor counts; the in-band counties come back."""
+    from readiness.connectors import usa_structures
+    from readiness.connectors.base import ConnectorError, Manifest
+    from readiness.exposure import spotcheck
+    from readiness.exposure.table import ExposureError, ExposureTable
+
+    name = "exposure spot-check"
+    if not counts_path.exists():
+        return Check(name, False, f"exposure spot-check: no counts file at "
+                     f"{data_mod.relative(counts_path)}"), []
+    try:
+        counts = spotcheck.load(counts_path)
+    except (spotcheck.SpotCheckError, OSError) as exc:
+        return Check(name, False, f"exposure spot-check: {exc}"), []
+    if not counts:
+        return Check(
+            name, False,
+            "exposure spot-check: exposure_expected/assessor_counts.csv is header-only; "
+            "the ten counts are collected by a person, with URLs",
+        ), []
+
+    states = sorted({row.fips[:2] for row in counts})
+    manifest = Manifest.load(snapshot_dir / "manifest.json")
+    absent = [st for st in states if usa_structures.manifest_key(st) not in manifest.records]
+    if absent:
+        return Check(
+            name, False,
+            "exposure spot-check: no USA Structures extract is pinned for state(s) "
+            f"{', '.join(absent)}, which the counts file samples; run "
+            f"`readiness exposure snapshot --states {','.join(absent)}`",
+        ), []
+    try:
+        table = ExposureTable.load(snapshot_dir, manifest, states)
+    except (ExposureError, ConnectorError, OSError, ValueError) as exc:
+        return Check(name, False, f"exposure spot-check: {exc}"), []
+
+    checks = spotcheck.run(table, counts)
+    summary = spotcheck.summary(checks)
+    counties = sorted({c.fips for c in checks if c.within})
+    return Check(name, summary.within_bounds, spotcheck.format(checks)), counties
+
+
+def _issued_files(
+    names: list[str], issued_dir: pathlib.Path | None
+) -> dict[str, dict[str, object]]:
+    """Per contract, its issued files by period label."""
+    from readiness.issue import read_issued
+
+    out: dict[str, dict[str, object]] = {}
+    for name in names:
+        out[name] = {i.period_label: i for i in read_issued(name, issued_dir)}
+    return out
+
+
+def _issued_check(
+    known: dict[str, Contract],
+    passing: list[str],
+    issued_dir: pathlib.Path | None,
+    experiments_dir: pathlib.Path | None = None,
+) -> tuple[Check, str, dict]:
+    """One period issued by the passing contracts, each from its first test card."""
+    name = "issued"
+    if not passing:
+        return Check(name, False, "issued: no national contract passes Phase 1 yet"), "", {}
+    files = _issued_files(passing, issued_dir)
+    labels: dict[str, list[str]] = {}
+    for contract_name, by_label in files.items():
+        for label in by_label:
+            labels.setdefault(label, []).append(contract_name)
+    if not labels:
+        return Check(
+            name, False,
+            f"issued: no issued file for any of {passing}; run `readiness issue MODEL "
+            "-c NAME --period YYYY-Qn`",
+        ), "", {}
+    label = sorted(labels, key=lambda k: (-len(labels[k]), k))[0]
+    covered = sorted(labels[label])
+    chosen = {n: files[n][label] for n in covered}
+
+    problems = []
+    for contract_name, issued in sorted(chosen.items()):
+        first = _first_test_card(known[contract_name], experiments_dir)
+        if first is not None and issued.validated_by != first:
+            problems.append(
+                f"{contract_name}: issued/{contract_name}/{label}.json names "
+                f"{issued.validated_by}, but the contract's first test card is {first}"
+            )
+    missing = sorted(set(passing) - set(covered))
+    ok = len(covered) >= MIN_NATIONAL_PASSES and not problems
+    lines = [
+        f"issued: {len(covered)}/{len(passing)} passing national contract(s) have an "
+        f"issued file for {label}; the exit needs >= {MIN_NATIONAL_PASSES}"
+    ]
+    lines += [f"  [ok]  {n}: issued/{n}/{label}.json ({chosen[n].validated_by})"
+              for n in covered]
+    lines += [f"  [..]  {n}: nothing issued for {label}" for n in missing]
+    lines += [f"  [FAIL] {p}" for p in problems]
+    return Check(name, ok, "\n".join(lines)), label, chosen
+
+
+def _first_test_card(
+    contract: Contract, experiments_dir: pathlib.Path | None = None
+) -> str | None:
+    """The id of the first test card in a contract's ledger, or None if it has none."""
+    where = data_mod.paths(contract, experiments_dir=experiments_dir)
+    for card in Ledger(where.ledger).read():
+        if card.split == "test":
+            return card.experiment_id
+    return None
+
+
+def _brief_check(
+    known: dict[str, Contract],
+    label: str,
+    issued: dict,
+    counties: list[str],
+    *,
+    briefs_dir: pathlib.Path | None,
+    issued_dir: pathlib.Path | None,
+    snapshot_dir: pathlib.Path,
+    experiments_dir: pathlib.Path | None,
+) -> Check:
+    """One committed brief for a spot-checked county, re-validated from the tree."""
+    from readiness import brief as brief_mod
+    from readiness import cite
+
+    name = "brief"
+    if not (label and issued):
+        return Check(name, False, "brief: nothing is issued, so no brief can cite one")
+    if not counties:
+        return Check(
+            name, False,
+            "brief: no county is in the exposure spot-check band, so there is no "
+            "county whose brief the exit would accept",
+        )
+    root = brief_mod.briefs_root(briefs_dir)
+    resolve = brief_mod.resolver(
+        known, issued_dir=issued_dir, snapshot_dir=snapshot_dir,
+        experiments_dir=experiments_dir,
+    )
+    tried: list[str] = []
+    for fips in counties:
+        path = root / fips / f"{label}.json"
+        if not path.exists():
+            continue
+        try:
+            doc = cite.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            tried.append(f"{data_mod.relative(path)}: unreadable ({exc})")
+            continue
+        violations = brief_mod.check(doc, resolve)
+        if not violations:
+            return Check(
+                name, True,
+                f"brief {data_mod.relative(path)} validates with zero violations and "
+                f"names nothing below the county ({len(doc.sentences)} sentences, "
+                f"{len(doc.claims)} claims)",
+            )
+        tried.append(
+            f"{data_mod.relative(path)}: {len(violations)} violation(s), "
+            f"first: {violations[0]}"
+        )
+    head = (
+        f"brief: no validating brief for {label} in the {len(counties)} spot-checked "
+        f"county/counties ({', '.join(counties[:5])}"
+        f"{', ...' if len(counties) > 5 else ''})"
+    )
+    detail = [head] + [f"  {t}" for t in tried]
+    if not tried:
+        detail.append(
+            f"  nothing under {data_mod.relative(root)}/<fips>/{label}.json; run "
+            f"`readiness brief --county {counties[0]} --period {label}`"
+        )
+    return Check(name, False, "\n".join(detail))

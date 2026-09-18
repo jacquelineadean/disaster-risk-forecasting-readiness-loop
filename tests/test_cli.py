@@ -19,14 +19,20 @@ import tempfile
 import unittest
 from unittest import mock
 
-from readiness import cli, contracts, data as data_mod, verify
+from readiness import brief as brief_mod
+from readiness import cite, cli, contracts, data as data_mod, verify
+from readiness import issue as issue_mod
 from readiness.agent import orchestrator
+from readiness.connectors import usa_structures
 from readiness.connectors.base import Manifest
 from readiness.connectors.census import County
+from readiness.harness.contract import Check
 from readiness.harness.labels import diagnose
 from tests.fixtures import make_panel
 from tests.test_features import FakeStatic
+from tests.test_issue import CANDIDATE, with_regions
 from tests.test_orchestrator import quick, signal_dataset
+from tests.test_verify import SPOT_COUNTIES, counts_csv, pin_counts
 
 
 def synthetic_dataset(contract, tmp: pathlib.Path) -> data_mod.Dataset:
@@ -818,6 +824,335 @@ class TestDashboardCommand(DataCase):
         code, _out = self.run_cli("dashboard", "-c", "flood-zz", "-o", str(target))
         self.assertEqual(code, 0)
         self.assertTrue(target.exists())
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: exposure, issue, brief, verify --phase 2
+# ---------------------------------------------------------------------------
+
+
+class ExposureCase(CliCase):
+    """Pinned USA Structures extracts in a temporary snapshot tree."""
+
+    def setUp(self):
+        super().setUp()
+        self.snapshots = self.dir / "snapshots"
+        self.patches = [
+            mock.patch.object(data_mod, "SNAPSHOT_DIR", self.snapshots),
+            mock.patch.object(data_mod, "MANIFEST_PATH", self.snapshots / "manifest.json"),
+        ]
+        for p in self.patches:
+            p.start()
+        self.manifest = Manifest(path=self.snapshots / "manifest.json")
+        for state, counties in SPOT_COUNTIES.items():
+            pin_counts(self.snapshots, self.manifest, state, counties)
+        self.manifest.save()
+        self.counts = self.dir / "assessor_counts.csv"
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        super().tearDown()
+
+    def every_county(self) -> dict:
+        return {f: n for counties in SPOT_COUNTIES.values() for f, n in counties.items()}
+
+
+class TestExposureCommands(ExposureCase):
+    def test_show_prints_every_county_of_a_state(self):
+        code, out = self.run_cli("exposure", "show", "--state", "99")
+        self.assertEqual(code, 0, out)
+        for fips in SPOT_COUNTIES["99"]:
+            self.assertIn(fips, out)
+        self.assertNotIn("98001", out)
+        self.assertIn("1,200", out)          # the county total, grouped
+        self.assertIn("vintage 2023", out)   # the layer year the record declares
+
+    def test_show_one_county_and_a_county_that_is_not_there(self):
+        code, out = self.run_cli("exposure", "show", "--county", "99003")
+        self.assertEqual(code, 0, out)
+        self.assertIn("99003", out)
+        self.assertNotIn("99001 ", out)
+        code, out = self.run_cli("exposure", "show", "--county", "99999")
+        self.assertEqual(code, 1)
+        self.assertIn("no row for 99999", out)
+
+    def test_show_every_pinned_state_by_default(self):
+        code, out = self.run_cli("exposure", "show")
+        self.assertEqual(code, 0, out)
+        self.assertIn("12 county/counties", out)
+        self.assertIn("97, 98, 99", out)
+
+    def test_show_says_so_when_nothing_is_pinned(self):
+        (self.snapshots / "manifest.json").write_text('{"records": {}}')
+        code, out = self.run_cli("exposure", "show")
+        self.assertEqual(code, 1)
+        self.assertIn("no USA Structures counts are pinned", out)
+
+    def test_spot_check_prints_every_ratio_and_passes_on_twelve(self):
+        counts_csv(self.counts, self.every_county())
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.counts))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("within"), 13)  # twelve rows, and the band's name
+        self.assertIn("spot-check -> PASS: 12/12 counties", out)
+
+    def test_spot_check_exits_1_below_ten_counties_or_three_states(self):
+        counts_csv(self.counts, dict(list(self.every_county().items())[:8]))
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.counts))
+        self.assertEqual(code, 1)
+        self.assertIn("spot-check -> NOT YET", out)
+        self.assertIn(">= 10 counties from >= 3 states", out)
+
+    def test_spot_check_prints_out_of_band_rows_without_counting_them(self):
+        counts_csv(self.counts, self.every_county(), ratio=3.0)
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.counts))
+        self.assertEqual(code, 1)
+        self.assertIn("OUTSIDE", out)
+        self.assertIn("0/12 counties within the band", out)
+
+    def test_spot_check_refuses_an_unpinned_state_by_name(self):
+        counts_csv(self.counts, {"96001": 1000})
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.counts))
+        self.assertEqual(code, 2)
+        self.assertIn("fema/usa_structures/96 is not pinned", out)
+        self.assertIn("readiness exposure snapshot --states 96", out)
+
+    def test_spot_check_refuses_a_malformed_counts_file_by_row(self):
+        self.counts.write_text(
+            "fips,assessor_count,count_definition,source_url,retrieved_on,notes\n"
+            "99001,1200,acres,https://example.invalid/x,2026-09-01,\n",
+            encoding="utf-8",
+        )
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.counts))
+        self.assertEqual(code, 2)
+        self.assertIn("count_definition must be one of", out)
+
+    def test_spot_check_refuses_a_missing_counts_file(self):
+        code, out = self.run_cli("exposure", "spot-check", "--counts", str(self.dir / "x"))
+        self.assertEqual(code, 2)
+        self.assertIn("no assessor counts file at", out)
+
+    def test_snapshot_pulls_the_named_states_and_pins_them(self):
+        pulled = {}
+
+        def fake_snapshot(states, snapshot_dir, manifest, **kw):
+            pulled["states"] = list(states)
+            pulled["layer_url"] = kw.get("layer_url")
+            for state in states:
+                pin_counts(snapshot_dir, manifest, state, SPOT_COUNTIES[state])
+            return []
+
+        with mock.patch.object(usa_structures, "snapshot", fake_snapshot):
+            code, out = self.run_cli("exposure", "snapshot", "--states", "97,98")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(pulled["states"], ["97", "98"])
+        self.assertEqual(pulled["layer_url"], usa_structures.LAYER_URL)
+        self.assertIn("8 counties", out)
+        self.assertIn("fema/usa_structures/<st>", out)
+
+    def test_snapshot_takes_a_layer_url_override(self):
+        with mock.patch.object(usa_structures, "snapshot") as fake:
+            fake.side_effect = lambda states, d, m, **kw: pin_counts(
+                d, m, "99", SPOT_COUNTIES["99"]
+            )
+            code, _out = self.run_cli(
+                "exposure", "snapshot", "--states", "99",
+                "--layer-url", "https://example.invalid/layer/0",
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(fake.call_args.kwargs["layer_url"],
+                         "https://example.invalid/layer/0")
+
+    def test_snapshot_needs_states_or_all_states(self):
+        code, out = self.run_cli("exposure", "snapshot")
+        self.assertEqual(code, 2)
+        self.assertIn("--states A,B or ask for --all-states", out)
+
+    def test_all_states_needs_the_pinned_county_file(self):
+        code, out = self.run_cli("exposure", "snapshot", "--all-states")
+        self.assertEqual(code, 2)
+        self.assertIn("--all-states needs the pinned Census county file", out)
+
+
+class Phase2Case(FeatureCase):
+    """A promoted test card, a temporary issued/ and briefs/, pinned exposure."""
+
+    def setUp(self):
+        super().setUp()
+        self.dataset = with_regions(self.dataset)
+        self.snapshots = self.dir / "snapshots"
+        self.issued_dir = self.dir / "issued"
+        self.briefs_dir = self.dir / "briefs"
+        self.phase2_patches = [
+            mock.patch.dict(os.environ, {
+                issue_mod.ISSUED_DIR_ENV: str(self.issued_dir),
+                brief_mod.BRIEFS_DIR_ENV: str(self.briefs_dir),
+            }),
+            mock.patch.object(data_mod, "SNAPSHOT_DIR", self.snapshots),
+            mock.patch.object(data_mod, "MANIFEST_PATH", self.snapshots / "manifest.json"),
+        ]
+        for p in self.phase2_patches:
+            p.start()
+        self.manifest = Manifest(path=self.snapshots / "manifest.json")
+        pin_counts(self.snapshots, self.manifest, "99",
+                   {fips: 1000 for fips in self.dataset.panel.regions})
+        self.manifest.save()
+
+    def tearDown(self):
+        for p in reversed(self.phase2_patches):
+            p.stop()
+        super().tearDown()
+
+    def promote(self):
+        """The one passing candidate, straight through the orchestrator."""
+        result = orchestrator.run_local(
+            self.contract, experiments_dir=self.experiments, dataset=self.dataset,
+            queue=[CANDIDATE], include_canary=False, promote=True,
+            progress=lambda _m: None,
+        )
+        self.assertIsNotNone(result.promoted)
+        return result.promoted
+
+    def issue(self, *extra, period="2026-Q1"):
+        return self.run_cli(
+            "issue", CANDIDATE.model, "-c", "flood-zz", "--period", period, "--quiet",
+            *(f for pair in sorted(CANDIDATE.kwargs.items())
+              for f in ("--param", f"{pair[0]}="
+                        + (",".join(map(str, pair[1])) if isinstance(pair[1], list)
+                           else str(pair[1])))),
+            *extra,
+        )
+
+
+class TestIssueCommand(Phase2Case):
+    def test_issue_writes_the_file_and_names_the_card(self):
+        card = self.promote()
+        code, out = self.issue()
+        self.assertEqual(code, 0, out)
+        path = self.issued_dir / "flood-zz" / "2026-Q1.json"
+        self.assertTrue(path.exists())
+        issued = issue_mod.Issued.read(path)
+        self.assertEqual(issued.validated_by, card.experiment_id)
+        self.assertEqual(sorted(issued.probabilities),
+                         sorted(r.fips for r in self.dataset.regions))
+        self.assertIn("issue  logistic+iso  for 2026-Q1  (flood-zz)", out)
+        self.assertIn("readiness brief --county 99001 --period 2026-Q1", out)
+
+    def test_issue_refuses_without_a_test_card(self):
+        code, out = self.issue()
+        self.assertEqual(code, 2)
+        self.assertIn("holds no test card", out)
+        self.assertFalse(self.issued_dir.exists())
+
+    def test_issue_refuses_a_period_the_data_does_not_reach(self):
+        self.promote()
+        code, out = self.issue(period="2026-Q2")
+        self.assertEqual(code, 2)
+        self.assertIn("period cannot be issued yet", out)
+        self.assertFalse(self.issued_dir.exists())
+
+    def test_issue_refuses_a_label_of_the_wrong_shape(self):
+        code, out = self.issue(period="2026-M04")
+        self.assertEqual(code, 2)
+        self.assertIn("is not a quarterly label", out)
+
+    def test_issue_has_no_flag_through_which_labels_could_arrive(self):
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["issue", "logistic", "-c", "flood-zz",
+                               "--period", "2026-Q1", "--labels", "labels.csv"])
+        issue_parser = parser._subparsers._group_actions[0].choices["issue"]
+        options = {o for action in issue_parser._actions for o in action.option_strings}
+        self.assertEqual({o for o in options if "label" in o or "outcome" in o}, set())
+
+
+class TestBriefCommand(Phase2Case):
+    def test_issue_then_brief_round_trip(self):
+        self.promote()
+        self.assertEqual(self.issue()[0], 0)
+        code, out = self.run_cli("brief", "--county", "99001", "--period", "2026-Q1")
+        self.assertEqual(code, 0, out)
+        html = self.briefs_dir / "99001" / "2026-Q1.html"
+        json_path = html.with_suffix(".json")
+        self.assertTrue(html.exists())
+        self.assertIn("1 brief(s) written, 0 refused", out)
+        doc = cite.from_json(json_path.read_text())
+        self.assertEqual(doc.kind, brief_mod.KIND)
+        self.assertEqual(brief_mod.sub_county_keys(cite.to_dict(doc)), [])
+        text = " ".join(cite.strip_markers(s.text) for s in doc.sentences)
+        self.assertIn("chance of at least one damaging inland flood event", text)
+        self.assertIn("holds 1,000 structures", text)   # the pinned exposure row
+        self.assertIn(cite.NOT_A_WARNING_SENTENCE, text)
+        self.assertNotIn("would touch", text)
+        # Re-validating the committed file against the tree finds nothing wrong.
+        resolver = brief_mod.resolver(
+            {"flood-zz": self.contract}, issued_dir=self.issued_dir,
+            snapshot_dir=self.snapshots, experiments_dir=self.experiments,
+        )
+        self.assertEqual(brief_mod.check(doc, resolver), [])
+        self.assertIn("USA Structures (public domain), county counts only",
+                      html.read_text())
+
+    def test_brief_for_a_whole_state_writes_one_per_county(self):
+        self.promote()
+        self.issue()
+        code, out = self.run_cli("brief", "--state", "99", "--period", "2026-Q1",
+                                 "--out", str(self.dir / "elsewhere"))
+        self.assertEqual(code, 0, out)
+        written = sorted((self.dir / "elsewhere").glob("*/2026-Q1.json"))
+        self.assertEqual(len(written), len(self.dataset.regions))
+        self.assertIn(f"{len(written)} brief(s) written, 0 refused", out)
+        self.assertFalse(self.briefs_dir.exists())
+
+    def test_brief_without_an_issued_file_says_what_to_run(self):
+        code, out = self.run_cli("brief", "--county", "99001", "--period", "2026-Q1")
+        self.assertEqual(code, 1)
+        self.assertIn("nothing is issued for period 2026-Q1", out)
+        self.assertIn("readiness issue MODEL", out)
+        self.assertFalse(self.briefs_dir.exists())
+
+    def test_brief_for_a_county_no_issued_file_covers(self):
+        self.promote()
+        self.issue()
+        code, out = self.run_cli("brief", "--county", "99999", "--period", "2026-Q1")
+        self.assertEqual(code, 1)
+        self.assertIn("not written", out)
+        self.assertIn("no issued file for period 2026-Q1 carries a "
+                      "probability for county 99999", out)
+        self.assertFalse((self.briefs_dir / "99999").exists())
+
+
+class TestVerifyPhase2(Phase2Case):
+    def test_verify_phase2_takes_no_contract_and_reports_every_check(self):
+        code, out = self.run_cli("verify", "--phase", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 2 exit criteria  (the registry)", out)
+        for name in ("national contracts", "exposure spot-check", "issued", "brief"):
+            self.assertIn(name, out)
+        self.assertIn("Phase 2 NOT met — 4 failure(s):", out)
+
+    def test_verify_phase2_refuses_a_contract_rather_than_ignoring_it(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "2")
+        self.assertEqual(code, 2)
+        self.assertIn("takes no contract", out)
+
+    def test_verify_phase2_exits_0_when_every_criterion_is_met(self):
+        met = verify.Phase2Result(tuple(
+            Check(name, True, f"{name}: met")
+            for name in ("national contracts", "exposure spot-check", "issued", "brief")
+        ))
+        with mock.patch.object(verify, "phase2", lambda **_kw: met):
+            code, out = self.run_cli("verify", "--phase", "2")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.rstrip().endswith("Phase 2 exit criteria met."))
+        self.assertEqual(len([ln for ln in out.splitlines() if ln.startswith("[ok]")]), 4)
+
+    def test_verify_phase2_needs_no_registered_contract_to_run(self):
+        # The registry here holds one state-scoped contract, so the national
+        # criterion is 0/0 and the command still prints rather than crashing.
+        code, out = self.run_cli("verify", "--phase", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("0/0 registered with scope 'every region'", out)
 
 
 if __name__ == "__main__":

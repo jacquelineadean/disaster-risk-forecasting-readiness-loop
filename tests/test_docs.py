@@ -59,7 +59,7 @@ PHASE2_FLAGS = (
     ("brief --state", ["brief", "--state", "OK", "--period", "2026-Q4"]),
 )
 #: Paths the README map names that arrive with the CLI clusters.
-PENDING_PATHS = {"readiness/backtest.py", "readiness/issue.py", "readiness/brief.py"}
+PENDING_PATHS = {"readiness/backtest.py"}
 
 
 def parser_accepts(argv: list[str]) -> bool:

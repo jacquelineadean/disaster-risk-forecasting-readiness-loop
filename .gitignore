@@ -19,6 +19,15 @@ snapshots/*
 experiments/*/dashboard.html
 experiments/index.html
 
+# Phase 2 outputs. `readiness issue` and `readiness brief` write these from the
+# committed ledgers and pinned data; a real run's files are committed
+# deliberately (a brief cites an issued file by path), not swept in by a
+# wildcard, so the trees carry only their README.
+issued/*
+!issued/README.md
+briefs/*
+!briefs/README.md
+
 # Scratch registry and ledgers used while regenerating docs/media.
 docs/.demo/
 
