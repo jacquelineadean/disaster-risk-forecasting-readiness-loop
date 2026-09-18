@@ -50,15 +50,19 @@ Phase 3 turns a county's risk into a document about one building:
 `readiness gap-report` stress-tests a facility's emergency plan against a
 hazard-agnostic 96-hour scenario, the facility's own record (no address or
 coordinate field exists — design intensity comes from the planner's
-elevation certificate or FIRM, cited as a facility document) and the
-county's issued risk layer, answering each scenario question `answered`,
-`unanswered`, `failed` or `cannot_run`, fail-closed when the design
-intensity is missing; it is validated by the same `readiness.cite` rules and
-rendered twice, plain and blinded (`FACILITY-<hash6>`, `PARTNER-n`), and
-real facility files and reports never enter git. `readiness review record`
-binds a practising emergency manager's rating to the sha256 of the blinded
-report they read. Its exit — three real facilities' blinded gap reports
-rated useful or better — needs both the data run and those reviews
+elevation certificate or FIRM, cited as a facility document; both keys and
+string values are scanned for places) and the county's issued risk layer,
+answering each scenario question `answered`, `unanswered`, `failed` or
+`cannot_run`, fail-closed when the design intensity is missing. It is
+validated by the same `readiness.cite` rules and rendered twice: the plain
+page with a legend, and a blinded one under `blinded/<label>/` carrying no
+slug, no names, no county and no timestamp, because no rule ever writes a
+name — sentences say `PARTNER-1` and `COUNTY-A`, the names live in the claims
+they cite, and the render refuses rather than ship a page that still holds
+one. Real facility files and reports never enter git. `readiness review
+record` binds a practising emergency manager's rating to the sha256 of the
+blinded report they read. Its exit — three real facilities' blinded gap
+reports rated useful or better — needs both the data run and those reviews
 ([docs/plans.md](docs/plans.md)).
 
 ---
@@ -536,7 +540,7 @@ readiness issue MODEL       refit the promoted model, write issued/<contract>/<p
 readiness brief             one cited, validated brief per county; exit 1 listing the violations  (--county FIPS | --state XX) --period YYYY-Qn [--out DIR]
 readiness scenarios         list the scenario library, or check every case study against its expected findings  {list|check} [--case-studies DIR]
 readiness gap-report        one cited, blinded gap report for a facility; exit 1 listing violations, exit 2 unreadable  --facility PATH --period YYYY-Qn [--scenario ID] [--out DIR] [--drafter local|claude]
-readiness review record     bind a rating to a blinded report's sha256, plans/reviews/<sha>.json  --report PATH.blind.html --rating {not useful,somewhat useful,useful,very useful} --role ROLE --org-type hospital|county|state|ngo|other --years N [--comments TEXT] [--reviews DIR]
+readiness review record     bind a rating to a blinded report's sha256, plans/reviews/<sha16>-<digest12>.json  --report PATH.blind.html --rating {not useful,somewhat useful,useful,very useful} --role ROLE --org-type hospital|county|state|ngo|other --years N [--comments TEXT] [--reviews DIR]
 readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2|3] [--replay] [--bless] [--reports DIR] [--reviews DIR]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
@@ -633,7 +637,7 @@ site/                the overview website: pages (briefs.html lists the fleet an
 plans/               guidance.json (the documents a report may cite), scenarios/ (md beside json, one
                      scenario), case-studies/ (worked examples with a source per fact; none ship).
                      facilities/, reports/, reviews/ hold real inputs and outputs and are gitignored
-                     except one fictional example and each directory's own README
+                     recursively: each carries its own README, and facilities/ one fictional example
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
 tests/               unittest suite, no network required
@@ -668,9 +672,19 @@ redesign:
   collected by a person, with URLs, into `exposure_expected/`. *Exit: at
   least four hazards pass the contract nationally; exposure joins
   spot-validated against county assessor counts in ten sampled counties.*
-- **Phase 3 — the planning thought-partner.** Scenario stress-tests of a
-  facility's emergency plan against the validated risk layer. Case studies
-  become regression tests. Seeded in [`plans/`](plans/).
+- **Phase 3 — the planning thought-partner.** *Built:* the facility record
+  with no address or coordinate field and its two place scans, the committed
+  96-hour scenario and the six rules that answer its questions fail-closed,
+  the issued risk layer read from `issued/` alone, `readiness gap-report`
+  with its cited document, its legend and its blinded render, the optional
+  `--drafter claude` whose every sentence is re-validated and refused rather
+  than dropped, `readiness review record` binding a rating to one blinded
+  page's sha256, case studies as regression tests, and `verify --phase 3`.
+  *Remaining:* three real facilities, their gap reports, and blinded reviews
+  by practising emergency managers — none of which is knowable offline, and
+  none of which this repository can establish about itself. *Exit: three
+  facilities' blinded gap reports rated useful or better by practising
+  emergency managers.*
 - **Phase 4 — global scale-out.** Swap US layers for Open Buildings, Flood Hub,
   EM-DAT. The architecture does not change; the connectors do.
 

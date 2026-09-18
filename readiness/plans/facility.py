@@ -9,7 +9,7 @@ Elevation Certificate or FIRM panel and cited as a facility document. Nothing
 address-level is ever pinned, joined or written, so nothing address-level can
 leak out of a report, a review record or the manifest.
 
-Two rules make the record trustworthy enough to reason over:
+Four rules make the record trustworthy enough to reason over:
 
 1. **Unknown keys are refused, by name.** A field this module does not know is
    a field no rule reads, and a silent drop would make a gap report look
@@ -18,6 +18,16 @@ Two rules make the record trustworthy enough to reason over:
    is not a number a planner remembers; it is a number on a document. The
    evidence entry says which document and which page, and every sentence a
    rule writes about that field cites the field path, which resolves back here.
+3. **Keys *and* values are scanned for places.** `FORBIDDEN_KEYS` is the key
+   scan; `FORBIDDEN_VALUE_PATTERNS` is the value scan, because a street
+   address in a free-text note is an address whatever the key is called. A
+   bare five-digit number is a county FIPS and is not a finding.
+4. **Every record carries its own random `blind_id`.** The label a blinded
+   report shows is a prefix of it, so the blinded artefact carries no preimage
+   of the slug, the county or anything else a reader could guess and confirm.
+
+Every string is whitespace-normalised at load, so one name has one spelling
+and the blinding cannot be defeated by a double space.
 
 Standard library only; no LLM, no labels, no scoring.
 """
@@ -25,17 +35,44 @@ Standard library only; no LLM, no labels, no scoring.
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import pathlib
+import re
 from typing import Any, Mapping, Sequence
 
 #: Keys that would name a place finer than a county. None of them exists in the
 #: schema; this tuple is the tripwire that says so out loud when one appears in
 #: a file a planner hands us.
 FORBIDDEN_KEYS: tuple[str, ...] = (
-    "address", "street", "lat", "lon", "latitude", "longitude",
-    "tract", "block", "parcel", "geocode",
+    "address", "address_line1", "address_line2", "apn", "block", "block_group",
+    "coordinates", "easting", "geocode", "geohash", "geometry", "gps",
+    "lat", "lat_lon", "latitude", "latlon", "lon", "longitude", "northing",
+    "parcel", "plus_code", "postal_code", "street", "tract", "zip", "zipcode",
+)
+
+#: Strings that name a place finer than a county even when the key does not.
+#: A key scan alone is a fail-open: `"note": "412 Riverside Drive, 27834-1234"`
+#: carries an address under a name no list could enumerate.
+#:
+#: A **bare five-digit number is deliberately absent**: that is a county FIPS,
+#: which is the one geography this repository does publish. Only ZIP+4 (which
+#: no county FIPS can be) and the literal token "ZIP" are matched.
+FORBIDDEN_VALUE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "a street address",
+        re.compile(
+            r"\b\d{1,6}\s+\w+(\s+\w+)?\s+"
+            r"(St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Boulevard|Way|"
+            r"Hwy|Highway)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("a ZIP+4 postcode", re.compile(r"\b\d{5}-\d{4}\b")),
+    (
+        "a decimal-degree coordinate pair",
+        re.compile(r"-?\d{1,3}\.\d{3,}\s*,\s*-?\d{1,3}\.\d{3,}"),
+    ),
+    ("the token 'ZIP'", re.compile(r"(?<!\w)ZIP(?!\w)", re.IGNORECASE)),
 )
 
 #: Why the refusal above is a design decision rather than an oversight.
@@ -51,8 +88,19 @@ OCCUPANCY_TYPES: tuple[str, ...] = (
     "hospital", "nursing_home", "shelter", "school", "other",
 )
 
-#: The number of hex characters of a facility hash a blinded report shows.
-BLIND_CHARS = 6
+#: The number of hex characters of a facility's `blind_id` a blinded report
+#: shows. The label is a prefix of a random id, not a digest of anything a
+#: reader could guess: a six-hex digest of a slug is a dictionary attack away
+#: from the slug, and this is the identifier a blinded artefact carries.
+BLIND_CHARS = 12
+
+#: How a planner makes the `blind_id` a record needs.
+BLIND_ID_COMMAND = 'python3 -c "import secrets; print(secrets.token_hex(16))"'
+
+_BLIND_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+#: The shape of the label a blinded page and a review record carry.
+BLIND_LABEL_RE = re.compile(r"^FACILITY-[0-9a-f]{12}$")
 
 
 class FacilityError(ValueError):
@@ -64,32 +112,35 @@ class FacilityError(ValueError):
 # --------------------------------------------------------------------------- #
 
 #: A leaf spec is (type name, required?). Type names are checked by `_coerce`.
-#: `number` accepts an int or a float; `int` refuses a float; `?` suffixes mark
-#: a leaf that may be null — which is not the same as absent.
+#: `number` accepts an int or a float; `int` refuses a float; a `+` suffix
+#: refuses a negative (there is no such thing as -5 hours of fuel or -3 feet of
+#: notice); `?` suffixes mark a leaf that may be null — which is not the same
+#: as absent. The order is `kind` then `+` then `?`: `"number+?"`.
 SCHEMA: dict[str, Any] = {
     "slug": "slug",
+    "blind_id": "blind_id",
     "occupancy_type": "occupancy",
     "county_fips": "fips",
-    "census": "int",
-    "staff_on_shift": "int",
+    "census": "int+",
+    "staff_on_shift": "int+",
     "power": {
         "generator": "bool",
-        "fuel_hours": "number",
-        "switchgear_elevation_ft": "number?",
-        "transfer_switch_elevation_ft": "number?",
-        "load_test_interval_days": "int?",
+        "fuel_hours": "number+",
+        "switchgear_elevation_ft": "number+?",
+        "transfer_switch_elevation_ft": "number+?",
+        "load_test_interval_days": "int+?",
     },
-    "water": {"on_site_storage_hours": "number?"},
+    "water": {"on_site_storage_hours": "number+?"},
     "design_intensity": {
-        "flood_elevation_ft": "number?",
+        "flood_elevation_ft": "number+?",
         "flood_elevation_source": "str?",
-        "design_wind_mph": "number?",
+        "design_wind_mph": "number+?",
     },
     "evacuation": {
         "trigger_written": "bool",
         "trigger_text": "str?",
         "authority": "str?",
-        "transport_lead_hours": "number?",
+        "transport_lead_hours": "number+?",
         "priority_order_written": "bool",
         "priority_decided_on": "str?",
     },
@@ -100,9 +151,13 @@ SCHEMA: dict[str, Any] = {
         "same_floodplain": "bool?",
         "same_grid_feeder": "bool?",
     }],
-    "co_located_operators": [{"name": "str", "occupants": "int"}],
+    "co_located_operators": [{"name": "str", "occupants": "int+"}],
     "evidence": "evidence",
 }
+
+#: Fields that are this repository's own bookkeeping rather than a fact read
+#: off a document, so no evidence entry names them and none may.
+UNEVIDENCED: tuple[str, ...] = ("blind_id",)
 
 #: An evidence entry's own keys.
 EVIDENCE_KEYS: tuple[str, ...] = ("text", "source_doc", "page")
@@ -185,6 +240,7 @@ class Facility:
     """One facility as its planner recorded it, every populated field evidenced."""
 
     slug: str
+    blind_id: str
     occupancy_type: str
     county_fips: str
     census: int
@@ -203,14 +259,16 @@ class Facility:
     # -- identity ----------------------------------------------------------
 
     @property
-    def facility_hash(self) -> str:
-        """sha256 of the slug: what a blinded report and a review record carry."""
-        return hashlib.sha256(self.slug.encode("utf-8")).hexdigest()
-
-    @property
     def blind_label(self) -> str:
-        """`FACILITY-<6 hex>`: the name a blinded reviewer sees, and only that."""
-        return blind_label(self.slug)
+        """`FACILITY-<12 hex>`: the name a blinded reviewer sees, and only that.
+
+        The first `BLIND_CHARS` characters of the record's own random
+        `blind_id`. It is not derived from the slug, the county or anything
+        else a reader could guess and confirm by hashing: the blinded page is
+        the artefact that leaves the building, so its identifier must carry no
+        preimage at all.
+        """
+        return blind_label(self.blind_id)
 
     # -- reading fields ----------------------------------------------------
 
@@ -242,10 +300,48 @@ class Facility:
         return self.evidence.get(head)
 
     def partner_names(self) -> tuple[str, ...]:
-        """Every name a blinded render must replace, partners and co-tenants."""
+        """Every name a report refers to positionally, partners then co-tenants."""
         names = [a.name for a in self.transfer_agreements]
         names += [o.name for o in self.co_located_operators]
         return tuple(dict.fromkeys(names))
+
+    def partner_labels(self) -> dict[str, str]:
+        """Name -> `PARTNER-n`, assigned once from the record, in record order.
+
+        Transfer agreements first, then co-located operators, each named once.
+        Prose never carries a name: a rule writes `PARTNER-2`, the name lives
+        in the claim that sentence cites, and the blinded render drops the
+        claim's name while keeping its label. The label is therefore a
+        property of the record, not of whichever sentence mentioned it first.
+        """
+        return {name: f"PARTNER-{i}"
+                for i, name in enumerate(self.partner_names(), start=1)}
+
+    def partner_label(self, name: str) -> str:
+        """The label for one recorded name, or the name itself if it is unknown."""
+        return self.partner_labels().get(name, name)
+
+    def county_labels(self) -> dict[str, str]:
+        """County FIPS -> `COUNTY-A`, this facility's county first.
+
+        A blinded page carries no county either: in a rural county with one
+        critical-access hospital the FIPS is the name.
+        """
+        codes = [self.county_fips]
+        codes += [a.county_fips for a in self.transfer_agreements]
+        out: dict[str, str] = {}
+        for index, fips in enumerate(dict.fromkeys(codes)):
+            out[fips] = f"COUNTY-{_letters(index)}"
+        return out
+
+    def document_labels(self) -> dict[str, str]:
+        """Evidence source document -> `DOCUMENT-n`, in evidence-key order."""
+        docs = [self.evidence[key].source_doc for key in sorted(self.evidence)]
+        source = self.design_intensity.flood_elevation_source
+        if source:
+            docs.append(source)
+        return {doc: f"DOCUMENT-{i}"
+                for i, doc in enumerate(dict.fromkeys(docs), start=1)}
 
     def to_dict(self) -> dict:
         return json.loads(json.dumps(self.raw, sort_keys=True))
@@ -257,6 +353,7 @@ class Facility:
         """Validate a parsed record and build the frozen view of it."""
         if not isinstance(raw, Mapping):
             raise FacilityError(f"{where}: expected a JSON object, got {type(raw).__name__}")
+        raw = normalise_strings(raw)
         _refuse_forbidden(raw, where)
         _check_keys(raw, SCHEMA, where, "")
         data = _read_object(raw, SCHEMA, where, "")
@@ -264,6 +361,7 @@ class Facility:
         _check_evidence(data, evidence, where)
         return cls(
             slug=data["slug"],
+            blind_id=data["blind_id"],
             occupancy_type=data["occupancy_type"],
             county_fips=data["county_fips"],
             census=data["census"],
@@ -296,9 +394,36 @@ class Facility:
         return cls.from_json(raw, where=str(path))
 
 
-def blind_label(slug: str) -> str:
-    digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()
-    return f"FACILITY-{digest[:BLIND_CHARS]}"
+def blind_label(blind_id: str) -> str:
+    """`FACILITY-<12 hex>` from a record's random `blind_id`."""
+    return f"FACILITY-{blind_id[:BLIND_CHARS]}"
+
+
+def _letters(index: int) -> str:
+    """0 -> A, 25 -> Z, 26 -> AA: a short label with no digits in it."""
+    out = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, 26)
+        out = chr(ord("A") + rest) + out
+    return out
+
+
+def normalise_strings(node: Any) -> Any:
+    """The record with every string's whitespace collapsed, recursively.
+
+    `"Mercy  Hospital"` and `"Mercy Hospital"` are one name. Prose collapses
+    whitespace when it is written, so a record that does not would leave the
+    blinding keyed on a string that never appears — which is how a partner's
+    real name reaches a blinded page.
+    """
+    if isinstance(node, str):
+        return " ".join(node.split())
+    if isinstance(node, Mapping):
+        return {key: normalise_strings(value) for key, value in node.items()}
+    if isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
+        return [normalise_strings(value) for value in node]
+    return node
 
 
 # --------------------------------------------------------------------------- #
@@ -306,17 +431,46 @@ def blind_label(slug: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _refuse_forbidden(node: Any, where: str, path: str = "") -> None:
-    """Any key from `FORBIDDEN_KEYS`, anywhere in the tree, refuses the file."""
+def forbidden_in(node: Any, path: str = "") -> list[tuple[str, str]]:
+    """Every key that would name a place, and every string value that does.
+
+    Two scans, because either alone is a fail-open. Keys catch a schema that
+    grew a `lat`; values catch `"note": "412 Riverside Drive"`, where no key
+    list could have helped. Each finding is the dotted path to the offending
+    node and what was seen there.
+
+    A bare five-digit number is **not** a finding: that is a county FIPS, the
+    one geography this repository publishes.
+    """
+    found: list[tuple[str, str]] = []
     if isinstance(node, Mapping):
         for key, value in node.items():
             here = f"{path}.{key}" if path else str(key)
             if str(key).casefold() in FORBIDDEN_KEYS:
-                raise FacilityError(f"{where}: field {here!r} is refused — {FORBIDDEN_REASON}")
-            _refuse_forbidden(value, where, here)
-    elif isinstance(node, Sequence) and not isinstance(node, str):
+                found.append((here, "a key that names a place"))
+            found.extend(forbidden_in(value, here))
+    elif isinstance(node, str):
+        for what, pattern in FORBIDDEN_VALUE_PATTERNS:
+            match = pattern.search(node)
+            if match:
+                found.append((
+                    path or "<root>",
+                    f"a value holding {what} ({match.group(0)!r})",
+                ))
+    elif isinstance(node, Sequence) and not isinstance(node, (str, bytes)):
         for i, value in enumerate(node):
-            _refuse_forbidden(value, where, f"{path}.{i}")
+            found.extend(forbidden_in(value, f"{path}.{i}" if path else str(i)))
+    return found
+
+
+def _refuse_forbidden(node: Any, where: str, path: str = "") -> None:
+    """Any forbidden key or place-naming value, anywhere, refuses the file."""
+    found = forbidden_in(node, path)
+    if found:
+        spot, what = found[0]
+        raise FacilityError(
+            f"{where}: field {spot!r} is refused, {what} — {FORBIDDEN_REASON}"
+        )
 
 
 def _check_keys(raw: Mapping, schema: Mapping, where: str, path: str) -> None:
@@ -396,6 +550,19 @@ def _read_evidence(value: Any, where: str, path: str) -> dict[str, dict]:
 def _coerce(value: Any, spec: str, where: str, path: str) -> Any:
     optional = spec.endswith("?")
     kind = spec[:-1] if optional else spec
+    non_negative = kind.endswith("+")
+    kind = kind[:-1] if non_negative else kind
+    if kind == "blind_id":
+        # Before the null check, so an absent one says how to make one too.
+        if not (isinstance(value, str) and _BLIND_ID_RE.match(value)):
+            raise FacilityError(
+                f"{where}: field {path!r} must be 32 lowercase hex characters, "
+                f"got {value!r}. It is the record's own blinding identifier and it "
+                f"must be random, not derived from anything a reader could guess. "
+                f"Generate one once, keep it in this file, and never change it:\n"
+                f"    {BLIND_ID_COMMAND}"
+            )
+        return value
     if value is None:
         if optional:
             return None
@@ -429,16 +596,30 @@ def _coerce(value: Any, spec: str, where: str, path: str) -> Any:
     if kind == "int":
         if isinstance(value, bool) or not isinstance(value, int):
             raise FacilityError(f"{where}: field {path!r} must be a whole number")
-        return value
+        return _check_sign(value, non_negative, where, path)
     if kind == "number":
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise FacilityError(f"{where}: field {path!r} must be a number")
-        return value
+        return _check_sign(value, non_negative, where, path)
     if kind == "str":
         if not isinstance(value, str) or not value.strip():
             raise FacilityError(f"{where}: field {path!r} must be a non-empty string")
         return value
     raise FacilityError(f"{where}: field {path!r} has an unknown schema type {spec!r}")
+
+
+def _check_sign(value: Any, non_negative: bool, where: str, path: str) -> Any:
+    """Hours, elevations, occupants and lead times are never negative.
+
+    A record with -5 hours of transport notice does not describe a facility
+    that needs five hours less warning; it describes a typo, and a rule that
+    reasons over it would report a break at a negative hour.
+    """
+    if non_negative and value < 0:
+        raise FacilityError(
+            f"{where}: field {path!r} must not be negative, got {value!r}"
+        )
+    return value
 
 
 # --------------------------------------------------------------------------- #
@@ -450,7 +631,7 @@ def populated_paths(data: Mapping, schema: Mapping = SCHEMA, path: str = "") -> 
     """Every populated leaf field path, in schema order. `evidence` is not one."""
     out: list[str] = []
     for key, spec in schema.items():
-        if spec == "evidence":
+        if spec == "evidence" or (not path and key in UNEVIDENCED):
             continue
         here = f"{path}.{key}" if path else str(key)
         value = data[key]
@@ -493,11 +674,15 @@ def _check_evidence(data: Mapping, evidence: Mapping[str, dict], where: str) -> 
 
 __all__ = [
     "BLIND_CHARS",
+    "BLIND_ID_COMMAND",
+    "BLIND_LABEL_RE",
     "EVIDENCE_KEYS",
     "FORBIDDEN_KEYS",
     "FORBIDDEN_REASON",
+    "FORBIDDEN_VALUE_PATTERNS",
     "OCCUPANCY_TYPES",
     "SCHEMA",
+    "UNEVIDENCED",
     "CoLocatedOperator",
     "DesignIntensity",
     "Evacuation",
@@ -508,5 +693,7 @@ __all__ = [
     "TransferAgreement",
     "Water",
     "blind_label",
+    "forbidden_in",
+    "normalise_strings",
     "populated_paths",
 ]

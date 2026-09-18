@@ -42,10 +42,8 @@ PHASE1_FLAGS = (
     ("promote --spend-test-touch",
      ["promote", "m", "-c", "x", "--spend-test-touch"]),
 )
-# INTEGRATOR: the Phase 2 command surface, implemented by the Phase 2 CLI
-# cluster (`readiness/issue.py`, `readiness/brief.py`, `exposure ...`). The
-# docs name it now; the parser-backed assertions skip until that parser is
-# merged and must run, not skip, afterwards.
+# The Phase 2 command surface (`readiness/issue.py`, `readiness/brief.py`,
+# `exposure ...`). Every assertion below runs; none is guarded or skipped.
 PHASE2_COMMANDS = {"exposure", "issue", "brief"}
 PHASE2_FLAGS = (
     ("verify --phase 2", ["verify", "--phase", "2"]),
@@ -143,15 +141,16 @@ class TestReadmeCommandsExist(unittest.TestCase):
         self.assertTrue(named, "found no `readiness <subcommand>` lines to check")
 
         available = parser_commands()
-        missing = named - available
+        # Both directions. A README naming a subcommand the CLI lost sends a
+        # reader to an error; a CLI carrying one the README never mentions is
+        # a surface nobody was told about, and "every code surface is named in
+        # the docs" is the standard this file exists to hold.
         self.assertEqual(
-            missing - PHASE1_COMMANDS - PHASE2_COMMANDS - PHASE3_COMMANDS, set(),
-            f"README's Commands block names subcommands the CLI does not have: {missing}",
+            named, available,
+            "the README's Commands block and the CLI's subcommands differ: "
+            f"only in the README {sorted(named - available)}, "
+            f"only in the CLI {sorted(available - named)}",
         )
-        if missing:
-            self.skipTest(
-                f"Phase 1/2/3 subcommands not in this tree's parser yet: {sorted(missing)}"
-            )
 
     def test_commands_block_names_the_phase1_surface(self):
         # Text-only, so it runs in every tree: the README documents exactly the
@@ -388,6 +387,96 @@ class TestBriefDocStatesTheRules(unittest.TestCase):
                         "readiness verify --phase 3"):
             self.assertIn(command, text, f"how-it-works.md lacks {command!r}")
 
+    def test_how_it_works_section_13_states_what_changed(self):
+        text = " ".join(HOW_IT_WORKS.read_text().split())
+        for phrase in ("blind_id", "PARTNER-1", "COUNTY-A",
+                       "<out>/blinded/<label>/", "no timestamp",
+                       "refused, not dropped", "atomically",
+                       "never a path under the reports tree"):
+            self.assertIn(phrase, text, f"how-it-works.md lacks {phrase!r}")
+
+
+class TestRoadmapBulletsHaveTheSameShape(unittest.TestCase):
+    """Phases 1, 2 and 3 are each Built / Remaining / Exit, or the Roadmap is
+    telling a reader that Phase 3 is not built while the rest of the file says
+    it is."""
+
+    def bullet(self, phase: int) -> str:
+        text = README.read_text()
+        block = text.split("## Roadmap", 1)[1]
+        start = block.index(f"- **Phase {phase} —")
+        end = block.find("\n- **Phase", start + 1)
+        return block[start:end if end != -1 else len(block)]
+
+    def test_phase3_reads_built_remaining_exit_like_phases_1_and_2(self):
+        for phase in (1, 2, 3):
+            with self.subTest(phase=phase):
+                bullet = " ".join(self.bullet(phase).split())
+                self.assertIn("*Built:*", bullet)
+                self.assertIn("*Remaining:*", bullet)
+                self.assertIn("*Exit:", bullet)
+
+    def test_the_phase3_bullet_names_its_commands(self):
+        bullet = " ".join(self.bullet(3).split())
+        for command in ("readiness gap-report", "readiness review record",
+                        "verify --phase 3"):
+            self.assertIn(command, bullet, f"the Roadmap's Phase 3 bullet lacks {command!r}")
+
+
+class TestForbiddenKeysAreQuotedInFull(unittest.TestCase):
+    """A doc that enumerates the no-place keys quotes all of them, or says so.
+
+    A closed-looking list that is missing four of its members teaches a reader
+    that `geohash` is allowed. Either quote the whole tuple, or name it —
+    "the keys `facility.FORBIDDEN_KEYS` lists" — and give a few examples.
+    """
+
+    #: The docs that describe the guard. Design records written before the
+    #: code are not among them; they describe an intention, not a vocabulary.
+    DOCS = (README, HOW_IT_WORKS, PLANS_DOC,
+            REPO_ROOT / "plans" / "facilities" / "README.md")
+
+    def quoted(self, text: str) -> list[str]:
+        from readiness.plans.facility import FORBIDDEN_KEYS
+
+        return [key for key in FORBIDDEN_KEYS if f"`{key}`" in text]
+
+    def test_any_doc_that_lists_them_lists_all_of_them(self):
+        from readiness.plans.facility import FORBIDDEN_KEYS
+
+        for path in self.DOCS:
+            with self.subTest(doc=path.name):
+                text = path.read_text()
+                quoted = self.quoted(text)
+                if len(quoted) < 3:
+                    continue
+                if "facility.FORBIDDEN_KEYS" in text:
+                    continue
+                self.assertEqual(
+                    sorted(quoted), sorted(FORBIDDEN_KEYS),
+                    f"{path.name} quotes {len(quoted)} of {len(FORBIDDEN_KEYS)} "
+                    "forbidden keys as a closed list; quote them all or name "
+                    "`facility.FORBIDDEN_KEYS`",
+                )
+
+    def test_at_least_one_doc_quotes_the_whole_set(self):
+        # Otherwise the rule above is satisfied by naming the tuple everywhere
+        # and never telling a reader what is in it.
+        from readiness.plans.facility import FORBIDDEN_KEYS
+
+        full = [p for p in self.DOCS
+                if sorted(self.quoted(p.read_text())) == sorted(FORBIDDEN_KEYS)]
+        self.assertTrue(full, "no doc quotes the full FORBIDDEN_KEYS tuple")
+
+    def test_the_value_scan_is_documented_where_the_key_scan_is(self):
+        for path in (PLANS_DOC, REPO_ROOT / "plans" / "facilities" / "README.md",
+                     HOW_IT_WORKS):
+            with self.subTest(doc=path.name):
+                text = " ".join(path.read_text().split())
+                self.assertIn("street address", text)
+                self.assertIn("ZIP+4", text)
+                self.assertIn("county FIPS", text)
+
 
 class TestPlansDocStatesTheRules(unittest.TestCase):
     """docs/plans.md names the four `verify --phase 3` checks and the four
@@ -411,6 +500,30 @@ class TestPlansDocStatesTheRules(unittest.TestCase):
                        "FACILITY-", "PARTNER-", "sha256",
                        "never enter git", "practising emergency manager"):
             self.assertIn(phrase, text, f"docs/plans.md lacks {phrase!r}")
+
+    def test_states_every_behaviour_the_review_round_changed(self):
+        text = " ".join(PLANS_DOC.read_text().split())
+        for phrase in (
+            "blind_id",                       # the label is a random id
+            "secrets.token_hex(16)",          # and how to make one
+            "COUNTY-A",                       # counties are blinded too
+            "DOCUMENT-3",                     # and evidence documents
+            "blinded/<label>/",               # its own directory
+            "no timestamp",                   # so the sha does not move
+            "legend",                         # the plain page carries one
+            "refused and kept their local wording",   # fallback, not deletion
+            "atomically",                     # the three files
+            "never a path under the reports tree",    # no de-blinding table
+            "facility_label",                 # the renamed review field
+            "distinctive slug",               # the one thing blinding needs
+        ):
+            self.assertIn(phrase, text, f"docs/plans.md lacks {phrase!r}")
+
+    def test_the_period_grammar_is_quoted_as_the_code_enforces_it(self):
+        from readiness.plans import gap_report as gap_report_mod
+
+        text = PLANS_DOC.read_text()
+        self.assertIn(gap_report_mod.PERIOD_RE.pattern.strip("^$"), text)
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):

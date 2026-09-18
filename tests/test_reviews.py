@@ -1,6 +1,5 @@
 """Review records: the sha must match, the vocabulary is closed, nothing else is claimed."""
 
-import json
 import pathlib
 import tempfile
 import unittest
@@ -48,7 +47,8 @@ class TestRecording(ReviewCase):
             blind, reviews_dir=self.reviews_dir, **KWARGS
         )
         self.assertEqual(review.report_sha256, reviews_mod.sha256_of(blind))
-        self.assertEqual(path.name, f"{review.report_sha256}.json")
+        self.assertEqual(path.name, reviews_mod.file_name(review))
+        self.assertTrue(path.name.startswith(review.report_sha256[:16] + "-"))
         self.assertTrue(review.blinded)
 
         # Change one byte of the report and the review no longer describes it.
@@ -63,14 +63,33 @@ class TestRecording(ReviewCase):
             )
         self.assertIn("the report changed after it was reviewed", str(ctx.exception))
 
-    def test_it_takes_the_facility_hash_and_period_from_the_page_itself(self):
+    def test_it_takes_the_facility_label_and_period_from_the_page_itself(self):
         blind = self.write_report(slug="saint-example")
         _path, review = reviews_mod.record(blind, reviews_dir=self.reviews_dir, **KWARGS)
         self.assertEqual(
-            review.facility_hash, fp.make_facility(slug="saint-example").blind_label
+            review.facility_label, fp.make_facility(slug="saint-example").blind_label
         )
         self.assertEqual(review.period, fp.PERIOD)
-        self.assertNotIn("saint-example", review.facility_hash)
+        self.assertNotIn("saint-example", review.facility_label)
+        self.assertRegex(review.facility_label, r"^FACILITY-[0-9a-f]{12}$")
+
+    def test_a_page_of_another_kind_is_refused(self):
+        page = self.write_report().read_text(encoding="utf-8")
+        other = page.replace("|gap-report\"", "|county-brief\"")
+        path = self.dir / "other.blind.html"
+        path.write_text(other, encoding="utf-8")
+        with self.assertRaises(ReviewError) as ctx:
+            reviews_mod.record(path, reviews_dir=self.reviews_dir, **KWARGS)
+        self.assertIn("county-brief", str(ctx.exception))
+        self.assertIn("gap-report", str(ctx.exception))
+
+    def test_a_directory_passed_as_the_report_is_a_refusal(self):
+        # Finding 14: `record` checked `exists()` and then read unguarded, so
+        # the CLI answered a mistyped path with an IsADirectoryError traceback.
+        directory = self.write_report().parent
+        with self.assertRaises(ReviewError) as ctx:
+            reviews_mod.record(directory, reviews_dir=self.reviews_dir, **KWARGS)
+        self.assertIn("cannot be read", str(ctx.exception))
 
     def test_it_refuses_a_page_that_is_not_a_blinded_render(self):
         plain = self.dir / "plain.html"
@@ -107,7 +126,8 @@ class TestRecording(ReviewCase):
 class TestVocabulary(unittest.TestCase):
     def base(self, **overrides):
         raw = {
-            "report_sha256": "a" * 64, "facility_hash": "FACILITY-abc123",
+            "report_sha256": "a" * 64,
+            "facility_label": "FACILITY-abc123def456",
             "period": "2026-Q4", "reviewer_role": "practising emergency manager",
             "organisation_type": "hospital", "years_in_role": 9, "rating": "useful",
         }
@@ -159,9 +179,28 @@ class TestVocabulary(unittest.TestCase):
         )
 
     def test_a_malformed_sha_is_refused(self):
-        for sha in ("", "abc", "z" * 64, "A" * 64):
+        for sha in ("", "abc", "z" * 64, "A" * 64, "a" * 65, "a" * 128, "a" * 63):
             with self.subTest(sha=sha), self.assertRaises(ReviewError):
                 Review.from_dict(self.base(report_sha256=sha))
+
+    def test_a_malformed_facility_label_is_refused(self):
+        # Finding 12: the field was an unvalidated string that
+        # `distinct_facilities` de-duplicated the exit criterion on.
+        for label in ("", "FACILITY-abc123", "facility-abc123def456",
+                      "FACILITY-ABC123DEF456", "FACILITY-abc123def4567",
+                      "abc123def456", "saint-example"):
+            with self.subTest(label=label), self.assertRaises(ReviewError):
+                Review.from_dict(self.base(facility_label=label))
+
+    def test_a_top_level_that_is_not_an_object_is_refused(self):
+        for payload in (None, [], "a review", 3):
+            with self.subTest(payload=payload), self.assertRaises(ReviewError):
+                Review.from_dict(payload, where="r.json")
+
+    def test_a_mis_typed_year_count_is_a_refusal_not_a_type_error(self):
+        with self.assertRaises(ReviewError) as ctx:
+            Review.from_dict(self.base(years_in_role="ten years"))
+        self.assertIn("years_in_role", str(ctx.exception))
 
     def test_years_must_be_a_whole_number(self):
         with self.assertRaises(ReviewError):
@@ -182,7 +221,7 @@ class TestVocabulary(unittest.TestCase):
 
 class TestLoading(ReviewCase):
     def test_load_all_reads_every_record(self):
-        for slug in ("one", "two", "three"):
+        for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
             reviews_mod.record(
                 self.write_report(slug=slug), reviews_dir=self.reviews_dir, **KWARGS
             )
@@ -201,24 +240,49 @@ class TestLoading(ReviewCase):
             reviews_mod.load_all(self.reviews_dir)
         self.assertIn("not valid JSON", str(ctx.exception))
 
-    def test_two_reviews_of_one_report_are_one_file(self):
+    def test_two_reviews_of_one_report_coexist(self):
+        # Finding 6: naming the file after the report's sha alone meant the
+        # second emergency manager to review a report destroyed the first.
         blind = self.write_report()
-        first, _ = reviews_mod.record(blind, reviews_dir=self.reviews_dir, **KWARGS)
-        second, _ = reviews_mod.record(
+        first, review_a = reviews_mod.record(
+            blind, reviews_dir=self.reviews_dir, **KWARGS
+        )
+        second, review_b = reviews_mod.record(
             blind, reviews_dir=self.reviews_dir,
-            **{**KWARGS, "rating": "very useful"}
+            **{**KWARGS, "rating": "not useful",
+               "reviewer_role": "practising emergency manager B"},
+        )
+        self.assertNotEqual(first, second)
+        self.assertEqual(review_a.report_sha256, review_b.report_sha256)
+        ratings = {r.rating for r in reviews_mod.load_all(self.reviews_dir)}
+        self.assertEqual(ratings, {"useful", "not useful"})
+
+    def test_recording_the_same_attestation_twice_is_idempotent(self):
+        blind = self.write_report()
+        first, review_a = reviews_mod.record(
+            blind, reviews_dir=self.reviews_dir, **KWARGS
+        )
+        before = first.read_text(encoding="utf-8")
+        second, review_b = reviews_mod.record(
+            blind, reviews_dir=self.reviews_dir, recorded_at="2099-01-01T00:00:00+00:00",
+            **KWARGS
         )
         self.assertEqual(first, second)
-        self.assertEqual(
-            json.loads(second.read_text(encoding="utf-8"))["rating"], "very useful"
-        )
+        self.assertEqual(second.read_text(encoding="utf-8"), before)
+        self.assertEqual(review_a, review_b)
+        self.assertEqual(len(reviews_mod.load_all(self.reviews_dir)), 1)
 
 
 class TestNothingIsCommitted(unittest.TestCase):
     def test_the_repository_ships_no_review(self):
-        root = pathlib.Path(reviews_mod.REVIEWS_DIR)
-        self.assertEqual(sorted(root.glob("*.json")), [])
-        self.assertTrue((root / "README.md").exists())
+        # `git ls-files`, not a glob over the working tree: the glob misses a
+        # record in a subdirectory and trips over the planner's own ignored one.
+        from tests.test_facility import ignored, tracked
+
+        self.assertEqual(tracked("plans/reviews"), ["plans/reviews/README.md"])
+        for name in ("2026/deadbeef.json", "review.JSON", "notes.md", "a/b/c.json"):
+            with self.subTest(name=name):
+                self.assertTrue(ignored(f"plans/reviews/{name}"))
 
     def test_the_readme_says_what_the_record_cannot_establish(self):
         text = (pathlib.Path(reviews_mod.REVIEWS_DIR) / "README.md").read_text()

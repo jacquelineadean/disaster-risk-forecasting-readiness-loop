@@ -1,5 +1,6 @@
 {
   "slug": "example-rural-hospital",
+  "blind_id": "3049ff11b632f8d2e54d1da85cc8d7ad",
   "occupancy_type": "hospital",
   "county_fips": "99001",
   "census": 24,
@@ -51,7 +52,7 @@
   ],
   "evidence": {
     "slug": {
-      "text": "Identifier this planning record uses for the facility. Not a name, not a place: the blinded rendering replaces it with FACILITY-<hash>.",
+      "text": "Identifier this planning record uses for the facility. Not a name, not a place: the blinded rendering replaces it with the label built from blind_id.",
       "source_doc": "This planning record (fictional, for documentation only)",
       "page": null
     },

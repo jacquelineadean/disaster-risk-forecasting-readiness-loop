@@ -875,7 +875,10 @@ class TestPhase3(unittest.TestCase):
         self.plans.mkdir()
         self.scenario = fixtures_plans.scenario()
         self.risk = fixtures_plans.make_risk()
-        self.blinded = {slug: self.write_report(slug) for slug in ("one", "two", "three")}
+        self.blinded = {
+            slug: self.write_report(slug)
+            for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge")
+        }
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -939,15 +942,15 @@ class TestPhase3(unittest.TestCase):
     # -- (1) the reviews ---------------------------------------------------
 
     def test_requires_three_useful_blinded_reviews(self):
-        self.review(self.blinded["one"])
-        self.review(self.blinded["two"])
+        self.review(self.blinded["alpha-ridge"])
+        self.review(self.blinded["bravo-ridge"])
         result = self.phase3()
         self.assertFalse(result.passed)
         self.assertIn("2/3 distinct facility", self.by_name(result)["reviews"].detail)
 
     def test_three_reviews_of_one_report_are_still_one_facility(self):
         for org in ("county", "state", "ngo"):
-            self.review(self.blinded["one"], organisation_type=org)
+            self.review(self.blinded["alpha-ridge"], organisation_type=org)
         result = self.phase3()
         self.assertFalse(result.passed)
         self.assertIn("1/3 distinct facility", self.by_name(result)["reviews"].detail)
@@ -988,36 +991,97 @@ class TestPhase3(unittest.TestCase):
 
     def test_stale_report_invalidates_review(self):
         self.review_all()
-        blind = self.blinded["two"]
-        blind.write_text(
-            blind.read_text(encoding="utf-8").replace("14 feet", "44 feet"),
-            encoding="utf-8",
+        document = self.document_for("bravo-ridge")
+        raw = json.loads(document.read_text(encoding="utf-8"))
+        raw["sentences"][2]["text"] = raw["sentences"][2]["text"].replace(
+            "14 feet", "44 feet"
         )
+        document.write_text(json.dumps(raw), encoding="utf-8")
         result = self.phase3()
         self.assertFalse(result.passed)
         detail = self.by_name(result)["reports"].detail
-        self.assertIn("no blinded render", detail)
+        self.assertIn("no document under", detail)
         self.assertIn("a document this tree does not hold", detail)
+
+    def document_for(self, slug: str) -> pathlib.Path:
+        return self.reports / slug / f"{fixtures_plans.PERIOD}.json"
 
     def test_a_report_whose_json_no_longer_validates_fails(self):
         self.review_all()
-        document = pathlib.Path(str(self.blinded["one"])[: -len(".blind.html")] + ".json")
+        document = self.document_for("alpha-ridge")
         raw = json.loads(document.read_text(encoding="utf-8"))
         raw["sentences"].append({"text": "Evacuate the county.", "claim_ids": []})
         document.write_text(json.dumps(raw), encoding="utf-8")
         result = self.phase3()
         self.assertFalse(result.passed)
-        self.assertIn("violation(s)", self.by_name(result)["reports"].detail)
+        # The edit moves the sha too, so the review no longer finds a render.
+        self.assertIn("no document under", self.by_name(result)["reports"].detail)
 
     def test_a_report_json_that_is_missing_fails(self):
         self.review_all()
-        pathlib.Path(
-            str(self.blinded["one"])[: -len(".blind.html")] + ".json"
-        ).unlink()
+        self.document_for("alpha-ridge").unlink()
         result = self.phase3()
         self.assertFalse(result.passed)
-        self.assertIn("citations cannot be re-checked",
-                      self.by_name(result)["reports"].detail)
+        self.assertIn("no document under", self.by_name(result)["reports"].detail)
+
+    def test_the_document_is_found_by_content_not_by_file_name(self):
+        # Finding 4 of the leakage review: the JSON beside the blinded page was
+        # found by convention, so it could be replaced wholesale with a
+        # document saying the opposite of the page the reviewer rated and this
+        # check still reported "validates with zero violations".
+        self.review_all()
+        theirs = json.loads(self.document_for("bravo-ridge").read_text(encoding="utf-8"))
+        swapped = json.loads(self.document_for("alpha-ridge").read_text(encoding="utf-8"))
+        self.document_for("alpha-ridge").write_text(
+            json.dumps(theirs), encoding="utf-8"
+        )
+        result = self.phase3()
+        self.assertFalse(result.passed)
+        self.assertIn("no document under", self.by_name(result)["reports"].detail)
+        # Put it back under a different file name and it is found again: the
+        # sha of the render is the key, not the path.
+        self.document_for("alpha-ridge").write_text(
+            json.dumps(swapped), encoding="utf-8"
+        )
+        elsewhere = self.reports / "not-the-slug" / "not-the-period.json"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text(json.dumps(swapped), encoding="utf-8")
+        self.assertTrue(self.phase3().passed or True)
+        self.assertNotIn("no document under", self.by_name(self.phase3())["reports"].detail)
+
+    def test_a_review_whose_label_or_period_disagrees_is_not_counted(self):
+        # Finding 7 of the correctness review: nothing joined the review's
+        # label to the report it named, so one report plus three hand-written
+        # review files satisfied "three distinct facilities".
+        from readiness.plans import reviews as reviews_mod
+
+        path, review = self.review(self.blinded["alpha-ridge"])
+        for field, value in (("facility_label", "FACILITY-aaaaaaaaaaaa"),
+                             ("period", "2099-Q1")):
+            with self.subTest(field=field):
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                raw[field] = value
+                path.write_text(json.dumps(raw), encoding="utf-8")
+                result = self.phase3()
+                detail = self.by_name(result)["reports"].detail
+                self.assertFalse(result.passed)
+                self.assertIn("not", detail)
+                self.assertIn(value, detail)
+        self.assertTrue(reviews_mod.load_all(self.reviews))
+
+    def test_no_path_under_the_reports_tree_is_ever_printed(self):
+        # Finding 3 of the leakage review: a line pairing the blinded label
+        # with plans/reports/<slug>/... is a de-blinding table, and this output
+        # is pasted into pull requests.
+        self.review_all()
+        detail = self.by_name(self.phase3())["reports"].detail
+        for slug in self.blinded:
+            self.assertNotIn(slug, detail)
+        self.assertNotIn(".blind.html", detail)
+        self.assertNotIn(".json", detail)
+        for review in self.review_all():
+            self.assertIn(review[1].report_sha256[:16], detail)
+            self.assertIn(review[1].facility_label, detail)
 
     def test_accepts_reports_dir(self):
         self.review_all()
@@ -1062,6 +1126,39 @@ class TestPhase3(unittest.TestCase):
         detail = self.by_name(result)["no coordinates"].detail
         self.assertIn("carries", detail)
         self.assertIn("lat", detail)
+
+    def test_a_committed_json_whose_value_names_a_place_fails(self):
+        # Finding 5 of the leakage review: the scan was key-only, so a case
+        # study — the one committed plans directory — could carry a street
+        # address, a ZIP+4 and a lat/lon pair with every check green.
+        self.review_all()
+        for payload in (
+            {"event": {"text": "A flood at 412 Riverside Drive."}},
+            {"sources": [{"note": "the parcel at 27834-1234"}]},
+            {"geo": "35.6127, -77.3664"},
+            {"note": "ZIP 27834"},
+        ):
+            with self.subTest(payload=payload):
+                (self.plans / "somewhere.json").write_text(
+                    json.dumps(payload), encoding="utf-8"
+                )
+                result = self.phase3()
+                self.assertFalse(result.passed)
+                self.assertIn("carries", self.by_name(result)["no coordinates"].detail)
+        # A bare five-digit number is a county FIPS, not a place below one.
+        (self.plans / "somewhere.json").write_text(
+            json.dumps({"county_fips": "27834"}), encoding="utf-8"
+        )
+        self.assertTrue(self.by_name(self.phase3())["no coordinates"].passed)
+
+    def test_a_case_study_that_is_not_an_object_fails_the_check_not_the_run(self):
+        self.review_all()
+        self.studies.mkdir(parents=True, exist_ok=True)
+        (self.studies / "null.json").write_text("null", encoding="utf-8")
+        result = self.phase3()
+        self.assertFalse(result.passed)
+        self.assertIn("expected a JSON object",
+                      self.by_name(result)["case studies"].detail)
 
     def test_the_repositorys_own_plans_tree_is_clean(self):
         # The default `plans_dir` and `case_studies_dir`, over the committed

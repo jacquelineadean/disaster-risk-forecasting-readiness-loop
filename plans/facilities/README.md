@@ -18,11 +18,43 @@ does not exist, in a county that does not exist — and nothing else.
 
 * **Unknown keys.** A field no rule reads is a field a planner thought they had
   supplied. The refusal names the key rather than dropping it.
-* **Address and coordinates.** `address`, `street`, `lat`, `lon`, `latitude`,
-  `longitude`, `tract`, `block`, `parcel` and `geocode` are refused anywhere in
-  the file, with the reason. Nothing in this repository is keyed finer than a
-  county (report §7), and address-level intensity would have to be pinned
-  somewhere for a model to read it.
+* **Address and coordinates, by key *and* by value.** The keys
+  `facility.FORBIDDEN_KEYS` lists — `address`, `address_line1`,
+  `address_line2`, `apn`, `block`, `block_group`, `coordinates`, `easting`,
+  `geocode`, `geohash`, `geometry`, `gps`, `lat`, `lat_lon`, `latitude`,
+  `latlon`, `lon`, `longitude`, `northing`, `parcel`, `plus_code`,
+  `postal_code`, `street`, `tract`, `zip`, `zipcode` — are refused anywhere in
+  the file, with the reason. So is any *string value* that reads as a street
+  address (`412 Riverside Drive`), a ZIP+4 (`27834-1234`), a decimal-degree
+  pair (`35.6127, -77.3664`) or the token `ZIP`: a key list cannot cover a
+  free-text note, and a note is where an address actually ends up. A bare
+  five-digit number is a county FIPS and is not flagged. Nothing in this
+  repository is keyed finer than a county (report §7), and address-level
+  intensity would have to be pinned somewhere for a model to read it.
+* **Negative hours, elevations, counts and lead times.** `-5` hours of
+  transport notice is a typo, not a facility that needs five hours less
+  warning, and a rule reasoning over it would report a break at a negative
+  hour.
+
+## `blind_id`, and choosing a slug
+
+Every record carries a `blind_id`: 32 lowercase hex characters, generated once
+and kept forever.
+
+```
+python3 -c "import secrets; print(secrets.token_hex(16))"
+```
+
+The label a blinded report shows a reviewer is `FACILITY-` plus its first
+twelve characters. It is deliberately not derived from the slug: a truncated
+digest of a human-chosen slug is a dictionary search away from the building's
+name, and the blinded page is the artefact that leaves the building.
+
+Choose a **distinctive** slug while you are at it. The blinded render checks
+its own output and refuses to ship a page that still contains the slug, a
+partner name, an evidence document or a county FIPS — and a slug that is an
+ordinary English word ("one", "valley") cannot be told apart from the word in
+prose by any mechanism, so such a record is refused rather than half-blinded.
 
 The design intensity the 96-hour scenario needs therefore comes from *you*:
 `design_intensity.flood_elevation_ft` is the base flood elevation from your own
@@ -34,7 +66,8 @@ question is worse than no answer, because it looks like one.
 
 ## Evidence
 
-Every populated field must be named by an entry under `evidence`, keyed by its
+Every populated field but `blind_id` — which is this repository's bookkeeping,
+not a fact read off a document — must be named by an entry under `evidence`, keyed by its
 field path (`power.fuel_hours`, `evacuation.transport_lead_hours`), each with
 the text it was read as, the `source_doc` it came from, and a `page` where
 there is one. A field without evidence refuses the file, naming the field. This

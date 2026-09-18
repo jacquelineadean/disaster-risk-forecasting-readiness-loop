@@ -8,15 +8,27 @@ the same thing better, keeping every `[c:ID]` exactly where it is.
 
 What comes back is treated as untrusted text:
 
-1. a returned sentence must carry at least one marker, and every marker it
-   carries must name a claim already in the report — a model cannot invent a
-   citation, because the claim set is fixed before it is called;
-2. the sentence is then run through `readiness.cite.validate` against that
+1. a returned sentence must carry **exactly** the markers the original
+   carried — no fewer, so it cannot quietly shed a citation, and no more, so
+   it cannot re-attribute itself to another claim in the document;
+2. it may hold no URL, and no digit run that is not already in the original
+   sentence or in the rendered value of a claim that sentence cites. The digit
+   scan runs with `readiness.cite`'s identifier exemptions **off**: to a
+   validator reading a document, a five-digit number is a county FIPS and
+   `2031` is a year, and both are exactly what a model should not be able to
+   introduce;
+3. the sentence is then run through `readiness.cite.validate` against that
    claim set, so every number in it must be the rendered value of a claim it
    cites and no forbidden phrasing may appear;
-3. anything that fails either check is **dropped**, not corrected, and the
-   count of dropped sentences is written onto the gap report's provenance
-   line where a reader can see it.
+4. anything that fails any of these is **refused**, and the refusal is a
+   refusal to reword: the original local sentence stays exactly where it was.
+   Nothing can be deleted, so a model cannot empty a report of its findings by
+   returning rubbish — the worst it can do is leave the local prose alone, and
+   the provenance line says how often it did.
+
+The rewriter is never shown a name. Rules refer to a partner, a county or a
+document by a label, so there is no name in the body for a model to reword,
+shorten, re-case or leak — the property `tests/test_draft.py` asserts directly.
 
 The SDK is imported lazily inside a `try:`, exactly as
 `readiness.agent.orchestrator.run_claude` does, so the package imports and the
@@ -28,6 +40,7 @@ deliberate `--drafter claude` path.
 from __future__ import annotations
 
 import json
+import re
 from typing import Callable, Sequence
 
 from readiness import cite
@@ -45,14 +58,17 @@ emergency manager. Every sentence you are given carries citation markers of \
 the form [c:ID]. Rules, all of them hard:
 
 * Keep every [c:ID] marker exactly as it appears, attached to the same clause.
-* Never introduce a marker that is not already in the sentence you are rewriting.
-* Never introduce a number, a percentage or a date that is not already there.
+* Never introduce a marker that is not already in the sentence you are rewriting,
+  and never drop one: the set of markers must come back exactly as it went out.
+* Never introduce a number, a percentage, a date, a postcode or a URL that is
+  not already there.
 * Never write "warning", "alert", "will occur" or any prediction of a specific
   event: this is decision support, not a warning channel.
 * Return one rewritten sentence per input sentence, in order, as a JSON array
   of strings and nothing else.
 
-A sentence that breaks any of these is dropped, not corrected."""
+A sentence that breaks any of these is refused, not corrected, and the \
+original wording is kept in its place."""
 
 
 def build_prompt(sentences: Sequence[cite.Sentence]) -> str:
@@ -76,23 +92,63 @@ def parse_response(text: str, expected: int) -> list[str]:
     return [s if isinstance(s, str) else "" for s in parsed]
 
 
+#: A bare URL, in any of the shapes a model writes one. A gap report cites
+#: guidance by registered id; a link is something a reader may follow out of
+#: a validated document into somewhere nobody checked.
+_URL = re.compile(r"https?://|www\.", re.IGNORECASE)
+
+#: A positional label a rule writes instead of a name: `PARTNER-2`,
+#: `COUNTY-A`, `DOCUMENT-1`, `FACILITY-<hex>`. The ones the original sentence
+#: already carried are names, not quantities, so `cite.validate` is told so.
+_LABEL = re.compile(r"(?<!\w)[A-Z]{3,}-[0-9A-Za-z]+(?!\w)")
+
+def _digit_runs(text: str) -> set[str]:
+    """Every numeric token, with every identifier exemption turned off.
+
+    The same scan `cite` runs, spelled for the opposite purpose. When a
+    *document* is validated the exemptions are right: a five-digit number the
+    document names is a county, a four-digit one is a year. When **model
+    output** is checked they are precisely the hole — a ZIP code reads as a
+    FIPS and an invented date reads as a year — so here they are off, and the
+    question is only whether the original sentence or a value it cites
+    already held that number.
+    """
+    return set(cite.numbers_in(text, exempt_identifiers=False))
+
+
 def accept(
     candidate: str,
     original: cite.Sentence,
     claims: Sequence[cite.Claim],
     guidance=None,
 ) -> cite.Sentence | None:
-    """One rewritten sentence, or None when it must be dropped, and why it is.
+    """One rewritten sentence, or None when it must be refused.
 
-    The candidate may only cite claims the original cited: a rewrite is a
-    rewording of one sentence, not a re-attribution of it.
+    The candidate must cite exactly what the original cited — a rewrite is a
+    rewording of one sentence, not a re-attribution of it, and a candidate
+    that keeps its own marker and splices in a second is re-attribution with
+    extra steps. It may introduce no URL and no digit that was not already in
+    the original or in a value it cites.
     """
     text = " ".join(candidate.split())
     if not text:
         return None
     markers = cite.markers_in(text)
     allowed = set(original.cited())
-    if not markers or not set(markers) <= allowed:
+    if not markers or set(markers) != allowed:
+        return None
+    if _URL.search(text):
+        return None
+    index = {claim.id: claim for claim in claims}
+    known = _digit_runs(original.text)
+    for claim_id in allowed:
+        claim = index.get(claim_id)
+        if claim is not None:
+            known |= _digit_runs(cite.render_value(claim))
+    if any(
+        run not in known
+        for run in cite.numbers_in(text, exempt_identifiers=False)
+    ):
         return None
     sentence = cite.Sentence.from_text(text)
     probe = cite.Document(
@@ -101,7 +157,8 @@ def accept(
         generated_at="", inputs={},
     )
     resolver = _PermissiveResolver()
-    if cite.validate(probe, resolver, guidance):
+    labels = tuple(dict.fromkeys(_LABEL.findall(original.text)))
+    if cite.validate(probe, resolver, guidance, identifiers=labels):
         return None
     return sentence
 
@@ -126,11 +183,18 @@ def rewrite(
     model: Model | None = None,
     guidance=None,
 ) -> tuple[list[cite.Sentence], int]:
-    """Rewrite the body of a gap report; return the kept sentences and the drops.
+    """Reword the body of a gap report; return every sentence and the refusals.
+
+    The list that comes back is always the list that went in, sentence for
+    sentence: a candidate that fails a check is refused and the local
+    sentence stays. A model therefore cannot delete a finding — not the
+    `failed` ones, not the fail-closed `cannot_run` statement — and the
+    refusal count on the provenance line is a statement about wording, not
+    about what the report contains.
 
     With no `model`, the Claude Agent SDK is imported lazily and used. A
     response that cannot be parsed, or a model that raises, leaves the local
-    prose exactly as it was and drops nothing — the report is still the
+    prose exactly as it was and refuses nothing — the report is still the
     report, it simply was not improved.
     """
     body = list(sentences)
@@ -149,14 +213,15 @@ def rewrite(
     if not candidates:
         return body, 0
     kept: list[cite.Sentence] = []
-    dropped = 0
+    refused = 0
     for candidate, original in zip(candidates, body):
         accepted = accept(candidate, original, claims, guidance)
         if accepted is None:
-            dropped += 1
+            refused += 1
+            kept.append(original)
             continue
         kept.append(accepted)
-    return kept, dropped
+    return kept, refused
 
 
 def rewriter(*, model: Model | None = None, guidance=None):

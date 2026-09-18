@@ -141,16 +141,128 @@ class TestClaudeDrafter(DraftCase):
         self.assertEqual([s.text for s in kept], rewritten)
         self.assertIn("[c:", self.prompts[0])
 
-    def test_llm_sentences_without_claims_are_dropped_and_counted(self):
+    def test_llm_sentences_without_claims_are_refused_and_counted(self):
         rewritten = [s.text for s in self.body]
         rewritten[0] = "The plan is fine."          # no marker at all
         rewritten[1] = cite.strip_markers(self.body[1].text)  # markers removed
-        kept, dropped = planner.rewrite(
+        kept, refused = planner.rewrite(
             self.body, self.claims, model=self.model(self.json_reply(rewritten))
         )
-        self.assertEqual(dropped, 2)
-        self.assertEqual(len(kept), len(self.body) - 2)
+        self.assertEqual(refused, 2)
+        # A refusal is a refusal to reword, not a deletion: the local sentence
+        # stays exactly where it was.
+        self.assertEqual(len(kept), len(self.body))
+        self.assertEqual(kept[0], self.body[0])
+        self.assertEqual(kept[1], self.body[1])
         self.assertNotIn("The plan is fine.", [s.text for s in kept])
+
+    def test_a_rewriter_that_returns_rubbish_cannot_delete_a_finding(self):
+        # Finding 3 of the correctness review: with every candidate dropped the
+        # body was emptied, and a report with no findings at all — including
+        # the fail-closed `cannot_run` statement — was written and validated.
+        local = gap_report_mod.build(
+            self.facility, self.scenario, self.findings, self.risk, fp.PERIOD
+        )
+        for reply in (
+            lambda prompt: self.json_reply(["" for _ in self.full_body]),
+            lambda prompt: self.json_reply(["nonsense" for _ in self.full_body]),
+            lambda prompt: self.json_reply(
+                ["Everything is fine [c:not-a-claim]." for _ in self.full_body]
+            ),
+        ):
+            with self.subTest(reply=reply):
+                rewriter = planner.rewriter(model=self.model(reply))
+                doc = gap_report_mod.build(
+                    self.facility, self.scenario, self.findings, self.risk,
+                    fp.PERIOD, drafter="claude", rewriter=rewriter,
+                )
+                self.assertEqual(
+                    [s.text for s in doc.sentences][:len(self.full_body)],
+                    [s.text for s in local.sentences][:len(self.full_body)],
+                )
+                self.assertEqual(len(doc.sentences), len(local.sentences))
+                self.assertIn(
+                    f"{len(self.full_body)} of {len(self.full_body)} drafted "
+                    "sentences were refused",
+                    fp.sentences_text(doc),
+                )
+                resolve = gap_report_mod.resolver(
+                    self.facility, self.scenario, self.risk
+                )
+                self.assertEqual(gap_report_mod.check(doc, resolve), [])
+
+    def test_a_drafter_that_returns_the_wrong_number_of_sentences_is_refused(self):
+        def short(sentences, claims):
+            return list(sentences)[:-1], 0
+
+        with self.assertRaises(gap_report_mod.GapReportError):
+            gap_report_mod.build(
+                self.facility, self.scenario, self.findings, self.risk, fp.PERIOD,
+                drafter="claude", rewriter=short,
+            )
+
+    def test_the_rewriter_never_sees_a_name(self):
+        # A1/B1: rules write `PARTNER-2`, not a building. What the model is
+        # handed cannot contain a name it could reword, shorten or leak.
+        facility = fp.make_facility(
+            slug="saint-example-regional",
+            co_located_operators=[{"name": "Example Dialysis Partners",
+                                   "occupants": 12}],
+        )
+        findings = rules_mod.run(facility, self.risk, self.scenario)
+        seen: dict = {}
+
+        def capture(sentences, claims):
+            seen["body"] = list(sentences)
+            seen["prompt"] = planner.build_prompt(list(sentences))
+            return list(sentences), 0
+
+        gap_report_mod.build(
+            facility, self.scenario, findings, self.risk, fp.PERIOD,
+            drafter="claude", rewriter=capture,
+        )
+        for name in ("Far Ridge Hospital", "Example Dialysis Partners",
+                     "saint-example-regional"):
+            self.assertNotIn(name, seen["prompt"])
+        self.assertIn("PARTNER-1", seen["prompt"])
+        self.assertIn("PARTNER-2", seen["prompt"])
+        # The prose carries no county either; a county FIPS reaches the model
+        # only inside a claim id it must keep verbatim, and the blinded render
+        # re-keys those before anyone outside the building reads the page.
+        prose = " ".join(
+            cite.strip_markers(s.text) for s in self.scenario_body(seen)
+        )
+        self.assertNotIn(fp.COUNTY, prose)
+        self.assertNotIn(fp.OTHER_COUNTY, prose)
+
+    @staticmethod
+    def scenario_body(seen):
+        return seen["body"]
+
+    def test_a_url_a_postcode_a_year_or_a_foreign_marker_is_refused(self):
+        # Finding 11 of the leakage review and mutation survivor 4: a ZIP reads
+        # as a FIPS, a year reads as a name, and a candidate that keeps its own
+        # marker and splices in a second is re-attribution.
+        marker = self.body[0].cited()[0]
+        other = self.body[1].cited()[0]
+        cases = {
+            "a bare URL": f"See https://evil.example/exfil [c:{marker}].",
+            "a www URL": f"See www.evil.example for more [c:{marker}].",
+            "a ZIP code read as a FIPS": f"The facility, in 27834, is at risk [c:{marker}].",
+            "a year the report never computed": f"By 2031 this holds [c:{marker}].",
+            "a spliced foreign marker":
+                f"{self.body[0].text} Also see [c:{other}].",
+        }
+        for name, candidate in cases.items():
+            with self.subTest(case=name):
+                rewritten = [s.text for s in self.body]
+                rewritten[0] = candidate
+                kept, refused = planner.rewrite(
+                    self.body, self.claims,
+                    model=self.model(self.json_reply(rewritten)),
+                )
+                self.assertEqual(refused, 1)
+                self.assertEqual(kept[0], self.body[0])
 
     def test_a_sentence_citing_a_claim_the_report_does_not_hold_is_dropped(self):
         rewritten = [s.text for s in self.body]
@@ -219,7 +331,7 @@ class TestClaudeDrafter(DraftCase):
                 self.body * planner.MAX_SENTENCES, self.claims, model=lambda p: "[]"
             )
 
-    def test_the_dropped_count_reaches_the_report_s_provenance_line(self):
+    def test_the_refused_count_reaches_the_report_s_provenance_line(self):
         rewritten = [s.text for s in self.full_body]
         rewritten[0] = "Unsupported."
         rewriter = planner.rewriter(model=self.model(self.json_reply(rewritten)))
@@ -227,8 +339,15 @@ class TestClaudeDrafter(DraftCase):
             self.facility, self.scenario, self.findings, self.risk, fp.PERIOD,
             drafter="claude", rewriter=rewriter,
         )
-        self.assertEqual(doc.claim_index()["provenance-dropped"].value, 1)
-        self.assertIn("1 drafted sentence(s) were dropped", fp.sentences_text(doc))
+        self.assertEqual(doc.claim_index()["provenance-refused"].value, 1)
+        self.assertEqual(
+            doc.claim_index()["provenance-drafted"].value, len(self.full_body)
+        )
+        self.assertIn(
+            f"1 of {len(self.full_body)} drafted sentences were refused and kept "
+            "their local wording",
+            fp.sentences_text(doc),
+        )
         self.assertIn("prose from the claude drafter", fp.sentences_text(doc))
         resolve = gap_report_mod.resolver(self.facility, self.scenario, self.risk)
         self.assertEqual(gap_report_mod.check(doc, resolve), [])
@@ -252,7 +371,7 @@ class TestClaudeDrafter(DraftCase):
     def test_the_prompt_states_the_rules_the_answer_is_checked_against(self):
         planner.rewrite(self.body, self.claims, model=self.model("[]"))
         prompt = self.prompts[0]
-        for needle in ("[c:ID]", "warning", "JSON array", "dropped"):
+        for needle in ("[c:ID]", "warning", "JSON array", "refused", "URL"):
             self.assertIn(needle, prompt)
 
     def test_the_sdk_is_only_imported_inside_a_try(self):

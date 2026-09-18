@@ -6,12 +6,15 @@ against `tests/fixtures_plans.py::synthetic_case_study`, which names an event
 that did not happen at a facility that does not exist.
 """
 
+import dataclasses
 import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from readiness.plans import case_studies as case_studies_mod
+from readiness.plans import rules as rules_mod
 from readiness.plans.case_studies import CaseStudy, CaseStudyError
 from tests import fixtures_plans as fp
 
@@ -118,9 +121,90 @@ class TestSchema(CaseStudyCase):
             CaseStudy.from_json(study, where="s.json")
         self.assertIn("expected one of", str(ctx.exception))
 
-    def test_facts_with_sources_reports_a_missing_source_document(self):
+    def test_facts_with_sources_reports_a_source_index_that_does_not_resolve(self):
+        # Reachable, and reached: `from_json` refuses a bad index, so the only
+        # way here is the dataclass, which is how `check_study` could be handed
+        # one. (The old second loop over the facility's evidence was
+        # unreachable — `Facility` cannot exist with a blank `source_doc` — and
+        # is gone rather than tested from the outside and never entered.)
         study = CaseStudy.from_json(fp.synthetic_case_study())
         self.assertEqual(case_studies_mod.facts_with_sources(study), [])
+        broken = dataclasses.replace(
+            study, hazard=case_studies_mod.Fact(text="inland flood", source=7)
+        )
+        problems = case_studies_mod.facts_with_sources(broken)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("hazard: cites source 7", problems[0])
+        result = case_studies_mod.check_study(broken)
+        self.assertFalse(result.passed)
+        self.assertIn("hazard: cites source 7", result.problems[0])
+
+    def test_an_unknown_key_is_refused_at_every_level(self):
+        # Finding 5 of the leakage review: this is the one plans directory that
+        # *is* committed, and its loader took any extra top-level key.
+        cases = {
+            "top level": lambda s: s.update(facility_type="hospital"),
+            "a fact": lambda s: s["event"].update(confidence="high"),
+            "a source": lambda s: s["sources"][0].update(accessed="2026-01-01"),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                study = fp.synthetic_case_study()
+                mutate(study)
+                with self.assertRaises(CaseStudyError) as ctx:
+                    CaseStudy.from_json(study, where="s.json")
+                self.assertIn("unknown field", str(ctx.exception))
+        # `note` on a source is known and kept.
+        study = fp.synthetic_case_study()
+        study["sources"][0]["note"] = "what this establishes"
+        self.assertEqual(
+            CaseStudy.from_json(study).sources[0].note, "what this establishes"
+        )
+
+    def test_a_place_anywhere_in_a_committed_study_is_refused(self):
+        for value in ("412 Riverside Drive", "27834-1234", "35.6127, -77.3664",
+                      "ZIP 27834"):
+            with self.subTest(value=value):
+                study = fp.synthetic_case_study()
+                study["event"]["text"] = f"A flood at {value}."
+                with self.assertRaises(CaseStudyError) as ctx:
+                    CaseStudy.from_json(study, where="s.json")
+                self.assertIn("is refused", str(ctx.exception))
+        # A county FIPS is not a place finer than a county.
+        study = fp.synthetic_case_study()
+        study["event"]["text"] = "A flood in county 27834."
+        CaseStudy.from_json(study)
+
+    def test_a_top_level_that_is_not_an_object_is_refused(self):
+        for payload in (None, [], "a study", 3):
+            with self.subTest(payload=payload):
+                with self.assertRaises(CaseStudyError) as ctx:
+                    CaseStudy.from_json(payload, where="s.json")
+                self.assertIn("expected a JSON object", str(ctx.exception))
+
+    def test_a_file_whose_top_level_is_a_scalar_is_a_failing_result(self):
+        path = self.dir / "null.json"
+        path.write_text("null", encoding="utf-8")
+        results = case_studies_mod.check_all(self.dir)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].passed)
+        self.assertIn("expected a JSON object", results[0].problems[0])
+
+    def test_the_readme_s_json_block_loads_through_the_schema(self):
+        # Finding D3: the README's example omitted `slug` and `dates` and gave
+        # `event`/`hazard` as bare strings, none of which the loader accepts.
+        import re
+
+        text = (
+            pathlib.Path(case_studies_mod.CASE_STUDIES_DIR) / "README.md"
+        ).read_text(encoding="utf-8")
+        blocks = re.findall(r"```json\n(.*?)```", text, re.S)
+        self.assertEqual(len(blocks), 1, "the README should show one JSON shape")
+        raw = json.loads(blocks[0])
+        study = CaseStudy.from_json(raw, where="plans/case-studies/README.md")
+        self.assertEqual(sorted(raw), sorted(case_studies_mod.STUDY_KEYS))
+        result = case_studies_mod.check_study(study)
+        self.assertTrue(result.passed, (result.problems, result.mismatches))
 
     def test_expecting_a_question_the_scenario_does_not_ask_is_a_problem(self):
         study = fp.synthetic_case_study()
@@ -128,6 +212,24 @@ class TestSchema(CaseStudyCase):
         result = case_studies_mod.check(self.write(**study))
         self.assertFalse(result.passed)
         self.assertIn("q9", result.problems[0])
+
+    def test_a_question_the_rules_never_answered_is_a_problem(self):
+        # Finding 8: `check_study` compared the intersection, so an expectation
+        # for a question that never ran was never checked and never reported.
+        study = CaseStudy.from_json(fp.synthetic_case_study())
+        result = case_studies_mod.check_study(study)
+        self.assertTrue(result.passed)
+        real_run = rules_mod.run
+        with mock.patch.object(
+            case_studies_mod.rules_mod, "run",
+            side_effect=lambda f, r, s: [
+                finding for finding in real_run(f, r, s)
+                if finding.question_id != "q4"
+            ],
+        ):
+            result = case_studies_mod.check_study(study)
+        self.assertFalse(result.passed)
+        self.assertIn("no finding for question(s) ['q4']", result.problems[0])
 
     def test_leaving_a_question_out_is_a_problem(self):
         study = fp.synthetic_case_study()

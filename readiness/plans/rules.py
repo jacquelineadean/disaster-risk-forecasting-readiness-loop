@@ -16,6 +16,15 @@ Where the numbers come from, and nowhere else:
 * a named guidance document from `plans/guidance.json`;
 * a `computed` claim derived from the claims above, named in its source.
 
+**No rule ever writes a name.** A partner, a co-tenant or a document is
+referred to by a positional label the record fixes — `PARTNER-1`, `PARTNER-2`,
+`COUNTY-A` — and the name itself lives in the claim that sentence cites, after
+`NAME_MARK`. Two things follow: blinding is structural (the blinded render
+drops the tail of a claim's text; it does not search prose for names a drafter
+may have reworded), and a partner called "Regional Medical Center 2" or "Alert
+Bay Hospital" no longer makes the report unwritable, because the digit and the
+word never enter validated prose.
+
 The one rule that matters most is the one that refuses to answer.
 `switchgear_vs_intensity` never reads the risk layer at all: a county
 probability is a statement about occurrence somewhere in a county over a
@@ -40,8 +49,13 @@ from readiness.plans.scenarios import Scenario
 STATUSES: tuple[str, ...] = ("answered", "unanswered", "failed", "cannot_run")
 
 #: How a number read from the facility record reads in prose: plainly, with no
-#: thousands separators, so "{:g}" of 32.5 is "32.5" and of 12.0 is "12".
-NUMBER_FMT = "{:g}"
+#: thousands separators and never in scientific notation, so 32.5 reads
+#: "32.5", 12.0 reads "12", 0.031 reads "0.031" and 12345678 reads "12345678"
+#: rather than "1.23457e+07". `"{:g}"` would do the first three and not the
+#: fourth, and a report that spells a record's own number differently from the
+#: record is both unreadable and a different number. Fifteen significant
+#: digits is every magnitude a facility field can honestly carry.
+NUMBER_FMT = "{:.15g}"
 
 #: What each field path means, so a claim's text is a property of the field
 #: rather than of whichever rule happened to cite it first.
@@ -74,6 +88,22 @@ FIELD_TEXT: dict[str, str] = {
     "evacuation.priority_decided_on": "when the occupant priority order was decided",
     "transfer_agreements": "the receiving facilities the record lists",
     "co_located_operators": "the other operators sharing this campus",
+}
+
+#: Where a claim's text stops describing and starts naming. Everything after
+#: it is the record's own wording of a name, and the blinded render cuts there.
+NAME_MARK = " — recorded as: "
+
+#: What each rule reads from the record, whatever the scenario declares. The
+#: fail-closed guard is the union of the two, so a scenario that under-declares
+#: `fail_closed_on` produces a `cannot_run` finding naming the missing field
+#: rather than a `RuleError` out of the middle of the rule.
+REQUIRED_PATHS: dict[str, tuple[str, ...]] = {
+    "switchgear_vs_intensity": (
+        "design_intensity.flood_elevation_ft",
+        "power.switchgear_elevation_ft",
+        "power.transfer_switch_elevation_ft",
+    ),
 }
 
 #: The guidance a finding points a planner at, by rule.
@@ -191,6 +221,22 @@ def fact_claim(path: str, text: str | None = None) -> cite.Claim:
     )
 
 
+def name_claim(path: str, label: str, name: str, what: str) -> cite.Claim:
+    """The one place a facility, partner or co-tenant name is written down.
+
+    Prose carries `label`; this claim carries the name, and `blinded_document`
+    drops everything from `NAME_MARK` onwards so the blinded page keeps the
+    label and loses the name. That is why blinding is structural here rather
+    than a search-and-replace over prose a model may have reworded.
+    """
+    return cite.Claim(
+        id=f"f-{path}",
+        text=f"{label}, {what}{NAME_MARK}{name}",
+        value=None,
+        source=cite.Source("facility", path),
+    )
+
+
 def scenario_claim(scenario: Scenario, name: str, text: str) -> cite.Claim:
     return cite.Claim(
         id=f"s-{name}",
@@ -242,7 +288,10 @@ def switchgear_vs_intensity(
     county this quarter" into a water depth at a switchgear.
     """
     question = scenario.question_for_rule("switchgear_vs_intensity")
-    missing = [path for path in scenario.fail_closed_on if facility.get(path) is None]
+    wanted = dict.fromkeys(
+        (*scenario.fail_closed_on, *REQUIRED_PATHS["switchgear_vs_intensity"])
+    )
+    missing = [path for path in wanted if facility.get(path) is None]
     certificate = guidance_claim("fema-elevation-certificate")
     if missing:
         return Finding(
@@ -275,10 +324,13 @@ def switchgear_vs_intensity(
     nfpa = guidance_claim("nfpa-110")
     claims = [design, switchgear, transfer, hour, source, nfpa, certificate]
 
+    # At the design flood elevation is *in* the water: inject 3 is standing
+    # water reaching that elevation, and equipment sitting exactly there is
+    # wet. The comparison is therefore `<=`, and the prose says "at or below".
     below = [
         label
         for label, claim in (("switchgear", switchgear), ("transfer switch", transfer))
-        if float(claim.value) < float(design.value)
+        if float(claim.value) <= float(design.value)
     ]
     stated = _sentence(
         f"The design flood elevation for this building is "
@@ -293,15 +345,16 @@ def switchgear_vs_intensity(
     if below:
         verdict = _sentence(
             f"The {_and_list(below)} therefore "
-            f"{'sit' if len(below) > 1 else 'sits'} below the design flood "
+            f"{'sit' if len(below) > 1 else 'sits'} at or below the design flood "
             f"elevation, so from hour {cite.render_value(hour)} of the scenario the "
             f"essential electrical system is inside the water, whether or not the "
             f"generator itself keeps running [c:{hour.id}][c:{nfpa.id}]."
         )
         return Finding(question.id, "failed", [stated, measured, verdict], claims)
     verdict = _sentence(
-        f"Both sit above the design flood elevation, so the scenario's intensity at "
-        f"hour {cite.render_value(hour)} does not by itself take the essential "
+        f"Both sit clear above the design flood elevation, so the scenario's "
+        f"intensity at hour {cite.render_value(hour)} does not by itself take the "
+        f"essential "
         f"electrical system out [c:{hour.id}][c:{nfpa.id}]."
     )
     return Finding(question.id, "answered", [stated, measured, verdict], claims)
@@ -430,33 +483,51 @@ def partner_correlated_failure(
             claims,
         )
 
+    labels = facility.partner_labels()
     sentences: list[cite.Sentence] = []
     correlated: list[str] = []
     for index, agreement in signed:
-        reasons = []
+        label = labels.get(agreement.name, f"PARTNER-{index + 1}")
+        # (reason, the field path the reason turns on) — one claim per path, so
+        # a reader following the citation lands on the flag, not on the county.
+        reasons: list[tuple[str, str]] = []
         if agreement.county_fips == facility.county_fips:
-            reasons.append("sits in the same county as this facility")
+            reasons.append((
+                "sits in the same county as this facility",
+                f"transfer_agreements.{index}.county_fips",
+            ))
         if agreement.same_floodplain:
-            reasons.append("is recorded as being in the same floodplain")
+            reasons.append((
+                "is recorded as being in the same floodplain",
+                f"transfer_agreements.{index}.same_floodplain",
+            ))
         if agreement.same_grid_feeder:
-            reasons.append("is recorded as being on the same grid feeder")
+            reasons.append((
+                "is recorded as being on the same grid feeder",
+                f"transfer_agreements.{index}.same_grid_feeder",
+            ))
+        named = name_claim(
+            f"transfer_agreements.{index}.name", label,
+            "the receiving facility this transfer agreement names", agreement.name,
+        )
         signed_claim = fact_claim(
             f"transfer_agreements.{index}.signed",
-            f"the signed transfer agreement with {agreement.name}",
+            f"the signed transfer agreement with {label}",
         )
-        claims.append(signed_claim)
+        claims += [named, signed_claim]
         if not reasons:
             continue
-        correlated.append(agreement.name)
-        reason_claim = fact_claim(
-            f"transfer_agreements.{index}.county_fips",
-            f"the county and shared-failure flags recorded for {agreement.name}",
-        )
-        claims.append(reason_claim)
+        correlated.append(label)
+        reason_claims = [
+            fact_claim(path, f"the shared-failure fact recorded for {label} at {path}")
+            for _reason, path in reasons
+        ]
+        claims.extend(reason_claims)
+        markers = "".join(f"[c:{c.id}]" for c in (signed_claim, named, *reason_claims))
         sentences.append(_sentence(
-            f"{agreement.name} holds a signed transfer agreement and "
-            f"{_and_list(reasons)}, so it is likely to be inside the same event "
-            f"this facility is inside [c:{signed_claim.id}][c:{reason_claim.id}]."
+            f"{label} holds a signed transfer agreement and "
+            f"{_and_list([reason for reason, _path in reasons])}, so it is likely "
+            f"to be inside the same event this facility is inside {markers}."
         ))
 
     context, context_claims = _risk_context(
@@ -493,12 +564,21 @@ def _risk_context(
     """
     sentences: list[cite.Sentence] = []
     claims: list[cite.Claim] = []
-    counties = [(facility.county_fips, "this facility's county")]
+    partner_labels = facility.partner_labels()
+    #: FIPS -> every partner label in that county, so two partners in one
+    #: county are both named rather than the second overwriting the first.
+    shared: dict[str, list[str]] = {facility.county_fips: []}
     for partner in partners:
         fips = getattr(partner, "county_fips", None)
-        if fips and fips != facility.county_fips:
-            counties.append((fips, f"the county {getattr(partner, 'name', fips)} sits in"))
-    for fips, label in dict((f, ln) for f, ln in counties).items():
+        if not fips or fips == facility.county_fips:
+            continue
+        name = getattr(partner, "name", "")
+        shared.setdefault(fips, []).append(partner_labels.get(name, name or fips))
+    for fips, names in shared.items():
+        label = (
+            "this facility's county" if fips == facility.county_fips
+            else f"the county {_and_list(names)} sits in"
+        )
         found = [risk.probability(fips, name) for name in risk.covering(fips)]
         found = [claim for claim in found if claim is not None]
         if not found:
@@ -538,16 +618,23 @@ def campus_seam(facility: Facility, risk: RiskLayer, scenario: Scenario) -> Find
             )],
             claims,
         )
+    labels = facility.partner_labels()
     sentences = []
     for index, operator in enumerate(operators):
+        label = labels.get(operator.name, f"PARTNER-{index + 1}")
         occupants = number_claim(facility, f"co_located_operators.{index}.occupants")
         occupants = dataclasses.replace(
-            occupants, text=f"occupants {operator.name} holds on this campus"
+            occupants, text=f"occupants {label} holds on this campus"
         )
-        claims.append(occupants)
+        named = name_claim(
+            f"co_located_operators.{index}.name", label,
+            "the other operator on this campus", operator.name,
+        )
+        claims += [occupants, named]
         sentences.append(_sentence(
-            f"{operator.name} occupies part of this campus with "
-            f"{cite.render_value(occupants)} occupants [c:{occupants.id}]."
+            f"{label} occupies part of this campus with "
+            f"{cite.render_value(occupants)} occupants "
+            f"[c:{occupants.id}][c:{named.id}]."
         ))
     sentences.append(_sentence(
         f"This record has no field for a joint plan across that seam, so the question "
@@ -678,6 +765,8 @@ def statuses(findings: Sequence[Finding]) -> dict[str, str]:
 
 __all__ = [
     "FIELD_TEXT",
+    "NAME_MARK",
+    "REQUIRED_PATHS",
     "GUIDANCE",
     "GUIDANCE_TEXT",
     "NUMBER_FMT",
@@ -690,6 +779,7 @@ __all__ = [
     "fact_claim",
     "first_break",
     "guidance_claim",
+    "name_claim",
     "number_claim",
     "partner_correlated_failure",
     "priority_order_in_advance",

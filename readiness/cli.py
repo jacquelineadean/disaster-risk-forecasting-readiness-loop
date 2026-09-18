@@ -1086,7 +1086,13 @@ def cmd_scenarios_list(args) -> int:
     """The scenario library: ids, titles and how many questions each asks."""
     from readiness.plans import scenarios as scenarios_mod
 
-    library = scenarios_mod.load_all()
+    try:
+        library = scenarios_mod.load_all()
+    except scenarios_mod.ScenarioError as exc:
+        _rule("scenario library")
+        _p()
+        _p(str(exc))
+        return 2
     _rule(f"scenario library  ({len(library)} scenario(s))")
     if not library:
         _p("  nothing in plans/scenarios/")
@@ -1108,7 +1114,13 @@ def cmd_scenarios_check(args) -> int:
 
     directory = pathlib.Path(args.case_studies) if args.case_studies else None
     root = case_studies_mod.case_studies_dir(directory)
-    results = case_studies_mod.check_all(directory)
+    try:
+        results = case_studies_mod.check_all(directory)
+    except (case_studies_mod.CaseStudyError, ValueError) as exc:
+        _rule(f"case studies  ({data_mod.relative(root)})")
+        _p()
+        _p(str(exc))
+        return 2
     _rule(f"case studies  ({data_mod.relative(root)}: {len(results)} study/studies)")
     if not results:
         _p("  none committed, which is the default: a case study is an example added")
@@ -1132,6 +1144,7 @@ def cmd_gap_report(args) -> int:
     """One facility's gap report, written only when every citation validates."""
     from readiness.plans import facility as facility_mod
     from readiness.plans import gap_report as gap_report_mod
+    from readiness.plans import rules as rules_mod
     from readiness.plans import scenarios as scenarios_mod
 
     path = pathlib.Path(args.facility)
@@ -1148,7 +1161,8 @@ def cmd_gap_report(args) -> int:
         _p()
         _p(str(exc))
         return 2
-    except (scenarios_mod.ScenarioError, gap_report_mod.GapReportError) as exc:
+    except (scenarios_mod.ScenarioError, gap_report_mod.GapReportError,
+            rules_mod.RuleError) as exc:
         _p()
         _p(str(exc))
         return 2
@@ -1189,7 +1203,7 @@ def cmd_review_record(args) -> int:
         _p()
         _p(str(exc))
         return 2
-    _p(f"  facility         {review.facility_hash}")
+    _p(f"  facility         {review.facility_label}")
     _p(f"  period           {review.period}")
     _p(f"  report sha256    {review.report_sha256}")
     _p(f"  rating           {review.rating}")
@@ -1525,7 +1539,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Runs a scenario's rules over a facility JSON and the issued risk layer "
             "for that facility's county and period, and writes "
-            "<out>/<slug>/<period>.html, .json and .blind.html — but only when every "
+            "<out>/<slug>/<period>.html and .json plus "
+            "<out>/blinded/<label>/<period>.blind.html — but only when every "
             "sentence cites a claim that resolves. A missing design intensity is a "
             "fail-closed finding naming the document that would supply it; no county "
             "probability is ever substituted for it."

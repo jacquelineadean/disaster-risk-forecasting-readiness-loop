@@ -2,10 +2,15 @@
 
 Phase 2 writes `issued/<contract>/<period>.json`: one probability per county,
 per contract, for a period nobody has scored, with the id of the test card
-that entitled the model to be issued. This module reads those files and
-nothing else. It does not fit, refit, score, or reach for a model; it does not
-read a panel; and it has no path that produces a number from anything but a
-file `readiness issue` already wrote.
+that entitled the model to be issued. This module reads those files and, for
+each contract that covers a county, **three fields of the ledger card the
+issued file names** — `experiment_id`, `model` and `version`, which is what a
+citation to that card needs and all this module keeps. It does not fit,
+refit, score, or reach for a model; it does not read a panel; and it has no
+path that produces a number from anything but a file `readiness issue`
+already wrote. Nothing a card holds about held-out performance — a scorecard,
+a label count, a split — ever enters a `plans` object, so no rule can cite
+one even by accident.
 
 Two properties matter for Phase 3:
 
@@ -22,13 +27,26 @@ Two properties matter for Phase 3:
 from __future__ import annotations
 
 import dataclasses
+import os
 import pathlib
 from typing import Iterable, Mapping
 
 from readiness import cite
-from readiness import data as data_mod
 from readiness import issue as issue_mod
 from readiness.harness.ledger import Ledger
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+
+#: Where the ledgers live. Spelled here rather than imported from
+#: `readiness.data`, which is the panel builder: `readiness/plans` does not
+#: import the panel, and `tests/test_boundaries.py` enforces that.
+EXPERIMENTS_DIR = REPO_ROOT / "experiments"
+EXPERIMENTS_DIR_ENV = "READINESS_EXPERIMENTS_DIR"
+
+
+def experiments_root() -> pathlib.Path:
+    override = os.environ.get(EXPERIMENTS_DIR_ENV)
+    return pathlib.Path(override) if override else EXPERIMENTS_DIR
 
 #: How a probability claim reads in prose.
 PROBABILITY_FMT = "{:.0%}"
@@ -175,10 +193,17 @@ def _card_records(
 ) -> dict[str, dict]:
     """The cards the issued files name, by `<contract>/<id>` and by id.
 
+    **Three fields, deliberately.** `card_claim` cites a card so a reader can
+    check which model was validated; it needs the id, the model and the
+    version, and nothing else a card holds belongs on this side of the seam.
+    A whole card carries `scorecard["test"]` — held-out Brier, AUC and label
+    counts — and this module's resolver would then license a sentence to cite
+    it. It does not, because they are not here.
+
     A missing ledger is not an error here: the layer still holds the
     probabilities, and a document that cannot cite the card simply does not.
     """
-    root = pathlib.Path(experiments_dir) if experiments_dir else data_mod.experiments_root()
+    root = pathlib.Path(experiments_dir) if experiments_dir else experiments_root()
     out: dict[str, dict] = {}
     for name, one in issued.items():
         path = root / name / "ledger.jsonl"
@@ -191,10 +216,20 @@ def _card_records(
         for card in cards:
             if card.experiment_id != one.validated_by:
                 continue
-            record = card.record()
+            record = {
+                "experiment_id": card.experiment_id,
+                "model": card.model,
+                "version": card.version,
+            }
             out[f"{name}/{card.experiment_id}"] = record
             out[card.experiment_id] = record
     return out
 
 
-__all__ = ["PROBABILITY_FMT", "RiskLayer"]
+__all__ = [
+    "EXPERIMENTS_DIR",
+    "EXPERIMENTS_DIR_ENV",
+    "PROBABILITY_FMT",
+    "RiskLayer",
+    "experiments_root",
+]

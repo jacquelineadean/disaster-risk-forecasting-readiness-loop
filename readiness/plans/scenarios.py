@@ -147,39 +147,69 @@ class Scenario:
 
     @classmethod
     def from_json(cls, raw: Mapping, *, where: str = "<scenario>") -> "Scenario":
+        """Validate a parsed scenario. Every refusal is a `ScenarioError`.
+
+        A file whose top level is not an object, or whose questions are shaped
+        wrong, is a refusal naming the file — not a `TypeError` or a `KeyError`
+        out of the middle of a comprehension, which is what `verify --phase 3`
+        and the CLI would otherwise turn into a traceback.
+        """
+        if not isinstance(raw, Mapping):
+            raise ScenarioError(
+                f"{where}: expected a JSON object, got {type(raw).__name__}"
+            )
         for key in ("id", "title", "source_doc", "constants", "injects",
                     "questions", "fail_closed_on"):
             if key not in raw:
                 raise ScenarioError(f"{where}: missing {key!r}")
+        for key in ("id", "title", "source_doc"):
+            if not isinstance(raw[key], str) or not raw[key].strip():
+                raise ScenarioError(f"{where}: {key!r} must be a non-empty string")
+        if not isinstance(raw["constants"], Mapping):
+            raise ScenarioError(f"{where}: 'constants' must be an object")
         constants = {}
         for name, value in raw["constants"].items():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ScenarioError(f"{where}: constant {name!r} must be a number")
             constants[str(name)] = value
         injects = tuple(
-            Inject(i["id"], int(i["hour"]), i["kind"], dict(i.get("params", {})),
-                   str(i.get("text", "")))
-            for i in raw["injects"]
+            _read_inject(item, index, where)
+            for index, item in enumerate(_read_list(raw["injects"], "injects", where))
         )
         questions = tuple(
-            Question(q["id"], q["text"], q["rule"], tuple(q.get("requires", ())))
-            for q in raw["questions"]
+            _read_question(item, index, where)
+            for index, item in enumerate(_read_list(raw["questions"], "questions", where))
         )
         if not questions:
             raise ScenarioError(f"{where}: a scenario with no question tests nothing")
         seen: set[str] = set()
+        rules_seen: dict[str, str] = {}
         for question in questions:
             if question.id in seen:
                 raise ScenarioError(f"{where}: duplicate question id {question.id!r}")
             seen.add(question.id)
+            first = rules_seen.get(question.rule)
+            if first is not None:
+                raise ScenarioError(
+                    f"{where}: questions {first!r} and {question.id!r} are both bound "
+                    f"to rule {question.rule!r}; a rule answers one question, and the "
+                    "second would silently never run"
+                )
+            rules_seen[question.rule] = question.id
+        fail_closed = _read_list(raw["fail_closed_on"], "fail_closed_on", where)
+        for path in fail_closed:
+            if not isinstance(path, str) or not path.strip():
+                raise ScenarioError(
+                    f"{where}: 'fail_closed_on' holds {path!r}, not a field path"
+                )
         return cls(
             id=raw["id"], title=raw["title"], injects=injects, questions=questions,
-            fail_closed_on=tuple(raw["fail_closed_on"]), source_doc=raw["source_doc"],
+            fail_closed_on=tuple(fail_closed), source_doc=raw["source_doc"],
             constants=constants,
         )
 
     @classmethod
-    def from_path(cls, path: pathlib.Path | str) -> "Scenario":
+    def from_path(cls, path: pathlib.Path | str) -> "Scenario":  # noqa: D102
         path = pathlib.Path(path)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -188,6 +218,57 @@ class Scenario:
         except ValueError as exc:
             raise ScenarioError(f"{path}: not valid JSON ({exc})") from None
         return cls.from_json(raw, where=str(path))
+
+
+def _read_list(value: Any, name: str, where: str) -> list:
+    if not isinstance(value, list):
+        raise ScenarioError(
+            f"{where}: {name!r} must be a list, got {type(value).__name__}"
+        )
+    return value
+
+
+def _field(item: Mapping, key: str, kind: type, what: str, where: str) -> Any:
+    if key not in item:
+        raise ScenarioError(f"{where}: {what} is missing {key!r}")
+    value = item[key]
+    if not isinstance(value, kind) or isinstance(value, bool):
+        raise ScenarioError(
+            f"{where}: {what} has {key!r} = {value!r}, which is not a "
+            f"{kind.__name__}"
+        )
+    return value
+
+
+def _read_inject(item: object, index: int, where: str) -> Inject:
+    what = f"injects[{index}]"
+    if not isinstance(item, Mapping):
+        raise ScenarioError(f"{where}: {what} must be an object")
+    params = item.get("params", {})
+    if not isinstance(params, Mapping):
+        raise ScenarioError(f"{where}: {what} has 'params' that is not an object")
+    return Inject(
+        _field(item, "id", str, what, where),
+        int(_field(item, "hour", int, what, where)),
+        _field(item, "kind", str, what, where),
+        dict(params),
+        str(item.get("text", "")),
+    )
+
+
+def _read_question(item: object, index: int, where: str) -> Question:
+    what = f"questions[{index}]"
+    if not isinstance(item, Mapping):
+        raise ScenarioError(f"{where}: {what} must be an object")
+    requires = item.get("requires", ())
+    if not isinstance(requires, (list, tuple)):
+        raise ScenarioError(f"{where}: {what} has 'requires' that is not a list")
+    return Question(
+        _field(item, "id", str, what, where),
+        _field(item, "text", str, what, where),
+        _field(item, "rule", str, what, where),
+        tuple(str(r) for r in requires),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -233,9 +314,15 @@ def strip_emphasis(text: str) -> str:
 def questions_from_markdown(path: pathlib.Path | str) -> list[str]:
     """The "The plan must answer" bullets of a scenario markdown, in order.
 
-    A bullet may wrap over several lines; a continuation line is indented. The
-    list ends at the first blank-line-then-non-bullet, which in the
-    specification is the "**Pass condition.**" paragraph.
+    A bullet is `- ` at the left margin; it may wrap over several lines, and a
+    continuation line is indented. The list ends at a blank line followed by a
+    paragraph, which in the specification is "**Pass condition.**".
+
+    Everything else raises. This function is how a test keeps the markdown the
+    specification and the JSON the transcription of it, so a markdown it reads
+    only half of is worse than one it refuses: an unindented wrap, a nested
+    sub-bullet, a `*` list or a heading with no bullets under it all mean the
+    file says something this parser cannot see, and it says so.
     """
     lines = pathlib.Path(path).read_text(encoding="utf-8").splitlines()
     try:
@@ -246,17 +333,43 @@ def questions_from_markdown(path: pathlib.Path | str) -> list[str]:
             f"{path}: no {QUESTIONS_HEADING!r} heading, so the questions cannot be read"
         ) from None
     bullets: list[str] = []
-    for line in lines[start + 1:]:
-        match = _BULLET.match(line.strip()) if line.strip().startswith("- ") else None
-        if match:
-            bullets.append(match.group(1).strip())
-        elif line.strip() and bullets:
-            if line.startswith((" ", "\t")):
-                bullets[-1] += " " + line.strip()
-            else:
-                break
-        elif line.strip() and not bullets:
-            break
+    blank_before = True
+    for number, line in enumerate(lines[start + 1:], start=start + 2):
+        stripped = line.strip()
+        indented = line.startswith((" ", "\t"))
+        if not stripped:
+            blank_before = True
+            continue
+        if blank_before and bullets and not stripped.startswith("- "):
+            break  # a blank line then a paragraph: the list is over
+        if stripped.startswith("- "):
+            if indented:
+                raise ScenarioError(
+                    f"{path}:{number}: a nested bullet under "
+                    f"{QUESTIONS_HEADING!r}; every question is one top-level "
+                    f"bullet, and a nested one would be read as a question of "
+                    f"its own: {stripped!r}"
+                )
+            bullets.append(_BULLET.match(stripped).group(1).strip())
+        elif indented and bullets:
+            bullets[-1] += " " + stripped
+        elif bullets:
+            raise ScenarioError(
+                f"{path}:{number}: a continuation of the last question is not "
+                f"indented, so the questions cannot be read without guessing "
+                f"where the list ends: {stripped!r}"
+            )
+        else:
+            raise ScenarioError(
+                f"{path}:{number}: {QUESTIONS_HEADING!r} is followed by "
+                f"{stripped!r} rather than a `- ` bullet list, so no question "
+                "can be read from it"
+            )
+        blank_before = False
+    if not bullets:
+        raise ScenarioError(
+            f"{path}: {QUESTIONS_HEADING!r} has no bullets under it"
+        )
     return [strip_emphasis(b) for b in bullets]
 
 

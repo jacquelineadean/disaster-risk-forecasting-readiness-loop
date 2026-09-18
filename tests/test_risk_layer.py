@@ -1,11 +1,13 @@
 """The risk layer: issued files only, and an absence that is stated, not filled."""
 
+import json
 import os
 import pathlib
 import tempfile
 import unittest
 from unittest import mock
 
+from readiness import cite
 from readiness import data as data_mod
 from readiness.harness.ledger import Ledger
 from readiness.plans.risk import RiskLayer
@@ -88,6 +90,41 @@ class TestLoading(RiskCase):
         claim = layer.card_claim(fp.CONTRACT)
         self.assertEqual(claim.source.kind, "ledger")
         self.assertEqual(claim.source.ref, f"{fp.CONTRACT}/exp-0002")
+
+    def test_only_three_fields_of_a_card_cross_into_a_plans_object(self):
+        # Finding 10 of the leakage review: the whole card came across,
+        # scorecard["test"] included — held-out Brier, AUC and label counts in
+        # a plans object, which the gap report's resolver then licensed a
+        # sentence to cite.
+        contract = make_contract(name=fp.CONTRACT)
+        where = data_mod.paths(contract, experiments_dir=self.experiments)
+        ledger = Ledger(where.ledger)
+        append_card(ledger, contract, "validate")
+        append_card(ledger, contract, "test")
+        fp.make_issued().write(self.issued_dir)
+        layer = RiskLayer.load(
+            fp.PERIOD, [fp.COUNTY], issued_dir=self.issued_dir,
+            experiments_dir=self.experiments,
+        )
+        for record in layer.cards.values():
+            self.assertEqual(
+                sorted(record), ["experiment_id", "model", "version"]
+            )
+        blob = json.dumps(layer.cards)
+        for word in ("scorecard", "verdict", "split", "label", "brier", "auc",
+                     "canary", "data_snapshot"):
+            self.assertNotIn(word, blob.casefold())
+        # And the resolver cannot answer for a field that is not there.
+        from readiness.plans import gap_report as gap_report_mod
+
+        resolve = gap_report_mod.resolver(
+            fp.make_facility(), fp.scenario(), layer
+        )
+        outcome = resolve.resolve(cite.Source(
+            "ledger", f"{fp.CONTRACT}/exp-0002#scorecard.test.n_positive_labels"
+        ))
+        self.assertIsInstance(outcome, str)
+        self.assertIn("no field", outcome)
 
     def test_a_missing_ledger_leaves_the_probabilities_intact(self):
         fp.make_issued().write(self.issued_dir)

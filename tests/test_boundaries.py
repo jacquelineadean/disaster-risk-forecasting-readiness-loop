@@ -77,16 +77,39 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
     ),
     (
         "readiness/plans",
-        ("readiness.harness.labels", "readiness.harness.scoring",
+        ("readiness.data", "readiness.engine", "readiness.backtest",
+         "readiness.harness.features", "readiness.harness.labels",
+         "readiness.harness.metrics", "readiness.harness.scoring",
+         "readiness.harness.splits",
          "readiness.agent.orchestrator", "readiness.agent.subagents",
          "claude_agent_sdk", "anthropic"),
         "the planning thought-partner reasons over a facility record and the "
-        "issued risk layer: it sees no labels, no scoring and no agent control "
-        "flow, and it never calls an LLM — the optional drafter lives in "
-        "readiness/agent/planner.py and is reached only through an explicit "
-        "`--drafter claude`, at which point every sentence it returns still has "
-        "to pass readiness.cite.validate",
+        "issued risk layer: it reads no panel, fits and scores nothing, sees no "
+        "labels, no splits and no agent control flow, and it never calls an LLM "
+        "— the optional drafter lives in readiness/agent/planner.py and is "
+        "reached only through an explicit `--drafter claude`, at which point "
+        "every sentence it returns still has to pass readiness.cite.validate. "
+        "`readiness.harness.ledger` stays allowed: `plans/risk.py` reads the "
+        "card an issued file names, and keeps three fields of it",
     ),
+)
+
+#: The other direction. Phase 3 sits on top of the phases below it and is
+#: never depended on by them: a harness or a connector that imported the
+#: planning layer would make the eval plane depend on the product built out of
+#: its outputs, and the cycle would be invisible until something moved.
+UPWARD_RULES: tuple[tuple[str, tuple[str, ...], str], ...] = tuple(
+    (
+        subtree,
+        ("readiness.plans", "readiness.agent.planner"),
+        "the phases below Phase 3 must not depend on the planning layer built "
+        "on top of them",
+    )
+    for subtree in (
+        "readiness/harness", "readiness/engine", "readiness/data.py",
+        "readiness/connectors", "readiness/cite.py", "readiness/issue.py",
+        "readiness/brief.py",
+    )
 )
 
 #: Modules that may import an optional SDK, and only inside a `try:`. Checked
@@ -112,7 +135,16 @@ def python_files(subtree: str) -> list[pathlib.Path]:
 
 
 def imports_of(tree: ast.AST) -> list[tuple[str, bool]]:
-    """Every imported module name in `tree`, with whether it sits under a try."""
+    """Every imported module name in `tree`, with whether it sits under a try.
+
+    `from readiness.harness import labels` imports the module
+    `readiness.harness.labels`, and recording only `readiness.harness` made
+    every rule in `RULES` one import style away from being unenforced — the
+    rules are dotted prefixes, and that name matches none of them. So an
+    `ImportFrom` contributes the module *and* `module.alias` for every alias:
+    `readiness.harness.labels` may be a module or a name inside one, and for
+    a boundary table the distinction does not matter.
+    """
     found: list[tuple[str, bool]] = []
 
     def walk(node: ast.AST, guarded: bool) -> None:
@@ -122,6 +154,9 @@ def imports_of(tree: ast.AST) -> list[tuple[str, bool]]:
                 found.extend((alias.name, inner) for alias in child.names)
             elif isinstance(child, ast.ImportFrom) and child.module:
                 found.append((child.module, inner))
+                found.extend(
+                    (f"{child.module}.{alias.name}", inner) for alias in child.names
+                )
             walk(child, inner)
 
     walk(tree, False)
@@ -138,7 +173,7 @@ def top_level(module: str) -> str:
 
 class TestImportRules(unittest.TestCase):
     def test_every_rule_holds(self):
-        for subtree, forbidden, why in RULES:
+        for subtree, forbidden, why in (*RULES, *UPWARD_RULES):
             for file in python_files(subtree):
                 tree = ast.parse(file.read_text(), filename=str(file))
                 for module, _ in imports_of(tree):
@@ -151,8 +186,50 @@ class TestImportRules(unittest.TestCase):
 
     def test_rules_name_existing_paths(self):
         # A rule for a path that does not exist is a rule that never runs.
-        for subtree, _, _ in RULES:
+        for subtree, _, _ in (*RULES, *UPWARD_RULES):
             self.assertTrue((REPO_ROOT / subtree).exists(), f"{subtree} does not exist")
+
+    def test_a_from_import_is_recorded_under_its_own_name(self):
+        # The hole this table had: `from readiness.harness import labels` was
+        # recorded as `readiness.harness`, which matches no forbidden prefix.
+        tree = ast.parse(
+            "from readiness.harness import labels, scoring\n"
+            "from readiness.agent import orchestrator\n"
+            "import readiness.data\n"
+        )
+        names = [module for module, _guarded in imports_of(tree)]
+        for expected in ("readiness.harness", "readiness.harness.labels",
+                         "readiness.harness.scoring", "readiness.agent",
+                         "readiness.agent.orchestrator", "readiness.data"):
+            self.assertIn(expected, names)
+        self.assertTrue(matches("readiness.harness.labels", "readiness.harness.labels"))
+
+    def test_the_plans_row_would_catch_the_dotted_and_the_from_form(self):
+        forbidden = next(f for subtree, f, _ in RULES if subtree == "readiness/plans")
+        for source in (
+            "from readiness.harness import labels",
+            "from readiness.harness.scoring import score",
+            "from readiness.data import panel_path",
+            "from readiness.engine.boosting import Boosting",
+            "from readiness.harness.metrics import brier",
+            "from readiness.harness.features import build",
+            "from readiness import backtest",
+            "from readiness.agent import orchestrator, subagents",
+            "import readiness.harness.splits",
+        ):
+            with self.subTest(source=source):
+                names = [m for m, _g in imports_of(ast.parse(source))]
+                self.assertTrue(
+                    any(matches(m, prefix) for m in names for prefix in forbidden),
+                    source,
+                )
+        # The ledger is the one harness module a plans object may read.
+        names = [m for m, _g in imports_of(
+            ast.parse("from readiness.harness.ledger import Ledger")
+        )]
+        self.assertFalse(
+            any(matches(m, prefix) for m in names for prefix in forbidden)
+        )
 
 
 class TestStdlibOnly(unittest.TestCase):

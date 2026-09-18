@@ -7,7 +7,7 @@ investigation recorded it, plus the finding status each scenario question
 *should* come to, so that a change to a rule that would have missed a real
 failure fails the suite instead.
 
-Two rules keep the library honest:
+Three rules keep the library honest:
 
 1. **Every asserted fact cites a source index.** `event`, `hazard` and `dates`
    are objects with a `text` and a `source` index into the study's own
@@ -20,6 +20,10 @@ Two rules keep the library honest:
    involved: a case study has no issued risk layer, so the rules run against an
    empty one and the absence is stated in the prose, exactly as it would be
    for a live report in a county nothing has been issued for.
+3. **Unknown keys are refused, and so are places.** This is the one plans
+   directory that is committed, so it gets the facility record's own two
+   refusals: a key the schema does not define at any level it defines, and a
+   string value that reads as a street address, a ZIP+4 or a coordinate pair.
 
 Zero case studies ship. Each is an example added deliberately, by a person who
 has read the investigation; `tests/fixtures_plans.py::synthetic_case_study`
@@ -31,8 +35,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
-from typing import Mapping
+from typing import Mapping, Sequence
 
+from readiness.plans import facility as facility_mod
 from readiness.plans import rules as rules_mod
 from readiness.plans import scenarios as scenarios_mod
 from readiness.plans.facility import Facility, FacilityError
@@ -47,6 +52,21 @@ FACT_FIELDS: tuple[str, ...] = ("event", "hazard", "dates")
 
 #: What a source entry must carry for a reader to find it again.
 SOURCE_KEYS: tuple[str, ...] = ("title", "publisher", "year", "url")
+
+#: What a source entry may also carry.
+SOURCE_OPTIONAL_KEYS: tuple[str, ...] = ("note",)
+
+#: The top-level keys a case study has, and no others. `Facility` refuses an
+#: unknown key by name and so does this: `plans/case-studies/` is the one
+#: plans directory that *is* committed, so a key nothing reads is a key that
+#: could carry anything into git unexamined.
+STUDY_KEYS: tuple[str, ...] = (
+    "slug", "scenario", "sources", "facility_as_recorded", "expected_findings",
+    "event", "hazard", "dates",
+)
+
+#: A fact's own keys.
+FACT_KEYS: tuple[str, ...] = ("text", "source")
 
 #: The period label a case study's rules run under. No issuance exists for a
 #: past event in this repository, and inventing one would be the opposite of
@@ -72,6 +92,7 @@ class Source:
     publisher: str
     year: int | None
     url: str
+    note: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -93,8 +114,28 @@ class CaseStudy:
 
     @classmethod
     def from_json(cls, raw: Mapping, *, where: str = "<case study>") -> "CaseStudy":
-        for key in ("slug", "scenario", "sources", "facility_as_recorded",
-                    "expected_findings", *FACT_FIELDS):
+        """Validate a parsed study. Every refusal is a `CaseStudyError`.
+
+        Unknown keys are refused at every level this schema defines, and every
+        string in the file goes through the same place scan a facility record
+        does: a case study is committed, so an address in a free-text note
+        would be an address in git.
+        """
+        if not isinstance(raw, Mapping):
+            raise CaseStudyError(
+                f"{where}: expected a JSON object, got {type(raw).__name__}"
+            )
+        _check_keys(raw, STUDY_KEYS, where, "the study")
+        found = facility_mod.forbidden_in(
+            {k: v for k, v in raw.items() if k != "facility_as_recorded"}
+        )
+        if found:
+            spot, what = found[0]
+            raise CaseStudyError(
+                f"{where}: field {spot!r} is refused, {what} — "
+                f"{facility_mod.FORBIDDEN_REASON}"
+            )
+        for key in STUDY_KEYS:
             if key not in raw:
                 raise CaseStudyError(f"{where}: missing {key!r}")
         sources = _read_sources(raw["sources"], where)
@@ -136,6 +177,18 @@ class CaseStudy:
         return dataclasses.replace(study, path=path)
 
 
+def _check_keys(
+    raw: Mapping, known: Sequence[str], where: str, what: str
+) -> None:
+    for key in raw:
+        if key not in known:
+            raise CaseStudyError(
+                f"{where}: unknown field {key!r} in {what}; the schema knows "
+                f"{sorted(known)} here, and a field no rule reads must not be "
+                "silently accepted into a committed file"
+            )
+
+
 def _read_sources(raw: object, where: str) -> tuple[Source, ...]:
     if not isinstance(raw, list) or not raw:
         raise CaseStudyError(
@@ -145,17 +198,22 @@ def _read_sources(raw: object, where: str) -> tuple[Source, ...]:
     for i, entry in enumerate(raw):
         if not isinstance(entry, Mapping):
             raise CaseStudyError(f"{where}: sources[{i}] must be an object")
+        _check_keys(entry, (*SOURCE_KEYS, *SOURCE_OPTIONAL_KEYS), where,
+                    f"sources[{i}]")
         for key in SOURCE_KEYS:
             if key not in entry:
                 raise CaseStudyError(f"{where}: sources[{i}] is missing {key!r}")
         out.append(Source(
             title=str(entry["title"]), publisher=str(entry["publisher"]),
             year=entry["year"], url=str(entry["url"]),
+            note=str(entry.get("note", "")),
         ))
     return tuple(out)
 
 
 def _read_fact(name: str, raw: object, n_sources: int, where: str) -> Fact:
+    if isinstance(raw, Mapping):
+        _check_keys(raw, FACT_KEYS, where, f"{name!r}")
     if not isinstance(raw, Mapping) or "text" not in raw or "source" not in raw:
         raise CaseStudyError(
             f"{where}: {name!r} must be an object with 'text' and a 'source' index "
@@ -174,17 +232,20 @@ def facts_with_sources(study: CaseStudy) -> list[str]:
     """Any fact whose source index does not resolve. Empty means the study is sound.
 
     `from_json` already refuses a bad index, so this is the same rule stated
-    where a reader looks for it, and it is what `readiness scenarios check`
-    prints when a study is rejected.
+    where a reader looks for it — and it is reachable, because a study built
+    through the dataclass rather than through `from_json` has not been past
+    that refusal. It is what `readiness scenarios check` prints when a study
+    is rejected.
+
+    There is deliberately no second loop over the facility's evidence: a
+    `Facility` cannot exist with a blank `source_doc`, so a check for one here
+    would be a branch no test could reach and no reader could trust.
     """
-    problems = []
-    for name, fact in study.facts().items():
-        if not 0 <= fact.source < len(study.sources):
-            problems.append(f"{name}: cites source {fact.source}, which does not exist")
-    for key, evidence in sorted(study.facility.evidence.items()):
-        if not evidence.source_doc.strip():
-            problems.append(f"facility evidence {key}: names no source document")
-    return problems
+    return [
+        f"{name}: cites source {fact.source}, which does not exist"
+        for name, fact in study.facts().items()
+        if not 0 <= fact.source < len(study.sources)
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -249,6 +310,12 @@ def check_study(
         )
     findings = rules_mod.run(study.facility, RiskLayer.empty(NO_PERIOD), scenario)
     observed = rules_mod.statuses(findings)
+    unrun = sorted(known - set(observed))
+    if unrun:
+        problems.append(
+            f"the rules produced no finding for question(s) {unrun}, so their "
+            "expectations were never checked"
+        )
     mismatches = tuple(
         f"{qid}: expected {study.expected_findings[qid]!r}, rules said {observed[qid]!r}"
         for qid in sorted(set(observed) & set(study.expected_findings))
@@ -290,8 +357,11 @@ def check_all(
 __all__ = [
     "CASE_STUDIES_DIR",
     "FACT_FIELDS",
+    "FACT_KEYS",
     "NO_PERIOD",
     "SOURCE_KEYS",
+    "SOURCE_OPTIONAL_KEYS",
+    "STUDY_KEYS",
     "CaseStudy",
     "CaseStudyError",
     "CaseStudyResult",

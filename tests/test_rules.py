@@ -34,7 +34,13 @@ class RuleCase(unittest.TestCase):
         return {c.source.kind for c in finding.claims}
 
     def assert_validates(self, finding: Finding, facility=None):
-        """Every sentence of a finding passes the citation rules on its own."""
+        """Every sentence of a finding passes the citation rules on its own.
+
+        The positional labels a rule writes — `PARTNER-2`, `COUNTY-A` — are
+        names the record assigns, so they are the document's own identifiers,
+        exactly as a brief's county FIPS is. Every *other* number has to be a
+        cited value.
+        """
         from readiness.plans import gap_report as gap_report_mod
 
         facility = facility or self.facility
@@ -42,7 +48,17 @@ class RuleCase(unittest.TestCase):
             "probe", "gap-report", finding.sentences, finding.claims, "", {}
         )
         resolve = gap_report_mod.resolver(facility, self.scenario, self.risk)
-        self.assertEqual(cite.validate(doc, resolve), [])
+        labels = (
+            *facility.partner_labels().values(),
+            *facility.county_labels().values(),
+        )
+        self.assertEqual(cite.validate(doc, resolve, identifiers=labels), [])
+
+    def assert_names_nobody(self, finding: Finding, *names: str):
+        """No sentence of a finding carries a name the record supplied."""
+        text = self.text(finding)
+        for name in names:
+            self.assertNotIn(name, text)
 
 
 class TestEveryRuleProducesOneFindingPerQuestion(RuleCase):
@@ -145,6 +161,68 @@ class TestSwitchgearVsIntensity(RuleCase):
         self.assertEqual(findings["q1"].status, "answered")
         self.assert_validates(findings["q1"])
 
+    def test_equipment_exactly_at_the_design_elevation_is_in_the_water(self):
+        # Inject 3 is standing water *reaching* the design flood elevation.
+        # Equipment sitting exactly there is wet, and the old strict `<` said
+        # "Both sit above the design flood elevation" of three equal numbers.
+        for path in ("power.switchgear_elevation_ft",
+                     "power.transfer_switch_elevation_ft"):
+            with self.subTest(path=path):
+                findings = self.run_rules(**{path: 10})
+                finding = findings["q1"]
+                self.assertEqual(finding.status, "failed")
+                self.assertIn("at or below the design flood elevation",
+                              self.text(finding))
+                self.assertNotIn("sit above the design flood elevation",
+                                 self.text(finding))
+                self.assert_validates(finding)
+        # Both exactly at it: both are named.
+        finding = self.run_rules(**{
+            "power.switchgear_elevation_ft": 10,
+            "power.transfer_switch_elevation_ft": 10,
+        })["q1"]
+        self.assertEqual(finding.status, "failed")
+        self.assertIn("switchgear and transfer switch", self.text(finding))
+        # A hair above it is still answered.
+        self.assertEqual(
+            self.run_rules(**{
+                "power.switchgear_elevation_ft": 10.5,
+                "power.transfer_switch_elevation_ft": 10.5,
+            })["q1"].status,
+            "answered",
+        )
+
+    def test_an_under_declared_scenario_cannot_run_rather_than_raising(self):
+        # Finding 5 of the correctness review: the guard read the scenario's
+        # list alone, so a scenario that dropped a path turned a missing field
+        # into a RuleError traceback instead of the refusal it promises.
+        import dataclasses
+
+        bare = dataclasses.replace(self.scenario, fail_closed_on=())
+        for path in rules_mod.REQUIRED_PATHS["switchgear_vs_intensity"]:
+            with self.subTest(path=path):
+                facility = fp.make_facility(**{path: None})
+                finding = rules_mod.switchgear_vs_intensity(
+                    facility, self.risk, bare
+                )
+                self.assertEqual(finding.status, "cannot_run")
+                self.assertIn(path, finding.text())
+
+    def test_a_null_elevation_source_cannot_run_and_names_the_document(self):
+        # Finding 9: it is in the question's `requires`, so a report that says
+        # "from the document the record names" while citing an empty claim is
+        # a provenance assertion the record does not support.
+        self.assertIn(
+            "design_intensity.flood_elevation_source", self.scenario.fail_closed_on
+        )
+        finding = self.run_rules(
+            **{"design_intensity.flood_elevation_source": None}
+        )["q1"]
+        self.assertEqual(finding.status, "cannot_run")
+        self.assertIn("design_intensity.flood_elevation_source", self.text(finding))
+        self.assertIn("Elevation Certificate", self.text(finding))
+        self.assert_validates(finding)
+
 
 class TestWrittenTrigger(RuleCase):
     def test_answered_needs_a_written_trigger_an_authority_and_a_lead_time(self):
@@ -206,6 +284,61 @@ class TestPartnerCorrelatedFailure(RuleCase):
         finding = self.run_rules(**{"transfer_agreements.0.county_fips": fp.COUNTY})["q4"]
         self.assertEqual(finding.status, "failed")
         self.assertIn("same county", self.text(finding))
+        self.assertIn("PARTNER-1 holds a signed transfer agreement", self.text(finding))
+        self.assert_names_nobody(finding, "Far Ridge Hospital")
+        self.assert_validates(finding)
+
+    def test_no_rule_writes_a_name_and_the_claims_carry_them(self):
+        # Finding 1 and 2 of the correctness review, and finding 1 of the
+        # leakage review: a name in prose is a name a drafter can reword, and
+        # "Regional Medical Center 2" made the whole report unwritable.
+        finding = self.run_rules(
+            transfer_agreements=[{
+                "name": "Alert Bay Regional Medical Center 2",
+                "county_fips": fp.COUNTY, "signed": True,
+                "same_floodplain": True, "same_grid_feeder": True,
+            }],
+        )["q4"]
+        self.assertEqual(finding.status, "failed")
+        self.assert_names_nobody(finding, "Alert Bay Regional Medical Center 2")
+        self.assert_validates(finding)
+        named = finding.claims[
+            [c.id for c in finding.claims].index("f-transfer_agreements.0.name")
+        ]
+        self.assertIn("Alert Bay Regional Medical Center 2", named.text)
+        self.assertTrue(named.text.startswith("PARTNER-1,"))
+        self.assertIn(rules_mod.NAME_MARK, named.text)
+
+    def test_the_reason_sentence_cites_the_flag_it_turns_on(self):
+        for path, flag in (
+            ("transfer_agreements.0.same_floodplain",
+             "f-transfer_agreements.0.same_floodplain"),
+            ("transfer_agreements.0.same_grid_feeder",
+             "f-transfer_agreements.0.same_grid_feeder"),
+        ):
+            with self.subTest(path=path):
+                finding = self.run_rules(**{path: True})["q4"]
+                cited = {c for s in finding.sentences for c in s.cited()}
+                self.assertIn(flag, cited)
+                self.assertNotIn("f-transfer_agreements.0.county_fips", cited)
+                self.assert_validates(finding)
+        # The county is cited when the county is the reason, and only then.
+        finding = self.run_rules(**{"transfer_agreements.0.county_fips": fp.COUNTY})["q4"]
+        cited = {c for s in finding.sentences for c in s.cited()}
+        self.assertIn("f-transfer_agreements.0.county_fips", cited)
+
+    def test_two_partners_in_one_county_are_both_labelled(self):
+        finding = self.run_rules(
+            transfer_agreements=[
+                {"name": "Alpha Hospital", "county_fips": fp.OTHER_COUNTY,
+                 "signed": True, "same_floodplain": False, "same_grid_feeder": False},
+                {"name": "Beta Hospital", "county_fips": fp.OTHER_COUNTY,
+                 "signed": True, "same_floodplain": False, "same_grid_feeder": False},
+            ],
+        )["q4"]
+        text = self.text(finding)
+        self.assertIn("the county PARTNER-1 and PARTNER-2 sits in", text)
+        self.assert_names_nobody(finding, "Alpha Hospital", "Beta Hospital")
         self.assert_validates(finding)
 
     def test_the_same_floodplain_or_grid_feeder_is_enough(self):
@@ -259,10 +392,11 @@ class TestCampusSeam(RuleCase):
 
     def test_a_co_located_operator_is_unanswered_and_names_the_occupants(self):
         finding = self.run_rules(
-            co_located_operators=[{"name": "Dialysis Co", "occupants": 9}]
+            co_located_operators=[{"name": "Dialysis Unit 3", "occupants": 9}]
         )["q5"]
         self.assertEqual(finding.status, "unanswered")
-        self.assertIn("Dialysis Co", self.text(finding))
+        self.assertIn("PARTNER-2 occupies part of this campus", self.text(finding))
+        self.assert_names_nobody(finding, "Dialysis Unit 3")
         self.assertIn("9 occupants", self.text(finding))
         self.assertIn("no field for a joint plan", self.text(finding))
         self.assert_validates(finding)
@@ -304,6 +438,43 @@ class TestFirstBreak(RuleCase):
         self.assertIn("does not say how many hours of water", self.text(finding))
         self.assertNotIn("stored water runs out", self.text(finding))
         self.assert_validates(finding)
+
+    def test_a_reserve_that_lasts_exactly_the_isolation_is_answered(self):
+        # The boundary `hour < isolation`: a break at exactly hour 96 is not
+        # inside a 96-hour isolation. Deliberate, and until now untested.
+        finding = self.run_rules(**{
+            "power.fuel_hours": 96, "water.on_site_storage_hours": 90,
+        })["q6"]
+        self.assertEqual(finding.status, "answered")
+        self.assertIn("hour 96", self.text(finding))
+        self.assertIn("at or beyond the 96 hours", self.text(finding))
+        # One hour earlier, it breaks inside the scenario.
+        self.assertEqual(
+            self.run_rules(**{
+                "power.fuel_hours": 95, "water.on_site_storage_hours": 90,
+            })["q6"].status,
+            "failed",
+        )
+
+    def test_large_and_small_numbers_are_spelled_plainly(self):
+        # Finding 16: "{:g}" prints 12345678 as 1.23457e+07, which is both
+        # unreadable and a different number from the record's.
+        finding = self.run_rules(**{
+            "power.fuel_hours": 12345678, "water.on_site_storage_hours": None,
+        })["q6"]
+        self.assertIn("hour 12345678", self.text(finding))
+        self.assertNotIn("e+", self.text(finding))
+        self.assert_validates(finding)
+        claim = rules_mod.number_claim(
+            fp.make_facility(**{"water.on_site_storage_hours": 0.031}),
+            "water.on_site_storage_hours",
+        )
+        self.assertEqual(cite.render_value(claim), "0.031")
+        claim = rules_mod.number_claim(
+            fp.make_facility(**{"water.on_site_storage_hours": 6.5}),
+            "water.on_site_storage_hours",
+        )
+        self.assertEqual(cite.render_value(claim), "6.5")
 
     def test_the_fallback_is_named_as_the_planner_s_to_write(self):
         self.assertIn("fallback is the planner's to write", self.text(self.run_rules()["q6"]))

@@ -44,8 +44,13 @@ site/generated/
 # repository, so the trees carry their README, the fictional example facility
 # and nothing else. A case study is different: it is a published investigation,
 # added deliberately, and lives in plans/case-studies/.
-plans/facilities/*.json
+# Everything under each tree, at any depth and whatever the extension: a
+# record in a subdirectory, a roster as .md or a .JSON on a case-insensitive
+# filesystem is exactly the file that must not be committed by accident.
+plans/facilities/**
+!plans/facilities/README.md
 !plans/facilities/example-rural-hospital.json
-plans/reports/*
+plans/reports/**
 !plans/reports/README.md
-plans/reviews/*.json
+plans/reviews/**
+!plans/reviews/README.md

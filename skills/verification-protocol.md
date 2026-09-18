@@ -209,17 +209,24 @@ facility field paths and scenario questions. `--drafter claude` may rewrite
 the wording; it may not add a fact. Every sentence the model writes must
 still carry a citation marker into the same claim set, `cite.validate` runs
 on its output exactly as it does on the local drafter's, and any sentence
-that fails is dropped and counted on the report's provenance line rather
-than shown. Numbers never come from the model.
+that fails is **refused** — the local wording stays in its place and the
+refusal is counted on the report's provenance line, so no model can delete a
+finding by returning rubbish. Numbers never come from the model.
 
-**Blinding is not a courtesy; it is the review protocol.** A gap report is
-reviewed only in its blinded form (`FACILITY-<hash6>`, `PARTNER-n` in place
-of every name), and `readiness review record` binds a rating to the sha256
-of that specific blinded file — change one byte of the report and every
-review of the version before it is orphaned, on purpose. Real facility
-files and real gap reports never enter git; there is no flag that commits
-one by accident, and a test refuses any committed plan JSON that carries an
-address, a latitude, a longitude, a tract, a block or a parcel key.
+**Blinding is not a courtesy; it is the review protocol.** No rule writes a
+name: a sentence says `PARTNER-1`, `COUNTY-A` or `DOCUMENT-3`, and the name
+lives in the claim it cites. A gap report is reviewed only in its blinded form
+— `FACILITY-<12 hex of the record's own random blind_id>`, no slug, no names,
+no county FIPS, no timestamp, written under `blinded/<label>/` rather than
+beside the named pair — and the render refuses to return a page in which any
+of those survived. `readiness review record` binds a rating to the sha256 of
+that specific blinded file: change what the report says and every review of
+the version before it is orphaned, on purpose; re-run the command on an
+unchanged record and nothing moves. Real facility files and real gap reports
+never enter git; there is no flag that commits one by accident, and a test
+refuses any committed plan JSON that carries a key
+`facility.FORBIDDEN_KEYS` lists, or any string value that reads as a street
+address, a ZIP+4 or a latitude/longitude pair.
 
 **A review record is an attestation, not proof.** `verify --phase 3` checks
 that at least three reviews of distinct blinded facilities, rated useful or

@@ -927,6 +927,35 @@ def phase3(
     )
 
 
+def _blinded_renders(reports_dir: pathlib.Path | None) -> tuple[dict, list[str]]:
+    """sha256 -> the document that renders to it, over every JSON under the tree.
+
+    A blinded page is found by **content**, never by path. `<period>.json`
+    beside `<period>.blind.html` was a file-name convention and nothing more:
+    the JSON could be replaced wholesale with a document saying the opposite
+    of the page a reviewer rated, and this check would still have re-validated
+    the replacement and called it the reviewed report. Re-rendering every
+    document and keying on the sha closes document -> page -> sha, which is
+    the binding a review record actually asserts.
+    """
+    from readiness import cite
+    from readiness.plans import gap_report as gap_report_mod
+
+    root = gap_report_mod.reports_root(reports_dir)
+    found: dict[str, object] = {}
+    notes: list[str] = []
+    for path in sorted(root.rglob("*.json")) if root.exists() else []:
+        try:
+            doc = cite.from_json(path.read_text(encoding="utf-8"))
+            _page, sha = gap_report_mod.render_blinded(doc)
+        except (OSError, ValueError, KeyError, TypeError,
+                gap_report_mod.GapReportError):
+            notes.append(str(path))
+            continue
+        found.setdefault(sha, doc)
+    return found, notes
+
+
 def _reviews_check(
     reviews: list, reviews_dir: pathlib.Path | None, read_error: str
 ) -> tuple[Check, list]:
@@ -947,7 +976,7 @@ def _reviews_check(
     ]
     for review in counted:
         lines.append(
-            f"  [ok]  {review.facility_hash} {review.period}: {review.rating!r} from "
+            f"  [ok]  {review.facility_label} {review.period}: {review.rating!r} from "
             f"{review.reviewer_role!r} ({review.organisation_type}, "
             f"{review.years_in_role} year(s))"
         )
@@ -961,7 +990,7 @@ def _reviews_check(
             why.append(f"role {review.reviewer_role!r} is not an emergency manager")
         if not review.useful:
             why.append(f"rated {review.rating!r}")
-        lines.append(f"  [ .. ] {review.facility_hash}: {'; '.join(why)}")
+        lines.append(f"  [ .. ] {review.facility_label}: {'; '.join(why)}")
     lines.append(
         "  the record is an attestation: nothing here can establish that a facility "
         "is real or that a reviewer practises emergency management"
@@ -969,24 +998,15 @@ def _reviews_check(
     return Check(name, len(facilities) >= MIN_USEFUL_REVIEWS, "\n".join(lines)), counted
 
 
-def _blinded_reports(reports_dir: pathlib.Path | None) -> dict[str, pathlib.Path]:
-    """Every blinded render under the reports tree, by its sha256."""
-    from readiness.plans import gap_report as gap_report_mod
-    from readiness.plans import reviews as reviews_mod
-
-    root = gap_report_mod.reports_root(reports_dir)
-    found: dict[str, pathlib.Path] = {}
-    for path in sorted(root.rglob("*.blind.html")) if root.exists() else []:
-        try:
-            found[reviews_mod.sha256_of(path)] = path
-        except OSError:
-            continue
-    return found
-
-
 def _reports_check(counted: list, reports_dir: pathlib.Path | None) -> Check:
-    """Each counted review names a blinded render that exists and still validates."""
-    from readiness import cite
+    """Each counted review names a document that renders to exactly its sha.
+
+    No path under the reports tree is ever printed. A line pairing a blinded
+    label with `plans/reports/<slug>/...` is a de-blinding table, and this
+    command's output is pasted into pull requests and reports. What is printed
+    is the label, the first sixteen hex of the sha, and the shape of the
+    document — which is what a reader needs and all a reviewer may have.
+    """
     from readiness.plans import gap_report as gap_report_mod
 
     name = "reports"
@@ -994,45 +1014,48 @@ def _reports_check(counted: list, reports_dir: pathlib.Path | None) -> Check:
     if not counted:
         return Check(name, False, "reports: no review counts yet, so none can be traced "
                      f"to a blinded report under {data_mod.relative(root)}")
-    blinded = _blinded_reports(reports_dir)
+    rendered, unreadable = _blinded_renders(reports_dir)
     lines: list[str] = []
     ok = True
     for review in counted:
-        path = blinded.get(review.report_sha256)
-        if path is None:
+        short = review.report_sha256[:16]
+        doc = rendered.get(review.report_sha256)
+        if doc is None:
             ok = False
             lines.append(
-                f"  [FAIL] {review.facility_hash}: no blinded render under "
-                f"{data_mod.relative(root)} has sha256 {review.report_sha256[:16]}..., "
-                "so the rating is of a document this tree does not hold"
+                f"  [FAIL] {review.facility_label}: no document under "
+                f"{data_mod.relative(root)} renders to sha256 {short}..., so the "
+                "rating is of a document this tree does not hold"
             )
             continue
-        document = pathlib.Path(str(path)[: -len(".blind.html")] + ".json")
-        if not document.exists():
+        page, _sha = gap_report_mod.render_blinded(doc)
+        details = gap_report_mod.blind_details(page)
+        wanted = (review.facility_label, review.period, gap_report_mod.KIND)
+        if details != wanted:
             ok = False
             lines.append(
-                f"  [FAIL] {review.facility_hash}: {data_mod.relative(path)} has no "
-                f"{document.name} beside it, so the citations cannot be re-checked"
+                f"  [FAIL] {review.facility_label}: the document with sha256 "
+                f"{short}... is {details}, not {wanted}, so the review names a "
+                "report about another facility, period or kind"
             )
             continue
-        try:
-            doc = cite.from_json(document.read_text(encoding="utf-8"))
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            ok = False
-            lines.append(f"  [FAIL] {data_mod.relative(document)}: unreadable ({exc})")
-            continue
-        violations = _gap_report_violations(doc, document)
+        violations = _gap_report_violations(doc)
         if violations:
             ok = False
             lines.append(
-                f"  [FAIL] {data_mod.relative(document)}: {len(violations)} "
-                f"violation(s), first: {violations[0]}"
+                f"  [FAIL] {review.facility_label} ({short}...): "
+                f"{len(violations)} violation(s), first: {violations[0]}"
             )
             continue
         lines.append(
-            f"  [ok]  {review.facility_hash}: {data_mod.relative(path)} "
-            f"({len(doc.sentences)} sentences, {len(doc.claims)} claims) validates "
-            "with zero violations"
+            f"  [ok]  {review.facility_label} ({short}...): "
+            f"{len(doc.sentences)} sentences, {len(doc.claims)} claims, "
+            "validates with zero violations"
+        )
+    if unreadable:
+        lines.append(
+            f"  [ .. ] {len(unreadable)} file(s) under {data_mod.relative(root)} are "
+            "not gap-report documents and were not considered"
         )
     head = (
         f"reports: {sum(1 for line in lines if line.startswith('  [ok]'))}/"
@@ -1042,22 +1065,30 @@ def _reports_check(counted: list, reports_dir: pathlib.Path | None) -> Check:
     return Check(name, ok, "\n".join([head, *lines]))
 
 
-def _gap_report_violations(doc, path: pathlib.Path) -> list:
-    """Re-validate a written gap report from the file, against its own claims.
+def _gap_report_violations(doc) -> list:
+    """Re-validate a written gap report against **its own** claim set.
 
-    The facility record and the scenario a real report was built from are the
-    planner's, not this repository's, so the resolver accepts the refs the
-    document names and the check that bites here is the rest of `cite`: every
-    sentence cites, every citation exists, every number is a cited value, no
-    forbidden phrasing, and no forbidden key anywhere in the JSON.
+    Say what this is, because it is easy to read as more. The facility record
+    and the scenario a real report was built from are the planner's, not this
+    repository's, and neither is committed — so nothing here can re-resolve
+    `power.fuel_hours` to a building. What this checks is that the document is
+    internally sound: every sentence cites, every citation exists in the
+    document, every number is the rendered value of a cited claim, no
+    forbidden phrasing, no place named by a key or a value anywhere in the
+    JSON, and the kind is a gap report. A document that passed these when it
+    was written and fails them now has been edited since.
     """
     from readiness import cite
     from readiness.plans import gap_report as gap_report_mod
     from readiness.plans import scenarios as scenarios_mod
 
+    try:
+        library = scenarios_mod.as_known(scenarios_mod.load_all())
+    except scenarios_mod.ScenarioError:
+        library = set()
     known: dict[str, object] = {
         "facility": {c.source.ref for c in doc.claims if c.source.kind == "facility"},
-        "scenario": scenarios_mod.as_known(scenarios_mod.load_all())
+        "scenario": library
         | {c.source.ref for c in doc.claims if c.source.kind == "scenario"},
         "issued": {c.source.ref.split("#")[0] for c in doc.claims
                    if c.source.kind == "issued"},
@@ -1068,8 +1099,7 @@ def _gap_report_violations(doc, path: pathlib.Path) -> list:
     if doc.kind != gap_report_mod.KIND:
         found.append(cite.Violation(
             cite.UNRESOLVED, None,
-            f"{data_mod.relative(path)} is a {doc.kind!r}, not a "
-            f"{gap_report_mod.KIND!r}",
+            f"the document is a {doc.kind!r}, not a {gap_report_mod.KIND!r}",
         ))
     return found
 
@@ -1080,7 +1110,10 @@ def _case_studies_check(case_studies_dir: pathlib.Path | None) -> Check:
 
     name = "case studies"
     root = case_studies_mod.case_studies_dir(case_studies_dir)
-    results = case_studies_mod.check_all(case_studies_dir)
+    try:
+        results = case_studies_mod.check_all(case_studies_dir)
+    except (case_studies_mod.CaseStudyError, ValueError) as exc:
+        return Check(name, False, f"case studies: {exc}")
     if not results:
         return Check(
             name, True,
@@ -1097,7 +1130,12 @@ def _case_studies_check(case_studies_dir: pathlib.Path | None) -> Check:
 
 
 def _no_coordinates_check(plans_dir: pathlib.Path | None) -> Check:
-    """No committed JSON under plans/ carries an address or a coordinate."""
+    """No committed JSON under plans/ names a place, by key or by value.
+
+    The same scan `gap_report.check` runs over a rendered document, so the
+    rule is one rule rather than two that can drift — and so the no-coordinate
+    guard is live over a tree whose keys nothing constrains.
+    """
     from readiness.plans import facility as facility_mod
     from readiness.plans import gap_report as gap_report_mod
 
@@ -1115,10 +1153,11 @@ def _no_coordinates_check(plans_dir: pathlib.Path | None) -> Check:
             problems.append(f"  [FAIL] {data_mod.relative(path)}: unreadable ({exc})")
             continue
         for key in gap_report_mod.forbidden_keys(payload):
-            problems.append(f"  [FAIL] {data_mod.relative(path)}: carries {key!r}")
+            problems.append(f"  [FAIL] {data_mod.relative(path)}: carries {key}")
     head = (
         f"no coordinates: {scanned} committed JSON file(s) under "
-        f"{data_mod.relative(root)} carry none of "
-        f"{list(facility_mod.FORBIDDEN_KEYS)}"
+        f"{data_mod.relative(root)} carry none of the keys "
+        f"{list(facility_mod.FORBIDDEN_KEYS)} and no value that reads as "
+        "a street address, a ZIP+4 or a coordinate pair"
     )
     return Check(name, not problems, "\n".join([head, *problems]))

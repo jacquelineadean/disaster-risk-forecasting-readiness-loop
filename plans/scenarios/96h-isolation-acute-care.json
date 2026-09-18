@@ -125,6 +125,7 @@
   ],
   "fail_closed_on": [
     "design_intensity.flood_elevation_ft",
+    "design_intensity.flood_elevation_source",
     "power.switchgear_elevation_ft",
     "power.transfer_switch_elevation_ft"
   ]

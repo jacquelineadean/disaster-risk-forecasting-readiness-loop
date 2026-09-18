@@ -6,8 +6,10 @@ test is the schema saying out loud that nothing address-level exists here
 worth anything: the field path leads to a document, or the file is refused.
 """
 
+import hashlib
 import json
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -17,6 +19,31 @@ from tests.fixtures_plans import facility_dict, make_facility, write_facility
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 EXAMPLE = REPO_ROOT / "plans" / "facilities" / "example-rural-hospital.json"
+
+
+def git(*args: str) -> str:
+    """git in this repository, or a clear failure. Never a skip.
+
+    What is committed is the property these tests exist to hold, and a tree
+    without git is a tree where that property cannot be checked at all.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *args],
+        capture_output=True, text=True,
+    )
+    if result.returncode not in (0, 1):
+        raise AssertionError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def tracked(*paths: str) -> list[str]:
+    """Every file git actually carries under these paths, sorted."""
+    return sorted(line for line in git("ls-files", *paths).splitlines() if line)
+
+
+def ignored(path: str) -> bool:
+    """Whether `.gitignore` would keep this path out of git."""
+    return bool(git("check-ignore", "--", path).strip())
 
 
 class TestReading(unittest.TestCase):
@@ -39,16 +66,93 @@ class TestReading(unittest.TestCase):
         self.assertIsNone(f.get("transfer_agreements.9.name"))
         self.assertIsNone(f.get("power.nonexistent"))
 
-    def test_the_hash_and_the_blind_label_come_from_the_slug(self):
+    def test_the_blind_label_is_the_record_s_own_random_id_not_the_slug(self):
+        # Finding 2 of the leakage review: a six-hex digest of a slug is a
+        # dictionary attack away from the slug, and the blinded page is the
+        # artefact that leaves the building.
         f = make_facility(slug="some-slug")
-        self.assertEqual(len(f.facility_hash), 64)
-        self.assertEqual(f.blind_label, f"FACILITY-{f.facility_hash[:6]}")
-        self.assertEqual(facility_mod.blind_label("some-slug"), f.blind_label)
-        self.assertNotEqual(make_facility(slug="other").blind_label, f.blind_label)
+        self.assertEqual(f.blind_label, f"FACILITY-{f.blind_id[:12]}")
+        self.assertRegex(f.blind_label, r"^FACILITY-[0-9a-f]{12}$")
+        self.assertEqual(facility_mod.BLIND_CHARS, 12)
+        digest = hashlib.sha256(b"some-slug").hexdigest()
+        self.assertNotIn(digest[:12], f.blind_label)
+        # Two records with the same slug and different ids are two facilities.
+        other = make_facility(slug="some-slug", blind_id="f" * 32)
+        self.assertNotEqual(other.blind_label, f.blind_label)
+
+    def test_a_missing_or_malformed_blind_id_is_refused_with_the_command(self):
+        for value in (None, "", "abc", "A" * 32, "0" * 31, "0" * 33):
+            with self.subTest(value=value):
+                raw = facility_dict()
+                raw["blind_id"] = value
+                with self.assertRaises(FacilityError) as ctx:
+                    Facility.from_json(raw, where="f.json")
+                message = str(ctx.exception)
+                self.assertIn("blind_id", message)
+                self.assertIn("secrets.token_hex(16)", message)
+        raw = facility_dict()
+        del raw["blind_id"]
+        with self.assertRaises(FacilityError) as ctx:
+            Facility.from_json(raw, where="f.json")
+        self.assertIn("'blind_id' is missing", str(ctx.exception))
+
+    def test_the_blind_id_needs_no_evidence_and_may_not_have_any(self):
+        # It is this repository's bookkeeping, not a fact read off a document.
+        raw = facility_dict()
+        self.assertNotIn("blind_id", raw["evidence"])
+        Facility.from_json(raw)
+        raw["evidence"]["blind_id"] = {"text": "t", "source_doc": "d", "page": None}
+        with self.assertRaises(FacilityError) as ctx:
+            Facility.from_json(raw, where="f.json")
+        self.assertIn("names no populated field", str(ctx.exception))
 
     def test_partner_names_are_every_name_a_blinding_must_replace(self):
         f = make_facility(co_located_operators=[{"name": "Dialysis Co", "occupants": 8}])
         self.assertEqual(f.partner_names(), ("Far Ridge Hospital", "Dialysis Co"))
+
+    def test_labels_are_positional_and_fixed_by_the_record(self):
+        f = make_facility(
+            transfer_agreements=[
+                {"name": "Far Ridge Hospital", "county_fips": "99007", "signed": True,
+                 "same_floodplain": False, "same_grid_feeder": False},
+                {"name": "Second Hospital", "county_fips": "99009", "signed": True,
+                 "same_floodplain": False, "same_grid_feeder": False},
+            ],
+            co_located_operators=[{"name": "Dialysis Co", "occupants": 8}],
+        )
+        self.assertEqual(f.partner_labels(), {
+            "Far Ridge Hospital": "PARTNER-1",
+            "Second Hospital": "PARTNER-2",
+            "Dialysis Co": "PARTNER-3",
+        })
+        self.assertEqual(f.partner_label("Dialysis Co"), "PARTNER-3")
+        # Transfer agreements first, then co-located operators, in record order.
+        self.assertEqual(
+            list(f.county_labels()),
+            ["99001", "99007", "99009"],
+        )
+        self.assertEqual(
+            list(f.county_labels().values()), ["COUNTY-A", "COUNTY-B", "COUNTY-C"]
+        )
+
+    def test_document_labels_cover_every_evidence_source(self):
+        f = make_facility()
+        docs = f.document_labels()
+        self.assertIn("synthetic planning record", docs)
+        self.assertIn(f.design_intensity.flood_elevation_source, docs)
+        self.assertTrue(all(v.startswith("DOCUMENT-") for v in docs.values()))
+
+    def test_names_are_whitespace_normalised_at_load(self):
+        # Finding 1 of the correctness review: prose collapses whitespace, so a
+        # record that does not leaves the blinding keyed on a string that never
+        # appears in the page it is meant to clean.
+        for spelling in ("Mercy  Hospital", " Mercy Hospital", "Mercy\tHospital",
+                         "Mercy\nHospital", "Mercy Hospital "):
+            with self.subTest(spelling=spelling):
+                f = make_facility(**{"transfer_agreements.0.name": spelling})
+                self.assertEqual(f.transfer_agreements[0].name, "Mercy Hospital")
+                self.assertEqual(f.get("transfer_agreements.0.name"), "Mercy Hospital")
+                self.assertEqual(f.partner_names(), ("Mercy Hospital",))
 
     def test_from_path_reads_a_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +193,54 @@ class TestRefusals(unittest.TestCase):
         raw["transfer_agreements"][0]["lat"] = 35.9
         message = self.refuse(raw)
         self.assertIn("'transfer_agreements.0.lat' is refused", message)
+
+    def test_a_place_in_a_string_value_is_refused_too(self):
+        # Finding 5 of the leakage review: a key scan is a fail-open, because
+        # no key list can cover a free-text note.
+        cases = {
+            "412 Riverside Drive": "a street address",
+            "1 Main St": "a street address",
+            "27834-1234": "a ZIP+4",
+            "35.6127, -77.3664": "a decimal-degree coordinate pair",
+            "ZIP 27834": "the token 'ZIP'",
+        }
+        for value, what in cases.items():
+            with self.subTest(value=value):
+                raw = facility_dict()
+                raw["evidence"]["power.fuel_hours"]["text"] = f"read from {value}"
+                message = self.refuse(raw)
+                self.assertIn("is refused", message)
+                self.assertIn("evidence.power.fuel_hours.text", message)
+        # ... and a bare five-digit number is a county FIPS, not a ZIP.
+        raw = facility_dict()
+        raw["evidence"]["power.fuel_hours"]["text"] = "county 27834, twelve hours"
+        Facility.from_json(raw)
+
+    def test_the_forbidden_key_list_covers_the_vocabulary_of_a_place(self):
+        for key in ("zip", "zipcode", "postal_code", "address_line1",
+                    "address_line2", "geometry", "coordinates", "block_group",
+                    "apn", "easting", "northing", "plus_code", "geohash", "gps",
+                    "latlon", "lat_lon"):
+            with self.subTest(key=key):
+                self.assertIn(key, facility_mod.FORBIDDEN_KEYS)
+
+    def test_a_negative_hour_elevation_or_count_is_refused(self):
+        for path in ("power.fuel_hours", "water.on_site_storage_hours",
+                     "evacuation.transport_lead_hours",
+                     "power.switchgear_elevation_ft", "census",
+                     "co_located_operators.0.occupants"):
+            with self.subTest(path=path):
+                raw = facility_dict(
+                    co_located_operators=[{"name": "Co", "occupants": 4}],
+                )
+                from tests.fixtures_plans import deep_set
+
+                deep_set(raw, path, -5)
+                message = self.refuse(raw)
+                self.assertIn(path.rsplit(".", 1)[-1], message)
+                self.assertIn("must not be negative", message)
+        # Zero is a real reading and stays legal.
+        make_facility(**{"power.fuel_hours": 0})
 
     def test_the_schema_has_no_address_or_coordinate_field_at_all(self):
         # The refusal above is a tripwire; this is the property it guards.
@@ -200,10 +352,29 @@ class TestCommittedExample(unittest.TestCase):
                 self.assertTrue(evidence.source_doc.strip())
                 self.assertIn("fictional", (evidence.text + evidence.source_doc).lower())
 
+    def test_it_has_a_blind_id_that_is_not_a_digest_of_its_slug(self):
+        self.assertRegex(self.facility.blind_id, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(
+            self.facility.blind_id,
+            hashlib.sha256(self.facility.slug.encode()).hexdigest()[:32],
+        )
+
     def test_it_is_the_only_committed_facility(self):
-        committed = sorted(EXAMPLE.parent.glob("*.json"))
-        self.assertEqual(committed, [EXAMPLE])
-        self.assertTrue((EXAMPLE.parent / "README.md").exists())
+        # `git ls-files`, not a filesystem glob: the glob sees the planner's
+        # own (correctly ignored) records and misses exactly the files that
+        # would be committed — a record in a subdirectory, or one named .JSON.
+        self.assertEqual(tracked("plans/facilities"),
+                         ["plans/facilities/README.md",
+                          "plans/facilities/example-rural-hospital.json"])
+
+    def test_no_record_escapes_the_ignore_rules(self):
+        for name in ("2026/mercy-general.json", "mercy-general.JSON",
+                     "mercy-general.yaml", "roster.md", "sub/dir/deep.json"):
+            with self.subTest(name=name):
+                self.assertTrue(
+                    ignored(f"plans/facilities/{name}"),
+                    f"plans/facilities/{name} would be committed by default",
+                )
 
 
 if __name__ == "__main__":

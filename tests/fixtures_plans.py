@@ -15,6 +15,7 @@ not have to maintain twenty evidence entries to say it.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import pathlib
 from typing import Any
@@ -34,6 +35,7 @@ CONTRACT = "flood-zz"
 #: is built to fail. Overridden per test.
 BASE: dict[str, Any] = {
     "slug": "test-facility",
+    "blind_id": "0" * 31 + "1",
     "occupancy_type": "hospital",
     "county_fips": COUNTY,
     "census": 30,
@@ -99,16 +101,30 @@ def auto_evidence(data: dict) -> dict:
     return evidence
 
 
+def blind_id_for(slug: str) -> str:
+    """A stable, record-specific `blind_id` for a fixture.
+
+    The real thing is `secrets.token_hex(16)`, generated once by the planner
+    and never derived from anything. A test needs the same record to produce
+    the same label on every run, so the fixtures derive one from the slug —
+    which is exactly what a real record must not do, and is why this lives
+    here rather than in `readiness/plans/`.
+    """
+    return hashlib.sha256(f"fixture:{slug}".encode()).hexdigest()[:32]
+
+
 def facility_dict(**overrides: Any) -> dict:
     """The base record with dotted-path overrides applied and evidence refilled.
 
     Use `slug="x"` for a top-level field and `**{"power.fuel_hours": 4}` for a
     nested one; a value of `None` empties an optional field, and the evidence
-    block follows.
+    block follows. The `blind_id` follows the slug unless a test sets one.
     """
     data = copy.deepcopy(BASE)
     for path, value in overrides.items():
         deep_set(data, path, copy.deepcopy(value))
+    if "blind_id" not in overrides:
+        data["blind_id"] = blind_id_for(data["slug"])
     data["evidence"] = auto_evidence(data)
     return data
 
@@ -161,8 +177,12 @@ def make_risk(*, label: str = PERIOD, issued: Issued | None = None) -> RiskLayer
         },
         issued={one.contract: one},
         cards={
-            f"{one.contract}/{one.validated_by}": {"experiment_id": one.validated_by},
-            one.validated_by: {"experiment_id": one.validated_by},
+            ref: {
+                "experiment_id": one.validated_by,
+                "model": one.model,
+                "version": one.version,
+            }
+            for ref in (f"{one.contract}/{one.validated_by}", one.validated_by)
         },
     )
 
@@ -245,6 +265,7 @@ def write_case_study(path: pathlib.Path, **overrides: Any) -> pathlib.Path:
 
 __all__ = [
     "BASE",
+    "blind_id_for",
     "CONTRACT",
     "COUNTY",
     "OTHER_COUNTY",

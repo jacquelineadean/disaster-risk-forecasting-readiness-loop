@@ -54,6 +54,41 @@ class TestTheMarkdownIsTheSpecification(unittest.TestCase):
                 scenarios_mod.questions_from_markdown(path)
             self.assertIn("The plan must answer", str(ctx.exception))
 
+    def test_the_parser_refuses_markdown_it_can_only_half_read(self):
+        # Finding 15: each of these silently changed what the specification was
+        # taken to say — a lost bullet, a promoted sub-bullet, an empty list.
+        heading = scenarios_mod.QUESTIONS_HEADING
+        cases = {
+            "an unindented wrap":
+                f"{heading}\n- One question that wraps\nover the margin.\n- Two.\n"
+                "\n**Pass condition.** x\n",
+            "a nested sub-bullet":
+                f"{heading}\n- A question\n  - nested\n- Two.\n\n"
+                "**Pass condition.** x\n",
+            "a star bullet list":
+                f"{heading}\n* A question\n* Two.\n\n**Pass condition.** x\n",
+            "a heading with no bullets":
+                f"{heading}\n\n**Pass condition.** x\n",
+            "a heading at the end of the file": f"{heading}\n",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, text in cases.items():
+                with self.subTest(case=name):
+                    path = pathlib.Path(tmp) / "x.md"
+                    path.write_text(text, encoding="utf-8")
+                    with self.assertRaises(ScenarioError):
+                        scenarios_mod.questions_from_markdown(path)
+            # A loose list — a blank line between bullets — is still readable.
+            path = pathlib.Path(tmp) / "loose.md"
+            path.write_text(
+                f"{heading}\n- One.\n\n- Two\n  wrapped.\n\n"
+                "**Pass condition.** x\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                scenarios_mod.questions_from_markdown(path), ["One.", "Two wrapped."]
+            )
+
     def test_the_json_names_the_markdown_as_its_source(self):
         self.assertEqual(
             self.scenario.source_doc, "plans/scenarios/96h-isolation-acute-care.md"
@@ -82,13 +117,22 @@ class TestTheCommittedScenario(unittest.TestCase):
         self.assertEqual(self.scenario.constant("road_access_restored_hour"), 72)
         self.assertEqual(self.scenario.constant("design_intensity_hour"), 12)
 
-    def test_fail_closed_on_names_the_design_intensity_and_both_elevations(self):
+    def test_fail_closed_on_names_the_design_intensity_its_source_and_both_elevations(self):
+        # The source document is in q1's `requires` and is the document the
+        # fail-closed rule exists to name, so a null one cannot be answered
+        # with "from the document the record names" and an empty claim.
         self.assertEqual(
             sorted(self.scenario.fail_closed_on),
             ["design_intensity.flood_elevation_ft",
+             "design_intensity.flood_elevation_source",
              "power.switchgear_elevation_ft",
              "power.transfer_switch_elevation_ft"],
         )
+
+    def test_the_fail_closed_paths_are_the_questions_requirements(self):
+        requires = {p for q in self.scenario.questions for p in q.requires}
+        for path in self.scenario.fail_closed_on:
+            self.assertIn(path, requires)
 
     def test_every_question_names_a_rule_that_exists(self):
         self.assertEqual(scenarios_mod.check_shape(self.scenario, rules_mod.RULES), [])
@@ -186,6 +230,55 @@ class TestLoading(unittest.TestCase):
         problems = scenarios_mod.check_shape(Scenario.from_path(path), rules_mod.RULES)
         self.assertEqual(len(problems), 1)
         self.assertIn("no_such_rule", problems[0])
+
+    def test_two_questions_bound_to_one_rule_are_refused(self):
+        # Finding 8 of the correctness review: `question_for_rule` returns the
+        # first match, so both findings carried the first question's id, the
+        # second question vanished from the report, and `check_study` never
+        # noticed that its expectation had not been checked.
+        raw = json.loads(JSON_PATH.read_text(encoding="utf-8"))
+        extra = dict(raw["questions"][0])
+        extra["id"] = "q7"
+        raw["questions"].append(extra)
+        path = self.dir / "dup-rule.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaises(ScenarioError) as ctx:
+            Scenario.from_path(path)
+        self.assertIn("both bound to rule", str(ctx.exception))
+        self.assertIn("switchgear_vs_intensity", str(ctx.exception))
+
+    def test_a_top_level_that_is_not_an_object_is_refused(self):
+        for payload in ("null", "[]", '"a scenario"', "3"):
+            with self.subTest(payload=payload):
+                path = self.dir / "scalar.json"
+                path.write_text(payload, encoding="utf-8")
+                with self.assertRaises(ScenarioError) as ctx:
+                    Scenario.from_path(path)
+                self.assertIn("expected a JSON object", str(ctx.exception))
+
+    def test_a_mis_typed_field_is_a_refusal_not_a_key_error(self):
+        raw = json.loads(JSON_PATH.read_text(encoding="utf-8"))
+        cases = {
+            "question missing text": lambda r: r["questions"][0].pop("text"),
+            "question text is a number": lambda r: r["questions"][0].update(text=3),
+            "constants is a list": lambda r: r.update(constants=[]),
+            "injects is an object": lambda r: r.update(injects={}),
+            "questions is a string": lambda r: r.update(questions="q1"),
+            "an inject is a string": lambda r: r["injects"].append("i7"),
+            "requires is a string": lambda r: r["questions"][0].update(requires="x"),
+            "fail_closed_on holds a number": lambda r: r["fail_closed_on"].append(3),
+            "id is empty": lambda r: r.update(id="  "),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(case=name):
+                import copy
+
+                doctored = copy.deepcopy(raw)
+                mutate(doctored)
+                path = self.dir / "mistyped.json"
+                path.write_text(json.dumps(doctored), encoding="utf-8")
+                with self.assertRaises(ScenarioError):
+                    Scenario.from_path(path)
 
     def test_a_round_trip_through_to_dict_keeps_everything(self):
         scenario = scenarios_mod.load()
