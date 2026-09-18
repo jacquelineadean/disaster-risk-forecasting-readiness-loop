@@ -394,6 +394,54 @@ What Phase 2 still owes is the data run: which four hazards pass nationally,
 the USA Structures layer's vocabulary confirmed on the first pull, and the
 ten assessor counts collected by a person with their URLs.
 
+### 3.2. Phase 2 review outcome
+
+Three lenses (leakage and the county floor, correctness of the numbers and
+the guards, tests and documentation) over the whole Phase 2 diff; sixteen
+findings confirmed with reproductions, all fixed on the same branch (925
+tests, no skips). Fixed:
+
+- **A citation that only checked existence (high).** `cite.validate` resolved
+  a claim's source and stopped; a brief could cite the right row and print
+  the wrong number. New code `VALUE_MISMATCH`: the resolver returns the leaf
+  a reference lands on and the artefact's value must equal it (floats at
+  1e-9, integers and strings exactly); computed claims must bottom out in a
+  non-computed source, and mutually computed claims are unresolved. The bare
+  five-digit exemption that let any FIPS-shaped number through is gone: a
+  document names its own identifiers, and the brief passes its county.
+- **Issuance without bounds (high).** `readiness issue` accepted a period
+  inside the years the contract spans, which would have issued a probability
+  for a period whose labels exist; it now refuses anything before the first
+  period after the contract's last year, names that period, and a model with
+  no feature series may issue exactly that one period. An issued file is
+  never overwritten without `--reissue`, which records what it replaced.
+- **The brief's card guard (high).** `brief.build` accepted any card as
+  `validated_by`; it now requires a passing, canary-clear test card whose
+  contract digest matches the issued file's, cites the issued probability by
+  county so the value check applies, reads the tolerance off the card and
+  carries the reading caveat in its footer; `verify`'s brief check requires
+  the document's own kind, county and period before it validates, and the
+  site validates briefs through `brief.check` and publishes the page rendered
+  from the validated document, not a committed sibling.
+- **USA Structures paging (medium).** Paging ended on a page as full as we
+  asked for rather than on the server's transfer-limit flag, so a layer with a
+  smaller page size pinned one page as a whole state; a FIPS longer than five
+  digits could be truncated into a county by `int()`. Both refused now, and
+  `ExposureTable` checks every key is five digits of its own state.
+- The fleet reports a promotion refusal as a reason beside the loop that ran
+  rather than as a failed dataset; the browser refuses `fleet --promote` and
+  every argparse abbreviation of it; the spot-check's detail leads with its
+  verdict; the Makefile's `phase2` continues past a contract without data and
+  `issue` takes the period flag; the fleet step of the real-data workflow is
+  continue-on-error; the documentation says `wall_clock_s` is inside the
+  hashed payload, names the Phase 2 queue as the fleet's default, and states
+  the four guards and the three-state spot-check clause.
+
+Two findings closed only as far as the artefacts allow: no card records the
+test years it applied, so the brief reads them from the contract the card,
+the issued file and the brief already share by digest; and the Makefile and
+the workflow have no automated test, only `make -n` and inspection.
+
 ## 4. Phase 3: the planning thought-partner
 
 **Exit:** blinded review by practising emergency managers of gap reports for at
