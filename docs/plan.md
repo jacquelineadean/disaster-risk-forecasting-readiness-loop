@@ -66,7 +66,7 @@ fix can move a committed number (it never does; the guard proves it).
 | `build_panel` and `diagnose` duplicate the per-event pipeline and `data.build` runs both | one pass (`_walk_events`) feeds both; `build_panel` is a projection of it | identical panel digests (labels tests + guard) |
 | `needs_panel` is a general side channel repeated at three call sites | `build_model(name, *, canary_panel=None)`: only a registered canary target receives a panel; call sites pass the panel once | none |
 | `PersistenceLastYear` is constant for every holdout year after the first, and its docstring says otherwise | docstring and README corrected: it persists the last *training* year because no holdout label ever reaches a model; the numbers are what version 1.0.0 produces and stay | none |
-| blessed fingerprints depend on CPython's `sum()` (3.12 compensated) | documented in `harness_expected/README.md`; CI checks bit-for-bit on 3.12 and runs the suite on 3.10 and 3.12; the sharpness test compares at 12 places | none |
+| blessed fingerprints depend on CPython's `sum()` (3.12 compensated) | documented in `harness_expected/README.md`; CI checks bit-for-bit on 3.12 and runs the suite on 3.10 and 3.12; the sharpness test compares at 12 places. Applies to `metrics.py` and the Phase 0 baselines only: Phase 1 reduces through `math.fsum` (§2.2) | none |
 
 ### R2. Verification and the CLI (`readiness/verify.py`, `readiness/cli.py`)
 

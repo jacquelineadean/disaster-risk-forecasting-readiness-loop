@@ -289,10 +289,15 @@ readiness ledger -c tornado-ok
 **Promote: the one test touch.** When a validate card has PASSED with a
 clear canary, and only then, the same model with the same arguments may be
 scored on the test years — once. `promote` refuses without that card,
-refuses if any test card already exists under the contract digest, charges
-the budget before it scores, and writes the test card through the same
-`run_experiment` the loop uses. `score --split test` is refused and points
-here.
+refuses if any test card already exists in the ledger (under any contract
+digest: a new contract name, not a second touch, is the next move), refuses
+when the validate pass was produced on a different data or feature version
+or when the candidate's feature sources are not loaded, builds and audits the
+feature frame, and only then charges the budget, scores, and writes the test
+card through the same `run_experiment` the loop uses. Without `--param` it
+adopts the arguments of the model's latest validate pass and prints them.
+`score --split test` is refused and points here; `loop --promote` reports a
+refusal as exit code 2 after printing the loop's result.
 
 ```bash
 readiness promote logistic -c tornado-ok --features era5,terrain --spend-test-touch
@@ -318,8 +323,14 @@ earlier validate PASS exists for the same model, version and arguments;
 `test_touches.json` shows one touch; and `backtest.html` embeds that card's
 hash and the ledger head. `--replay` additionally rebuilds the dataset,
 refits the promoted model from the card's `model_kwargs` and rescores it on
-test without spending the budget, comparing to the card at 12 significant
-figures. `make phase1 CONTRACT=tornado-ok` chains snapshot, features, the
+test without spending the budget, comparing to the card at a relative and
+absolute tolerance of 1e-12 (bins bin by bin, the feature digest exactly) and
+printing agreement per field, never the refit's test-split values. Feature
+values and the models' arithmetic reduce through `math.fsum`, so they are
+identical on every interpreter; only the scorecard aggregates in `metrics.py`
+can differ in the last bit between CPython 3.10 and 3.12, which the tolerance
+absorbs. The ERA5 pull starts two years before the contract's first year so
+the first period's twelve-month window exists. `make phase1 CONTRACT=tornado-ok` chains snapshot, features, the
 loop with `--promote`, the report and the check.
 
 A failed first touch is published too, and the contract cannot exit Phase 1;
