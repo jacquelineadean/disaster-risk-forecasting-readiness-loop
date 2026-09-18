@@ -9,7 +9,7 @@ records what was decided, what was built, and what each phase still owes.
 | R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
 | 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
 | 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
-| 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | pending |
+| 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | built; exit needs three real facilities and their blinded reviews (see §4.1) |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
 
 ## 0. How the audit was done, and what it found
@@ -467,6 +467,71 @@ traces to a source or a computed number.
 practising emergency managers. The review record is an attestation bound to a
 specific blinded report, and `verify --phase 3` says so.
 
+### 4.1. Phase 3 status
+
+Built, on the branch stacked above Phase 2, green with the guard (1,122
+tests, no skips: the docs tests' parser guards for all three CLI clusters
+now assert rather than skip, and the README map's pending set is empty):
+
+- `readiness/plans/facility.py`: the record refuses unknown keys by name and
+  requires every populated leaf to be named by an evidence entry (document
+  and page), so every sentence a rule writes cites a field path that resolves
+  back to a document. No address, coordinate, tract, block or parcel field
+  exists; a test walks every committed plan JSON for such keys.
+- `readiness/plans/scenarios.py`: the 96-hour scenario as JSON beside its
+  markdown; `questions_from_markdown` re-reads the "must answer" bullets and a
+  test asserts the two agree in order, so the markdown stays the
+  specification. Constants are named claims (`96h-isolation-acute-care/
+  isolation_hours`) rather than digits typed into prose.
+- `readiness/plans/rules.py`: one rule per question, four statuses
+  (`answered`, `unanswered`, `failed`, `cannot_run`). `switchgear_vs_intensity`
+  never reads the risk layer; a missing design intensity is one `cannot_run`
+  finding naming the Elevation Certificate. `readiness/plans/risk.py` reads
+  `issued/` files only, never fits or scores, and returns an explicit
+  absence claim where nothing validated covers the county.
+- `readiness/plans/gap_report.py`: the brief's shape and the same five `cite`
+  rules; a clean run writes the document JSON, the page and the blinded
+  page, and a violation writes nothing. `readiness/plans/reviews.py` binds a
+  rating to the sha256 of the blinded page and recomputes it from the file.
+- `readiness/plans/case_studies.py`: facts cite a source index, expected
+  statuses are the test; none ships, the synthetic one in
+  `tests/fixtures_plans.py` exercises the mechanism.
+- `readiness/plans/draft.py` is a deterministic template per finding; the
+  optional `claude` drafter (`readiness/agent/planner.py`, lazy SDK import)
+  may only rewrite sentences that keep their markers, and anything that fails
+  `cite.validate` is dropped and counted on the provenance line.
+- `readiness scenarios`, `gap-report`, `review record`, `verify --phase 3`;
+  `docs/plans.md`; how-it-works §13.
+
+Decisions taken while building, each recorded in the module docstring that
+owns it:
+
+1. A question the record cannot settle is `unanswered`, a finding in its own
+   right rather than a gap in the report: the campus seam with no co-located
+   operator named, an evacuation trigger with no authority or lead time, a
+   priority order with no author or date.
+2. The blinded label is the facility hash (`FACILITY-<6 hex>`) and partners
+   are `PARTNER-n`; the page carries a `readiness-blind` meta tag holding the
+   label, the period and the kind, so `review record` can bind a rating
+   without being handed anything a reviewer should not have, and refuses a
+   page without the tag.
+3. `gap_report.write` takes its resolver as an argument rather than deriving
+   one from the document: a resolver built from the document's own claims
+   would accept whatever the document said.
+4. `build(rewriter=...)` is how the `claude` drafter is injected, so the
+   tests exercise the drop-and-count path with a fake function and the SDK
+   is never imported by the suite.
+5. Case studies run the rules against an empty risk layer and state the
+   absence in prose, exactly as a live report does for a county nothing has
+   been issued for.
+
+What Phase 3 still owes is the part that is not mechanisable: three real
+facility records prepared by their planners, their gap reports, and blinded
+reviews by practising emergency managers. `verify --phase 3` counts only
+reviews whose sha re-finds a blinded report and says in its own output that it
+cannot establish that a facility is real or that a reviewer practises
+emergency management.
+
 ## 5. Phase 4: global scale-out
 
 **Exit:** the Phase 1 contract passes in two non-US pilots using only globally
@@ -501,8 +566,8 @@ based on the one below it:
 | PR | branch | contains | base |
 |---|---|---|---|
 | #11 | `claude/affectionate-lovelace-bnu9tz` | the guard, this plan, Phase R and Phase 1 | `main` |
-| next | `…-phase2` | Phase 2: national contracts, fleet, exposure, citations, issuance, the brief | #11 |
-| next | `…-phase3` | Phase 3: facility record, scenarios, gap report, reviews | the Phase 2 branch |
+| #12 | `…-phase2` | Phase 2: national contracts, fleet, exposure, citations, issuance, the brief | #11 |
+| next | `…-phase3` | Phase 3: facility record, scenarios, rules, gap report, blinded reviews, case studies | #12 |
 | next | `…-phase4` | Phase 4: contract schema, global connectors, pilots | the Phase 3 branch |
 
 A fix to a lower PR is made there and the branches above it are rebased.

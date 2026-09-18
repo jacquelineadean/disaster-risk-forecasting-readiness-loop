@@ -29,10 +29,8 @@ PLAN = REPO_ROOT / "docs" / "plan.md"
 CARD_SKILL = REPO_ROOT / "skills" / "experiment-card.md"
 PLANS_DOC = REPO_ROOT / "docs" / "plans.md"
 
-# INTEGRATOR: the Phase 1 command surface. The subcommands and flags below are
-# implemented by the CLI cluster; the docs name them now. Until that parser is
-# merged the parser-backed assertions skip; once it is, empty PENDING_PATHS,
-# and every test here must run rather than skip.
+# The Phase 1 command surface. The docs name these subcommands and flags and
+# the parser must accept every one of them.
 PHASE1_COMMANDS = {"features", "promote", "backtest"}
 PHASE1_FLAGS = (
     ("verify --phase", ["verify", "-c", "x", "--phase", "1"]),
@@ -64,10 +62,7 @@ PHASE2_FLAGS = (
     ("issue --reissue",
      ["issue", "m", "-c", "x", "--period", "2026-Q4", "--reissue"]),
 )
-# INTEGRATOR: the Phase 3 command surface, implemented by the Phase 3 CLI
-# cluster (`readiness/plans/`, `readiness/agent/planner.py`). The docs name
-# it now; the parser-backed assertions skip until that parser is merged and
-# must run, not skip, afterwards.
+# The Phase 3 command surface (`readiness/plans/`, `readiness/agent/planner.py`).
 PHASE3_COMMANDS = {"scenarios", "gap-report", "review"}
 PHASE3_FLAGS = (
     ("verify --phase 3", ["verify", "--phase", "3"]),
@@ -86,20 +81,10 @@ PHASE3_FLAGS = (
     ]),
 )
 
-#: Paths the README map names that arrive with the CLI clusters.
-PENDING_PATHS = {
-    "readiness/backtest.py",
-    # INTEGRATOR: the Phase 3 code cluster (`readiness/plans/`,
-    # `readiness/agent/planner.py`) and its gitignored-but-committed-shell
-    # output directories (`plans/facilities/`, `plans/reports/`,
-    # `plans/reviews/`, each with its own README, mirroring `issued/` and
-    # `briefs/`). Empty this set of Phase 3 entries once that cluster lands.
-    "readiness/plans/",
-    "readiness/agent/planner.py",
-    "plans/facilities/",
-    "plans/reports/",
-    "plans/reviews/",
-}
+#: Paths the README map names that a not-yet-merged cluster will bring.
+#: Empty: every cluster (Phase 1 backtest, Phase 2 issuance, Phase 3
+#: plans) has landed, so every named path must be on disk.
+PENDING_PATHS: set[str] = set()
 
 
 def parser_accepts(argv: list[str]) -> bool:
@@ -183,9 +168,7 @@ class TestReadmeCommandsExist(unittest.TestCase):
         self.assertNotIn("test", score.split("--split", 1)[1].split("]")[0])
 
     def test_phase1_subcommands_are_in_the_parser(self):
-        missing = PHASE1_COMMANDS - parser_commands()
-        if missing:
-            self.skipTest(f"INTEGRATOR: parser lacks {sorted(missing)}")
+        self.assertEqual(PHASE1_COMMANDS - parser_commands(), set())
         # `score --split test` is withdrawn in favour of promote.
         self.assertFalse(parser_accepts(["score", "m", "-c", "x", "--spend-test-touch"]))
         self.assertFalse(parser_accepts(["loop", "-c", "x", "--split", "test"]))
@@ -193,8 +176,7 @@ class TestReadmeCommandsExist(unittest.TestCase):
     def test_phase1_flags_are_in_the_parser(self):
         for label, argv in PHASE1_FLAGS:
             with self.subTest(flag=label):
-                if not parser_accepts(argv):
-                    self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
+                self.assertTrue(parser_accepts(argv), label)
 
     def test_commands_block_names_the_phase2_surface(self):
         # Text-only, so it runs in every tree: the README documents exactly
@@ -217,9 +199,7 @@ class TestReadmeCommandsExist(unittest.TestCase):
         self.assertIn("--reissue", issue)  # the only way to replace a published file
 
     def test_phase2_subcommands_are_in_the_parser(self):
-        missing = PHASE2_COMMANDS - parser_commands()
-        if missing:
-            self.skipTest(f"INTEGRATOR: parser lacks {sorted(missing)}")
+        self.assertEqual(PHASE2_COMMANDS - parser_commands(), set())
         # `verify --phase 2` takes no contract; `issue` has no label flag.
         self.assertTrue(parser_accepts(["verify", "--phase", "2"]))
         self.assertFalse(parser_accepts(
@@ -228,8 +208,7 @@ class TestReadmeCommandsExist(unittest.TestCase):
     def test_phase2_flags_are_in_the_parser(self):
         for label, argv in PHASE2_FLAGS:
             with self.subTest(flag=label):
-                if not parser_accepts(argv):
-                    self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
+                self.assertTrue(parser_accepts(argv), label)
 
     def test_commands_block_names_the_phase3_surface(self):
         # Text-only, so it runs in every tree: the README documents exactly
@@ -249,17 +228,14 @@ class TestReadmeCommandsExist(unittest.TestCase):
         self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2\|3")
 
     def test_phase3_subcommands_are_in_the_parser(self):
-        missing = PHASE3_COMMANDS - parser_commands()
-        if missing:
-            self.skipTest(f"INTEGRATOR: parser lacks {sorted(missing)}")
+        self.assertEqual(PHASE3_COMMANDS - parser_commands(), set())
         # `verify --phase 3` takes no contract, like `--phase 2`.
         self.assertTrue(parser_accepts(["verify", "--phase", "3"]))
 
     def test_phase3_flags_are_in_the_parser(self):
         for label, argv in PHASE3_FLAGS:
             with self.subTest(flag=label):
-                if not parser_accepts(argv):
-                    self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
+                self.assertTrue(parser_accepts(argv), label)
 
 
 class TestRepositoryMapPathsExist(unittest.TestCase):
@@ -312,8 +288,7 @@ class TestRepositoryMapPathsExist(unittest.TestCase):
                 target = f"{top}{token}" if indent else token
                 (pending if target in PENDING_PATHS else missing).append(target)
         self.assertEqual(missing, [], "README's repository map names missing paths")
-        if pending:
-            self.skipTest(f"INTEGRATOR: paths pending from the CLI cluster: {pending}")
+        self.assertEqual(pending, [], "README's repository map names paths still pending")
 
 
 class TestFeatureDocsCoverTheCode(unittest.TestCase):
