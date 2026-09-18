@@ -9,7 +9,7 @@ records what was decided, what was built, and what each phase still owes.
 | R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
 | 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
 | 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
-| 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | built; exit needs three real facilities and their blinded reviews (see §4.1) |
+| 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | built; exit needs three real facilities and their blinded reviews (see §4.1, review §4.2) |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
 
 ## 0. How the audit was done, and what it found
@@ -469,9 +469,10 @@ specific blinded report, and `verify --phase 3` says so.
 
 ### 4.1. Phase 3 status
 
-Built, on the branch stacked above Phase 2, green with the guard (1,122
-tests, no skips: the docs tests' parser guards for all three CLI clusters
-now assert rather than skip, and the README map's pending set is empty):
+Built, on the branch stacked above Phase 2, green with the guard (1,236
+tests, no skips, after the review round in §4.2; the docs tests' parser
+guards for all three CLI clusters assert rather than skip, and the README
+map's pending set is empty):
 
 - `readiness/plans/facility.py`: the record refuses unknown keys by name and
   requires every populated leaf to be named by an evidence entry (document
@@ -490,16 +491,18 @@ now assert rather than skip, and the README map's pending set is empty):
   `issued/` files only, never fits or scores, and returns an explicit
   absence claim where nothing validated covers the county.
 - `readiness/plans/gap_report.py`: the brief's shape and the same five `cite`
-  rules; a clean run writes the document JSON, the page and the blinded
-  page, and a violation writes nothing. `readiness/plans/reviews.py` binds a
-  rating to the sha256 of the blinded page and recomputes it from the file.
+  rules; a clean run writes the document JSON and the page under
+  `<out>/<slug>/` and the blinded page under `<out>/blinded/<label>/`, and a
+  violation writes nothing. `readiness/plans/reviews.py` binds a rating to
+  the sha256 of the blinded page and recomputes it from the file.
 - `readiness/plans/case_studies.py`: facts cite a source index, expected
   statuses are the test; none ships, the synthetic one in
   `tests/fixtures_plans.py` exercises the mechanism.
 - `readiness/plans/draft.py` is a deterministic template per finding; the
   optional `claude` drafter (`readiness/agent/planner.py`, lazy SDK import)
-  may only rewrite sentences that keep their markers, and anything that fails
-  `cite.validate` is dropped and counted on the provenance line.
+  may only rewrite sentences that keep their markers exactly, and a rewrite
+  that fails the rules is refused: the sentence keeps its local wording and
+  the provenance line counts the refusals.
 - `readiness scenarios`, `gap-report`, `review record`, `verify --phase 3`;
   `docs/plans.md`; how-it-works §13.
 
@@ -510,16 +513,19 @@ owns it:
    right rather than a gap in the report: the campus seam with no co-located
    operator named, an evacuation trigger with no authority or lead time, a
    priority order with no author or date.
-2. The blinded label is the facility hash (`FACILITY-<6 hex>`) and partners
-   are `PARTNER-n`; the page carries a `readiness-blind` meta tag holding the
-   label, the period and the kind, so `review record` can bind a rating
-   without being handed anything a reviewer should not have, and refuses a
-   page without the tag.
+2. The blinded label is `FACILITY-` plus twelve hex characters of a random
+   `blind_id` the planner generates once into the record (§4.2; it was a
+   hash of the slug at first), partners are `PARTNER-n`, counties `COUNTY-x`
+   and documents `DOCUMENT-n`, assigned from the record in a fixed order and
+   used in prose by every rule, so blinding is structural; the page carries a
+   `readiness-blind` meta tag holding the label, the period and the kind, so
+   `review record` can bind a rating without being handed anything a reviewer
+   should not have, and refuses a page without the tag.
 3. `gap_report.write` takes its resolver as an argument rather than deriving
    one from the document: a resolver built from the document's own claims
    would accept whatever the document said.
 4. `build(rewriter=...)` is how the `claude` drafter is injected, so the
-   tests exercise the drop-and-count path with a fake function and the SDK
+   tests exercise the refuse-and-keep path with a fake function and the SDK
    is never imported by the suite.
 5. Case studies run the rules against an empty risk layer and state the
    absence in prose, exactly as a live report does for a county nothing has
@@ -531,6 +537,73 @@ reviews by practising emergency managers. `verify --phase 3` counts only
 reviews whose sha re-finds a blinded report and says in its own output that it
 cannot establish that a facility is real or that a reviewer practises
 emergency management.
+
+### 4.2. Phase 3 review outcome
+
+Three lenses (leakage and blinding, correctness of the rules and the
+citations, tests and documentation) over the whole Phase 3 diff;
+forty-five findings confirmed with reproductions, all fixed on the same
+branch (1,236 tests, no skips). Fixed:
+
+- **Blinding that was a string replacement (high).** Names were written
+  into prose and then replaced in the blinded page by exact match, so a
+  doubled space, a re-cased or shortened name from the `claude` drafter, or
+  a name containing a digit or the word "alert" either leaked or made the
+  report unwritable; the label was six hex characters of the slug's hash,
+  recovered from the page by a dictionary search in milliseconds; the
+  county FIPS and the slug-named directory stayed on the blinded page; and
+  `verify --phase 3` printed the label beside the slug. Now no rule writes a
+  name: partners, counties and documents are `PARTNER-n`, `COUNTY-x` and
+  `DOCUMENT-n` from the record, names live only in claim text that the
+  blinded document cuts, the unblinded page carries a legend, the label is
+  twelve hex characters of a random `blind_id` in the record, the blinded
+  page is written under `blinded/<label>/` with no timestamp so a re-run on
+  identical inputs keeps its sha, `render_blinded` refuses a page in which
+  any identifying string from the record survives, and `verify` prints
+  labels and sha prefixes, never a path.
+- **A review bound to a page but not to its document (high).** The sha
+  bound the blinded page, but `verify` re-validated a sibling JSON found by
+  file name, never compared the review's facility label with the page, and
+  one report with three hand-written reviews satisfied "three facilities".
+  `verify` now re-renders every report JSON, matches reviews by sha, and
+  requires the label, period and kind on the page to be the review's.
+- **The drafter could delete findings (medium).** A refused rewrite was
+  dropped, so a model returning nothing usable left an empty, validated
+  report with its `cannot_run` finding gone. A refused rewrite now keeps
+  the local sentence; markers must match exactly; URLs and any digit run not
+  in the original or a cited value are refused; the count of refusals is on
+  the provenance line. A county FIPS still reaches the model inside claim
+  ids it must keep verbatim, and the blinded render re-keys those ids.
+- **Rules at the boundary.** Equipment exactly at the design flood elevation
+  is in the water (`<=`); an under-declared scenario yields `cannot_run`
+  rather than a traceback; a rule bound to two questions is refused; a null
+  flood-elevation source is fail-closed; the correlated-failure sentence
+  cites the flag it turns on and names every partner in a shared county;
+  negative hours and elevations are refused at load; numbers render without
+  an exponent.
+- **The committed set.** `.gitignore` covers subdirectories and every
+  extension under the facilities, reports and reviews directories, and the
+  tests read `git ls-files`; the forbidden-key scan grew to twenty-six keys
+  and reads string values (a street address, a ZIP+4, a decimal-degree
+  pair), and case studies refuse unknown keys; `--period` is validated and
+  the meta tag escaped, so a label can no longer be a path; the three files
+  are written atomically; a second review of one report no longer
+  overwrites the first.
+- **Boundaries.** `tests/test_boundaries.py` records `from X import Y`
+  aliases, so a rule can no longer be bypassed by import style; the plans
+  row forbids the panel, the engine, features, metrics, scoring, labels and
+  the orchestrator; the reverse rule keeps the harness from importing the
+  plans. The one genuine violation it surfaced, `risk.py` importing the
+  panel builder for a directory name, is fixed; `RiskLayer` also keeps only
+  a card's id, model and version, never its scorecard.
+- Docs: the case-study README example loads through the loader; the
+  Roadmap's Phase 3 entry has the Built/Remaining/Exit shape; every doc that
+  quotes the forbidden keys quotes all of them, and a test says so.
+
+Behaviour a user of the branch will notice: a facility record needs a
+`blind_id`; a review record's `facility_hash` is `facility_label`; blinded
+pages moved directory, so reports are regenerated before their reviews
+count again.
 
 ## 5. Phase 4: global scale-out
 
@@ -567,7 +640,7 @@ based on the one below it:
 |---|---|---|---|
 | #11 | `claude/affectionate-lovelace-bnu9tz` | the guard, this plan, Phase R and Phase 1 | `main` |
 | #12 | `…-phase2` | Phase 2: national contracts, fleet, exposure, citations, issuance, the brief | #11 |
-| next | `…-phase3` | Phase 3: facility record, scenarios, rules, gap report, blinded reviews, case studies | #12 |
+| #13 | `…-phase3` | Phase 3: facility record, scenarios, rules, gap report, blinded reviews, case studies | #12 |
 | next | `…-phase4` | Phase 4: contract schema, global connectors, pilots | the Phase 3 branch |
 
 A fix to a lower PR is made there and the branches above it are rebased.
