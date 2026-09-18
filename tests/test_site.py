@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -36,6 +37,16 @@ from tests.test_orchestrator import synthetic_dataset
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SITE = ROOT / "site"
+
+
+class _FakeRegion:
+    """The two attributes every region consumer reads: `id` and `name`."""
+
+    def __init__(self, id: str, name: str) -> None:
+        self.id, self.name = id, name
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.id})"
 
 
 def parser_accepts(*argv: str) -> bool:
@@ -843,6 +854,162 @@ class TestSandboxNeverPacksPartnerRecords(unittest.TestCase):
             self.assertTrue(self.build.is_private_key(key))
         for key in ("noaa/storm_events/2010", "geoboundaries/ZZ/ADM1"):
             self.assertFalse(self.build.is_private_key(key))
+
+    def pilot_dataset(self):
+        """A built pilot dataset, as `build_panels` would hand `build_tapes` one.
+
+        The region names are the kind a boundary release carries; the labels
+        are the partner's archive at panel resolution, which is the thing that
+        must not be published.
+        """
+        from readiness.connectors.geoboundaries import Region
+        from readiness.harness.labels import Panel, diagnose
+
+        regions = tuple(
+            Region(id=f"ZZ-ADM1-{i + 1:03d}", name=name, centroid_lat=0.0,
+                   centroid_lon=0.0)
+            for i, name in enumerate(
+                ("Northern Province", "Central Province", "Windward Islands")
+            )
+        )
+        units, labels = [], []
+        positives = {("ZZ-ADM1-002", 2006, 2), ("ZZ-ADM1-001", 2020, 3)}
+        for region in (r.id for r in regions):
+            for year in self.contract.all_years():
+                for period in range(1, self.contract.periods_per_year + 1):
+                    units.append((region, year, period))
+                    labels.append(1 if (region, year, period) in positives else 0)
+        panel = Panel(
+            tuple(units), tuple(labels), hazard=self.contract.hazard,
+            scope=self.contract.scope_key, period=self.contract.period,
+        )
+        return data_mod.Dataset(
+            contract=self.contract,
+            panel=panel,
+            regions=regions,
+            data_version="synthetic",
+            manifest=Manifest(path=self.snapshots / "manifest.json"),
+            diagnostics=diagnose([], panel.regions, panel.years, self.contract),
+        )
+
+    def test_the_tapes_do_not_publish_a_pilots_label_bitmap(self):
+        # `tapes.json` is the panel itself: bit p * n_regions + r says which
+        # region had a damaging event in which period, for every year of the
+        # contract. For a pilot that is the partner's archive, which the
+        # packer next door refuses to pack the bytes of.
+        ds = self.pilot_dataset()
+        self.build.build_tapes(self.out, self.registry, {"flood-zz": ds})
+        tapes = json.loads((self.out / "tapes.json").read_text())
+        self.assertEqual(tapes, {})
+
+    def test_the_panels_publish_only_what_a_card_already_publishes(self):
+        ds = self.pilot_dataset()
+        with mock.patch.object(data_mod, "pinned", lambda *_a, **_k: True), \
+                mock.patch.object(data_mod, "build", lambda *_a, **_k: ds):
+            built = self.build.build_panels(self.out, self.registry)
+        self.assertEqual(sorted(built), ["flood-zz"])
+        entry = json.loads((self.out / "panels.json").read_text())["flood-zz"]
+        self.assertEqual(
+            sorted(entry), ["data_version", "digest", "n_units", "pilot"]
+        )
+        for dropped in ("n_positive", "base_rate", "splits", "diagnostics",
+                        "coverage", "first_region", "last_region", "summary"):
+            self.assertNotIn(dropped, entry)
+
+    def test_neither_file_carries_a_pilots_counts_rates_or_region_names(self):
+        ds = self.pilot_dataset()
+        with mock.patch.object(data_mod, "pinned", lambda *_a, **_k: True), \
+                mock.patch.object(data_mod, "build", lambda *_a, **_k: ds):
+            self.build.build_panels(self.out, self.registry)
+        self.build.build_tapes(self.out, self.registry, {"flood-zz": ds})
+        published = (
+            (self.out / "panels.json").read_text()
+            + (self.out / "tapes.json").read_text()
+        )
+        for secret in ("Northern Province", "Central Province", "Windward Islands",
+                       "ZZ-ADM1-001", "base_rate", "n_positive", "bits"):
+            self.assertNotIn(secret, published, secret)
+
+    def test_a_us_contract_still_gets_the_whole_picture(self):
+        # The exclusion is about the pilot, not about the publishers: the
+        # site's own tiles and frequency shading are these two files.
+        from readiness.harness.labels import diagnose
+        from tests.fixtures import make_panel
+
+        us = make_contract(name="inland-flood-us")
+        panel = make_panel(contract=us, n_regions=4)
+        regions = tuple(
+            _FakeRegion(r, f"County {r}") for r in panel.regions
+        )
+        ds = data_mod.Dataset(
+            contract=us,
+            panel=panel,
+            regions=regions,
+            data_version="synthetic",
+            manifest=Manifest(path=self.snapshots / "manifest.json"),
+            diagnostics=diagnose([], panel.regions, panel.years, us),
+        )
+        registry = {"inland-flood-us": us}
+        with mock.patch.object(data_mod, "pinned", lambda *_a, **_k: True), \
+                mock.patch.object(data_mod, "build", lambda *_a, **_k: ds):
+            self.build.build_panels(self.out, registry)
+        self.build.build_tapes(self.out, registry, {"inland-flood-us": ds})
+        entry = json.loads((self.out / "panels.json").read_text())["inland-flood-us"]
+        self.assertIn("base_rate", entry)
+        self.assertIn("diagnostics", entry)
+        tape = json.loads((self.out / "tapes.json").read_text())["inland-flood-us"]
+        self.assertIn("bits", tape)
+
+    def test_the_packers_add_raises_on_a_records_path(self):
+        # The guard is on `add` itself, so a glob pattern added later cannot
+        # sweep one in — but nothing called `add` on such a path, so the
+        # branch was never executed by a test. This executes it.
+        zf = zipfile.ZipFile(io.BytesIO(), "w")
+        add = self.build._adder(zf, self.dir)
+        with self.assertRaises(self.build.PrivateDataError) as ctx:
+            add(self.records)
+        self.assertIn("never redistributed", str(ctx.exception))
+        self.assertEqual(zf.namelist(), [])   # it failed where it would write
+        # ...and an ordinary file still goes in.
+        add(self.snapshots / "census" / "national_county2020.txt")
+        self.assertEqual(zf.namelist(), ["snapshots/census/national_county2020.txt"])
+
+    def test_git_would_not_commit_a_crafted_crosswalk_name(self):
+        # `.gitignore` re-includes the committed EM-DAT crosswalk, and that
+        # re-inclusion used to be a suffix: a ground-truth file named
+        # `*_emdat_regions.csv` was re-included and committed by the next
+        # `git add -A`, before the packer ever saw it. The guard is on the
+        # wrong side of the boundary if it is only in the packer.
+        cases = {
+            # the committed crosswalk: ours to publish
+            "snapshots/records/zz_emdat_regions.csv": False,
+            # a partner file wearing its name: ignored
+            "snapshots/records/PARTNER_CONFIDENTIAL_emdat_regions.csv": True,
+            "snapshots/records/Zz_Emdat_Regions.csv": True,
+            # a ground-truth file, where `data.records_path` now puts it
+            "snapshots/records/ZZ/zz_records.csv": True,
+            "snapshots/records/ZZ/zz_emdat_regions.csv": True,
+            "snapshots/records/zz_records.csv": True,
+            # ...and the manifest is still the one committed artefact
+            "snapshots/manifest.json": False,
+        }
+        for path, ignored in cases.items():
+            with self.subTest(path=path):
+                result = subprocess.run(
+                    ["git", "check-ignore", "-q", "--no-index", path],
+                    cwd=ROOT, capture_output=True,
+                )
+                self.assertEqual(
+                    result.returncode == 0, ignored,
+                    f"{path}: git {'ignores' if result.returncode == 0 else 'commits'} it",
+                )
+
+    def test_a_contract_may_not_pin_a_crosswalk_shaped_basename(self):
+        # The other side of the same boundary.
+        from readiness.contracts import ContractError
+
+        with self.assertRaises(ContractError):
+            make_pilot_contract(file="zz_emdat_regions.csv")
 
     def test_the_two_label_source_prefixes_are_the_harnesss_own(self):
         # One statement of what "ground truth" means, not two that can drift.

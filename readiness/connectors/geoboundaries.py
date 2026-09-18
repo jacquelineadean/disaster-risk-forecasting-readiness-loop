@@ -53,18 +53,28 @@ URL_TEMPLATE = (
     "releaseData/gbOpen/{country}/{level}/geoBoundaries-{country}-{level}.geojson"
 )
 
-#: Point the connector at a mirror or a local file server without editing code
-#: — same shape as `URL_TEMPLATE`, same fields. A release that is only
+#: Point the connector at a mirror without editing code — same shape as
+#: `URL_TEMPLATE`, same fields, and `https` only. A release that is only
 #: reachable through a mirror is still pinned by hash, so the substitution is
-#: visible in the manifest rather than hidden in an environment.
+#: visible in the manifest rather than hidden in an environment; and a
+#: contract that names `regions.sha256` refuses bytes that are not the ones it
+#: was registered against, whoever served them.
 URL_ENV = "READINESS_GEOBOUNDARIES_URL"
+
+#: The largest a boundary file may be. A country's ADM2 gbOpen file is single
+#: -digit megabytes; `parse` holds the whole GeoJSON and every vertex in
+#: memory, so an unbounded one is a denial of service rather than a universe.
+MAX_BYTES = 512 * 1024 * 1024
 
 #: What `readiness register` writes when no release is named.
 DEFAULT_RELEASE = "gbOpen 6.0.0"
 
 ADMIN_LEVELS: tuple[str, ...] = ("ADM1", "ADM2")
 
-_RELEASE_RE = re.compile(r"^gbOpen[ @](?P<ref>[0-9][0-9A-Za-z._-]*)$")
+#: `\Z`, not `$`: `$` also matches before a final newline, and a release with
+#: one would build a URL with a newline in it. `contracts.RELEASE_RE` is the
+#: same pattern, checked at registration; a test ties the two together.
+_RELEASE_RE = re.compile(r"^gbOpen[ @](?P<ref>[0-9][0-9A-Za-z._-]*)\Z")
 
 
 @dataclass(frozen=True)
@@ -113,6 +123,12 @@ def release_ref(release: str) -> str:
 
 def url_for(country: str, admin_level: str, release: str) -> str:
     template = os.environ.get(URL_ENV) or URL_TEMPLATE
+    if not template.lower().startswith("https://"):
+        raise ConnectorError(
+            f"{URL_ENV}={template!r} is not an https URL. The region universe "
+            "defines which places exist in a pilot's panel; it is not fetched over "
+            "a transport anybody on the path can rewrite."
+        )
     return template.format(
         ref=release_ref(release),
         country=country.upper(),
@@ -129,6 +145,7 @@ def load(
     *,
     refresh: bool = False,
     allow_fetch: bool = True,
+    expected_sha256: str | None = None,
 ) -> list[Region]:
     """Fetch (or reuse) one country's boundaries at one admin level.
 
@@ -136,6 +153,15 @@ def load(
     only when its bytes hash to the manifest record. Bytes with no record, or
     that no longer match one, are data of unknown provenance and are
     re-fetched; with `allow_fetch=False` that is an error naming the file.
+
+    `expected_sha256` is the contract's optional `regions.sha256` criterion. It
+    is checked exactly as `national_records.load` checks the record: the
+    release string names an edition, and a mirror can serve anything under that
+    name, so a pilot that pins the bytes gets the same refusal a partner record
+    gets when the bytes are not the ones the contract was registered against.
+    The parsed features are also checked against the level and the country that
+    were asked for, so a wrong file is refused rather than admitted as the
+    region universe.
     """
     level = admin_level.upper()
     if level not in ADMIN_LEVELS:
@@ -155,6 +181,11 @@ def load(
         data = pinned_bytes(cache, manifest.records.get(key), allow_fetch=allow_fetch)
     if data is None:
         data = fetch(url)
+        if len(data) > MAX_BYTES:
+            raise ConnectorError(
+                f"geoBoundaries file for {key} is {len(data):,} bytes, over the "
+                f"{MAX_BYTES:,}-byte cap; it was not parsed"
+            )
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_bytes(data)
         manifest.add(
@@ -169,14 +200,42 @@ def load(
                 notes=f"{release}, {country.upper()} {level}",
             ),
         )
-    return parse(data)
+    if len(data) > MAX_BYTES:
+        raise ConnectorError(
+            f"geoBoundaries file for {key} is {len(data):,} bytes, over the "
+            f"{MAX_BYTES:,}-byte cap; it was not parsed"
+        )
+    if expected_sha256:
+        found = sha256_bytes(data)
+        if found != expected_sha256:
+            raise ConnectorError(
+                f"the geoBoundaries file for {key} is not the one this contract "
+                f"was registered against: on disk sha256:{found}, contract "
+                f"sha256:{expected_sha256}. The release names an edition and a "
+                "mirror can serve anything under it, so the hash is what decides."
+            )
+    return parse(data, expect_level=level, expect_group=country.upper())
 
 
-def parse(data: bytes) -> list[Region]:
+def parse(
+    data: bytes,
+    *,
+    expect_level: str | None = None,
+    expect_group: str | None = None,
+) -> list[Region]:
     """Pure: gbOpen GeoJSON bytes -> regions sorted by id.
 
     Every feature must carry `shapeID` and `shapeName`; a release that stops
     doing so is schema drift and an error, not a silently empty universe.
+
+    `expect_level` and `expect_group` are what the caller *asked* for.
+    `ADMIN_LEVELS` was only ever enforced on the request; gbOpen's features
+    carry `shapeType` and `shapeGroup`, which say which level and which country
+    the file actually holds, and they are checked here when present (an older
+    release that omits them is not broken by this). Without the check an ADM3
+    file admitted as a pilot's ADM1 universe publishes sub-county names in the
+    site's region lists, and a mirror template with no `{level}` field serves
+    one file for both levels with nothing to notice it.
     """
     try:
         blob = json.loads(data.decode("utf-8", "replace"))
@@ -203,6 +262,22 @@ def parse(data: bytes) -> list[Region]:
                 f"geoBoundaries file lists shapeID {shape_id!r} twice; the region "
                 "universe must be one row per region"
             )
+        if expect_level:
+            found_level = str(props.get("shapeType") or "").strip().upper()
+            if found_level and found_level != expect_level.upper():
+                raise ConnectorError(
+                    f"geoBoundaries file holds {found_level} shapes but "
+                    f"{expect_level.upper()} was requested (feature {shape_id!r}). "
+                    "The region universe defines what a panel's rows are; a level "
+                    "below the county equivalent must not become one."
+                )
+        if expect_group:
+            found_group = str(props.get("shapeGroup") or "").strip().upper()
+            if found_group and found_group != expect_group.upper():
+                raise ConnectorError(
+                    f"geoBoundaries file holds shapes for {found_group} but "
+                    f"{expect_group.upper()} was requested (feature {shape_id!r})"
+                )
         lat, lon = _centroid(feature.get("geometry") or {})
         regions[shape_id] = Region(
             id=shape_id,

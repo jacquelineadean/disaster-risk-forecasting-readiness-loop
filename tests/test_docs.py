@@ -84,11 +84,11 @@ PHASE3_FLAGS = (
 # `--phase` choice on the existing `verify`.
 PHASE4_FLAGS = (
     ("register --country --ground-truth --records --record-start-year "
-     "--admin-level --regions-release", [
+     "--admin-level --regions-release --regions-sha256", [
         "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
         "--ground-truth", "national_records", "--records", "x.csv",
         "--record-start-year", "2000", "--admin-level", "ADM2",
-        "--regions-release", "gbOpen 6.0.0",
+        "--regions-release", "gbOpen 6.0.0", "--regions-sha256", "b" * 64,
     ]),
     ("verify --phase 4", ["verify", "--phase", "4"]),
 )
@@ -259,7 +259,7 @@ class TestReadmeCommandsExist(unittest.TestCase):
         register = re.search(r"(?m)^readiness register NAME\b.*$", block).group(0)
         for flag in ("--country CC", "--ground-truth", "--records PATH",
                      "--record-start-year YYYY", "--admin-level ADM1|ADM2",
-                     "--regions-release RELEASE"):
+                     "--regions-release RELEASE", "--regions-sha256 HEX"):
             self.assertIn(flag, register, f"README's register line lacks {flag!r}")
         self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2\|3\|4")
 
@@ -592,6 +592,54 @@ class TestGlobalDocStatesTheRules(unittest.TestCase):
             "terrain", "nri", "record_start_year",
         ):
             self.assertIn(phrase, text, f"docs/global.md lacks {phrase!r}")
+
+    def test_states_the_rules_the_review_round_added(self):
+        text = GLOBAL_DOC.read_text()
+        for phrase in (
+            # where a record lives, and which name git would commit
+            "snapshots/records/<CC>/<basename>",
+            "!snapshots/records/??_emdat_regions.csv",
+            "CROSSWALK_BASENAME_RE",
+            # what the site and the manifest may publish
+            "The basename is published, and that is deliberate",
+            "name the file",
+            "publishes no pilot label bitmap",
+            "counts()",
+            # the contract schema
+            "refuse an unknown key",
+            "regions.sha256",
+            "RELEASE_RE",
+            "JSON **integer**",
+            "global_hazards()",
+            "--event-type",
+            # the connectors
+            "must be `https`",
+            "one country",
+            "shapeType",
+            "shapeGroup",
+            "leading",
+            "finite",
+            # the diagnostics
+            "unplaced rows",
+            "regions dropped",
+        ):
+            self.assertIn(phrase, text, f"docs/global.md lacks {phrase!r}")
+
+    def test_the_fictional_worked_example_quotes_a_digest_that_can_be_rebuilt(self):
+        # The one digest in this file is for a contract that is deliberately
+        # not registered, so `TestQuotedDigestsMatchTheCode` cannot check it.
+        # It is reproducible from a fixture, and this is the check that says so.
+        from tests.fixtures import make_pilot_contract
+
+        expected = make_pilot_contract(sha256="a" * 64, period="year").digest()
+        text = GLOBAL_DOC.read_text()
+        quoted = set(re.findall(r"sha256:([0-9a-f]{16})\b", text))
+        self.assertIn(expected, quoted, "docs/global.md quotes a stale digest")
+        self.assertEqual(
+            quoted - {expected, "a" * 16},
+            set(),
+            "docs/global.md quotes a digest nothing rebuilds",
+        )
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):

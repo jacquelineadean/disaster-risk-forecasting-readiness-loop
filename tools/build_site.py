@@ -351,6 +351,21 @@ def build_panels(
             continue
         datasets[name] = ds
         panel, d = ds.panel, ds.diagnostics
+        if c.is_pilot:
+            # A pilot's labels are derived from a file that is never
+            # committed, never copied and never packed. Per-split positive
+            # counts, base rates, region names and the diagnostics block are
+            # that file at panel resolution, so the site publishes only what
+            # the contract card already publishes: the panel's identity, its
+            # size and the data version it was built from.
+            panels[name] = {
+                "pilot": True,
+                "n_units": len(panel),
+                "digest": panel.digest(),
+                "data_version": ds.data_version,
+            }
+            log(f"panels.json: {name}: pilot, digest and size only")
+            continue
         by_split = {}
         for split in c.splits:
             sliced = panel.filter_years(split.years)
@@ -385,6 +400,7 @@ def build_panels(
                 "n_damaging": d.n_damaging,
                 "n_positive_units": d.n_positive_units,
                 "crosswalk_edition": d.crosswalk_edition,
+                "n_regions_outside": d.n_regions_outside,
             },
         }
         log(f"panels.json: {name}: {panel.summary()}")
@@ -399,10 +415,18 @@ def build_tapes(
     """Each built panel as a bit string, period-major: bit p * n_regions + r is
     region r (in FIPS order) in period p (in time order). The site draws one tile
     per region from it — shaded by frequency on the contract cards, lit frame by
-    frame in the hero — so the pictures are the panels, not illustrations."""
+    frame in the hero — so the pictures are the panels, not illustrations.
+
+    A pilot is skipped outright. The bitmap decodes to exactly which region had
+    a damaging event in which period, for every year of the contract — that is
+    the substance of a partner's archive at panel resolution, and the packer
+    next door raises `PrivateDataError` over the very bytes it came from."""
     tapes: dict[str, dict] = {}
     for name, ds in datasets.items():
         c = registry[name]
+        if c.is_pilot:
+            log(f"tapes.json: {name}: pilot, not published (labels are partner data)")
+            continue
         panel = ds.panel
         regions = [region.id for region in ds.regions]
         rindex = {fips: i for i, fips in enumerate(regions)}
@@ -743,16 +767,45 @@ def _filter_rows(text: str, keep: set[str]) -> tuple[str, int]:
 def _public_manifest(snapshot_dir: pathlib.Path) -> str:
     """`snapshots/manifest.json` with every private ground-truth record removed.
 
-    The hashes themselves are committed and public — that is the whole point of
-    pinning by hash. What is dropped here is the *file name* of a partner's
-    export, which the archive has no use for (a pilot's panel cannot be built
-    in the browser, because its bytes are not there) and which names a document
-    somebody shared in confidence.
+    Not because the basename is secret — it is not, and this build would be
+    lying if it said so. A pilot's `ground_truth.file` is a criterion: it is in
+    the committed contract, in `contracts/*.json` inside this same archive, in
+    `site/generated/contracts.json` and in every ledger card's
+    `data_snapshot.inputs`, because a panel cannot be reproduced without
+    knowing which file it means. DATA-LICENSES.md says so, and tells operators
+    to name the file neutrally.
+
+    What is dropped is a *record the archive cannot use*: a pilot's panel
+    cannot be built in the browser, because the bytes are not there and never
+    will be, so the entry would be a dangling pin — carrying the record's byte
+    size and the connector's counts for a file the sandbox can never hold.
     """
     blob = json.loads((snapshot_dir / "manifest.json").read_text())
     records = blob.get("records") or {}
     blob["records"] = {k: v for k, v in records.items() if not is_private_key(k)}
     return json.dumps(blob, indent=2, sort_keys=True) + "\n"
+
+
+def _adder(zf: zipfile.ZipFile, root: pathlib.Path):
+    """The packer's one way in.
+
+    Every file the archive holds goes through this, and a file physically
+    under the private records directory raises rather than being skipped: a
+    pattern added later cannot sweep one in quietly, because it fails where it
+    would have written. Module level so a test can execute the guard rather
+    than infer it from a clean archive.
+    """
+
+    def add(path: pathlib.Path) -> None:
+        rel = path.relative_to(root).as_posix()
+        if is_private(rel):
+            raise PrivateDataError(
+                f"refusing to pack {rel}: partner records and EM-DAT exports are "
+                "pinned by hash and never redistributed (DATA-LICENSES.md)"
+            )
+        zf.write(path, rel)
+
+    return add
 
 
 def _generated_at(manifest_path: pathlib.Path) -> str | None:
@@ -783,14 +836,7 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
     buf = io.BytesIO()
     zf = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
 
-    def add(path: pathlib.Path) -> None:
-        rel = path.relative_to(ROOT).as_posix()
-        if is_private(rel):
-            raise PrivateDataError(
-                f"refusing to pack {rel}: partner records and EM-DAT exports are "
-                "pinned by hash and never redistributed (DATA-LICENSES.md)"
-            )
-        zf.write(path, rel)
+    add = _adder(zf, ROOT)
 
     for p in _package_files():
         add(p)

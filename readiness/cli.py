@@ -98,7 +98,25 @@ def _features(args, contract: Contract) -> list[str]:
                 f"unknown feature connector(s) {unknown}; known: "
                 f"{', '.join(data_mod.FEATURE_CONNECTORS)}"
             )
+        blocked = [f for f in data_mod.US_ONLY_FEATURES if f in names]
+        if blocked and contract.is_pilot:
+            # `data.build` refuses this too, by name — but asking for it is a
+            # usage error, and a usage error prints as a refusal rather than
+            # as a traceback out of the data plane.
+            raise UsageError(
+                f"feature connector(s) {blocked} read a US-only source (the Census "
+                f"Gazetteer, the FEMA National Risk Index) and contract "
+                f"{contract.name!r} is scored in {contract.country}; there is "
+                "nothing for them to read. Outside the US the catalogue is "
+                f"{[f for f in data_mod.FEATURE_CONNECTORS if f not in data_mod.US_ONLY_FEATURES]}."
+            )
         return names
+    # Everything already pinned, and nothing else: a command never pulls a
+    # feature source the user did not ask for, and never silently ignores one
+    # that is there. `pinned` answers False for a US-only connector outside
+    # the US, so a pilot auto-selects the global ones alone and the candidates
+    # that need the others are skipped by the orchestrator, with a progress
+    # line and no card.
     return [
         f for f in data_mod.FEATURE_CONNECTORS if data_mod.pinned(contract, features=[f])
     ]
@@ -228,7 +246,32 @@ def _pilot_sources(args) -> tuple[dict | None, dict | None]:
                 "in the US the ground truth is NOAA Storm Events, which the "
                 "connector pins for itself. Name the country with --country."
             )
+        # The same rule for the region universe. These two default to None so
+        # that "not given" can be told from "given", and a flag that does not
+        # apply is refused rather than silently ignored.
+        given = [
+            flag
+            for flag, value in (
+                ("--admin-level", args.admin_level),
+                ("--regions-release", args.regions_release),
+                ("--regions-sha256", args.regions_sha256),
+            )
+            if value is not None
+        ]
+        if given:
+            raise UsageError(
+                f"{', '.join(given)} describe a geoBoundaries region universe, "
+                "which exists outside the US; a US contract is scored over the "
+                "Census county universe. Name the country with --country."
+            )
         return None, None
+    if args.event_type:
+        raise UsageError(
+            f"--event-type names NOAA Storm Events EVENT_TYPEs, which is a US "
+            f"vocabulary; a contract for {country} matches its record through "
+            "config.HAZARD_CATEGORIES instead (`readiness hazards` marks which "
+            "hazards can be registered outside the US). Drop --event-type."
+        )
     if args.ground_truth == "storm_events":
         raise UsageError(
             f"--country {country} needs its own ground truth: pass "
@@ -264,6 +307,7 @@ def _pilot_sources(args) -> tuple[dict | None, dict | None]:
         record_start_year=int(start_year),
         admin_level=args.admin_level,
         release=args.regions_release,
+        regions_sha256=args.regions_sha256,
     )
 
 
@@ -311,16 +355,25 @@ def cmd_register(args) -> int:
     if c.is_pilot:
         _p()
         _p(
-            f"note: place the records file at snapshots/records/{c.ground_truth['file']} "
+            f"note: place the records file at "
+            f"snapshots/records/{c.country}/{c.ground_truth['file']} "
             f"(sha256:{c.ground_truth['sha256'][:16]}...). It is never committed, "
             "never copied and never packed into the browser sandbox; only its hash "
             "is, here and in snapshots/manifest.json."
+        )
+        _p(
+            f"      its basename ({c.ground_truth['file']}) is a criterion: it is "
+            "written into the committed contract, into every ledger card's inputs "
+            "and into the published site, because a panel cannot be reproduced "
+            "without knowing which file it means. Name the file neutrally — not "
+            "after the partner, the agreement or the case (DATA-LICENSES.md)."
         )
         if c.ground_truth_source == "emdat":
             _p(
                 "      EM-DAT names admin units in prose: write the crosswalk at "
                 f"snapshots/records/{c.country.lower()}_emdat_regions.csv "
-                "(emdat_name,shape_id) before building the panel."
+                "(emdat_name,shape_id) before building the panel. The export must "
+                "cover one country; an export naming several is refused."
             )
     _p()
     _p("next:")
@@ -335,6 +388,13 @@ def cmd_hazards(args) -> int:
     _p()
     _p("A contract may also name a hazard outside the catalogue by listing its")
     _p("event types explicitly (`readiness register ... --event-type ...`).")
+    _p()
+    _p("Registrable outside the US (a `config.HAZARD_CATEGORIES` entry maps the")
+    _p("hazard onto EM-DAT's disaster types and a partner file's hazard values):")
+    _p(f"  {', '.join(config.global_hazards())}")
+    missing = [h for h in config.HAZARDS if h not in config.global_hazards()]
+    if missing:
+        _p(f"  not mapped, so US-only: {', '.join(missing)}")
     return 0
 
 
@@ -1316,9 +1376,14 @@ def cmd_report(args) -> int:
 
 
 def cmd_mcp(args) -> int:
+    # The composition root: `readiness/connectors` may not import the engine
+    # (tests/test_boundaries.py), so the CLI — which sits above both planes —
+    # hands the server the registry description its `list_models` tool answers
+    # with. Nothing about a model reaches the data plane by any other route.
     from readiness.connectors.mcp_server import serve
+    from readiness.engine import describe_registry
 
-    serve(contract=_contract(args))
+    serve(contract=_contract(args), describe_models=describe_registry)
     return 0
 
 
@@ -1418,15 +1483,24 @@ def build_parser() -> argparse.ArgumentParser:
                          "`# record_start_year:` header when it has one, else "
                          "required (EM-DAT defaults to "
                          f"{config.GROUND_TRUTH_SOURCES['emdat']})")
-    sp.add_argument("--admin-level", default=d["admin_level"],
+    # These three default to None rather than to their documented values so
+    # that `register` can tell "not given" from "given" and refuse one that
+    # does not apply to a US contract; `contracts.pilot_sources` is where the
+    # defaults live.
+    sp.add_argument("--admin-level", default=None,
                     choices=list(contracts.ADMIN_LEVELS),
                     help="the geoBoundaries level a pilot's regions come from "
-                         f"(default {d['admin_level']})")
-    sp.add_argument("--regions-release", default=contracts.GEOBOUNDARIES_RELEASE,
+                         f"(default {d['admin_level']}; outside the US only)")
+    sp.add_argument("--regions-release", default=None,
                     metavar="RELEASE",
                     help="the geoBoundaries release the universe is read from; it is "
                          "a hashed criterion because shapeIDs change between "
-                         f"releases (default {contracts.GEOBOUNDARIES_RELEASE!r})")
+                         f"releases (default {contracts.GEOBOUNDARIES_RELEASE!r}; "
+                         "outside the US only)")
+    sp.add_argument("--regions-sha256", default=None, metavar="HEX",
+                    help="optional: the boundary file's sha256, pinned as a "
+                         "criterion so a mirror cannot serve a different universe "
+                         "under the same release name (outside the US only)")
     sp.add_argument("--period", default=d["period"], choices=sorted(contracts.PERIODS))
     sp.add_argument("--event-type", action="append", metavar="TYPE",
                     help="Storm Events EVENT_TYPE; repeatable; required for an "

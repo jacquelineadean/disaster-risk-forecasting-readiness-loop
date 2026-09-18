@@ -510,7 +510,10 @@ class PilotSnapshotCase(unittest.TestCase):
         self.root = pathlib.Path(self.tmp.name)
         self.geojson = make_geojson(n_regions=3)
         draft = make_pilot_contract(hazard=self.hazard)
-        self.records_file = self.root / "records" / "zz_records.csv"
+        # `records_path` is country-namespaced (`records/<CC>/<basename>`), the
+        # same shape as the manifest key, so two countries whose agencies both
+        # call their export `records.csv` cannot collide on one path.
+        self.records_file = data_mod.records_path(draft, self.root)
         sha = make_records_csv(
             self.records_file,
             draft,
@@ -606,6 +609,45 @@ class TestBuildDispatchesOnSources(PilotSnapshotCase):
         geoboundaries.cache_path(self.root, "ZZ", "ADM1").unlink()
         self.assertFalse(data_mod.pinned(self.c, self.root))
 
+    def test_an_edited_boundary_cache_is_not_pinned_either(self):
+        # Checked by hash, like the record: bytes that no longer match their
+        # manifest record are data of unknown provenance. `pinned()` used to
+        # say True on `.exists()` alone, so the site build — which runs from
+        # committed snapshots — silently went to the network for them.
+        cache = geoboundaries.cache_path(self.root, "ZZ", "ADM1")
+        blob = json.loads(cache.read_text())
+        blob["features"][0]["properties"]["shapeName"] = "Edited"
+        cache.write_text(json.dumps(blob))
+        self.assertFalse(data_mod.pinned(self.c, self.root))
+        # ...and that answer is load-bearing: `tools/build_site.py` builds a
+        # contract only when `pinned()` is True, and a build run anyway goes
+        # to the network, which this fixture's `no_fetch` reports as an
+        # AssertionError naming the URL.
+        with self.assertRaises(AssertionError) as ctx:
+            self.build()
+        self.assertIn("tried to download", str(ctx.exception))
+
+    def test_a_us_only_feature_is_never_pinned_for_a_pilot(self):
+        # `cli._features()` loads every connector whose data is already
+        # pinned when no `--features` flag is given. Answering True here (an
+        # empty file list used to answer vacuously) auto-selected `terrain`
+        # for a pilot, and `build` then refused the whole run — turning the
+        # documented per-candidate skip into a crash.
+        for feature in data_mod.US_ONLY_FEATURES:
+            with self.subTest(feature=feature):
+                self.assertFalse(
+                    data_mod.pinned(self.c, self.root, features=[feature])
+                )
+        # era5 is global; it is simply not pinned in this fixture either, and
+        # the base data alone is.
+        self.assertTrue(data_mod.pinned(self.c, self.root))
+        self.assertFalse(data_mod.pinned(self.c, self.root, features=["era5"]))
+
+    def test_the_us_path_still_pins_its_us_only_features(self):
+        # The exclusion is about the contract's country, not about the names.
+        us = make_contract(splits=SPLITS)
+        self.assertFalse(data_mod.pinned(us, self.root, features=["terrain"]))
+
     def test_the_us_path_is_untouched_by_the_dispatch(self):
         # The same assertion `TestBuild` makes, restated here: dispatching on
         # the contract's sources did not move the census/storm-events branch.
@@ -631,15 +673,18 @@ class TestEmdatDispatch(PilotSnapshotCase):
     def setUp(self):
         super().setUp()
         blob = (DATA / "emdat_sample.xlsx").read_bytes()
-        export = self.root / "records" / "zz_emdat.xlsx"
-        export.write_bytes(blob)
-        (self.root / "records" / "zz_emdat_regions.csv").write_bytes(
-            (DATA / "zz_emdat_regions.csv").read_bytes()
-        )
         self.c = make_pilot_contract(
             source="emdat", file="zz_emdat.xlsx", sha256=sha256_bytes(blob),
             record_start_year=2000,
             splits={"train": [2005, 2006], "validate": [2007, 2007], "test": [2008, 2008]},
+        )
+        export = data_mod.records_path(self.c, self.root)
+        export.parent.mkdir(parents=True, exist_ok=True)
+        export.write_bytes(blob)
+        # The crosswalk stays flat: it is committed, one per country, and its
+        # name already carries the country code.
+        (self.root / "records" / "zz_emdat_regions.csv").write_bytes(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
         )
         manifest = Manifest.load(self.root / "manifest.json")
         manifest.add(data_mod.regions_key(self.c),

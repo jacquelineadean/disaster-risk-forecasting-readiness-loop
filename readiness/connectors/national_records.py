@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import pathlib
 import re
 from dataclasses import dataclass, field
@@ -88,9 +89,29 @@ class Records:
     record_start_year: int | None = None
 
     def summary(self) -> str:
+        """The terminal line: counts, and the hazard values that were skipped.
+
+        The names come out of the partner's own file, so this string is for
+        the operator's screen and `readiness panel` only. What goes into the
+        committed manifest is `counts()`, which carries no text from the file.
+        """
         skipped = (
             f"; {self.n_skipped_hazard:,} rows of other hazards "
             f"({', '.join(self.skipped_hazards[:6])})"
+            if self.n_skipped_hazard
+            else ""
+        )
+        return f"{len(self.events):,} events of {self.n_rows:,} rows{skipped}"
+
+    def counts(self) -> str:
+        """The same account with no text lifted from the private file.
+
+        `snapshots/manifest.json` is committed and published; a partner's
+        hazard-column strings are not ours to publish, and real archives carry
+        operation names, outbreak names and place names in that column.
+        """
+        skipped = (
+            f"; {self.n_skipped_hazard:,} rows of other hazards"
             if self.n_skipped_hazard
             else ""
         )
@@ -125,9 +146,19 @@ def parse(data: bytes, contract: Contract) -> Records:
             "config.HAZARD_CATEGORIES, so no partner value can be matched to it"
         )
     text = data.decode("utf-8-sig", "replace")
-    body = "\n".join(
-        line for line in text.splitlines() if not line.lstrip().startswith("#")
-    )
+    lines = text.splitlines()
+    # Only the *leading* comment block is stripped, which is all the format
+    # documents. Filtering every `#` line would delete a data row whose
+    # event_id is a case reference written `#2006/0012` — counted nowhere, a
+    # silent zero in the panel — and would cut the continuation of a quoted
+    # field that happens to start with `#`, leaving the quote unterminated and
+    # swallowing the following row. `read_start_year` stops at the same place.
+    offset = 0
+    while offset < len(lines) and (
+        not lines[offset].strip() or lines[offset].lstrip().startswith("#")
+    ):
+        offset += 1
+    body = "\n".join(lines[offset:])
     reader = csv.DictReader(io.StringIO(body))
     missing = [c for c in COLUMNS if c not in (reader.fieldnames or [])]
     if missing:
@@ -138,7 +169,9 @@ def parse(data: bytes, contract: Contract) -> Records:
     events: list[RecordEvent] = []
     skipped: dict[str, int] = {}
     n_rows = 0
-    for i, row in enumerate(reader, start=2):
+    # Numbered as the partner's own file is, not as the stripped body is: a
+    # refusal naming "row 7" has to mean line 7 of the file they sent.
+    for i, row in enumerate(reader, start=offset + 2):
         if not any((row.get(c) or "").strip() for c in COLUMNS):
             continue
         n_rows += 1
@@ -217,7 +250,7 @@ def load(
                 fetched_at=utc_now(),
                 license=LICENSE,
                 notes=(
-                    f"{records.summary()}; bytes never committed or redistributed"
+                    f"{records.counts()}; bytes never committed or redistributed"
                 ),
             ),
         )
@@ -237,15 +270,30 @@ def _year_month(raw: str | None, line: int) -> tuple[int, int]:
 
 
 def _number(raw: str | None, column: str, line: int, cast=float) -> float:
+    """One numeric cell, or a refusal. Never a silent zero and never a NaN.
+
+    `float("nan")` and `float("inf")` both parse, and both are wrong here: a
+    NaN damage figure makes `is_damaging` return False, so the row is quietly
+    labelled not-damaging, and an infinite casualty count escapes `int()` as
+    an `OverflowError` rather than as the one-line refusal the CLI prints.
+    `nan` is what many ad-hoc exporters write for a missing numeric.
+    """
     text = (raw or "").strip().replace(",", "")
     if not text:
         return cast(0)
     try:
-        value = cast(float(text))
+        number = float(text)
     except ValueError:
         raise ConnectorError(
             f"partner records row {line}: {column} {raw!r} is not a number"
         ) from None
+    if not math.isfinite(number):
+        raise ConnectorError(
+            f"partner records row {line}: {column} {raw!r} is not a finite number. "
+            "A missing value is an empty cell, not a NaN: read as a number it "
+            "would label the row not-damaging without a word."
+        )
+    value = cast(number)
     if value < 0:
         raise ConnectorError(
             f"partner records row {line}: {column} is negative ({raw!r})"

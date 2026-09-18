@@ -583,14 +583,34 @@ or `emdat`; `storm_events` is a US archive and is refused) and `--records`
 PATH — the sha256 is computed now, at registration, and written into the
 contract as a criterion, and the file itself is never committed or copied.
 `readiness register` prints where the file has to be placed
-(`snapshots/records/<basename>`, git-ignored) and, for `--ground-truth
+(`snapshots/records/<CC>/<basename>`, git-ignored) and, for `--ground-truth
 emdat`, that the admin-name crosswalk
-(`snapshots/records/<cc>_emdat_regions.csv`) has to be written first.
+(`snapshots/records/<cc>_emdat_regions.csv`) has to be written first and that
+the export must cover one country.
+
+`--regions-sha256 HEX` optionally pins the boundary file's own bytes, so a
+mirror cannot serve a different universe under the same release name; omitted,
+the field is not written and the digest is what it would have been. A flag
+that does not apply is refused rather than ignored: `--admin-level`,
+`--regions-release` and `--regions-sha256` describe a geoBoundaries universe
+and are refused for a US contract, and `--event-type` names a NOAA Storm
+Events vocabulary and is refused for a pilot. `readiness hazards` prints which
+catalogue hazards can be registered outside the US at all.
+
+**The basename is published.** It is a criterion — in the committed contract,
+in the packed `contracts/*.json`, on the site and in every ledger card's
+inputs — because a panel cannot be reproduced without it. Name the file
+neutrally, not after the partner or the agreement ([DATA-LICENSES.md](../DATA-LICENSES.md)).
+What is *not* published, anywhere, is the labels: the site skips a pilot in
+`tapes.json` and publishes only digest, size and data version in
+`panels.json`.
 
 **What is US-only.** Terrain (the Census Gazetteer) and the National Risk
 Index read US-only sources and are refused by name for a pilot, so it runs
 the Phase 1 queue on the `era5-antecedent` feature set alone — the
-candidates that need terrain are skipped with a progress line and no card.
+candidates that need terrain are skipped with a progress line and no card,
+because `data.pinned()` answers False for a US-only connector outside the US
+and `readiness loop`/`score`/`fleet` load only what is already pinned.
 A pilot's ground truth reaches the panel through the same code as Storm
 Events: `readiness.harness.labels.RecordEvent`, walked by the same
 `_walk_events` a `StormEvent` is, so every US panel stays bit-identical. A
@@ -615,6 +635,13 @@ proof that the new schema fields move nothing at their defaults. Nothing
 here opens a partner's file: partner ground-truth bytes are never
 committed, packed or published, and the check runs from committed ledgers
 and the pinned manifest alone.
+
+**What `readiness panel` adds for a pilot.** Two diagnostics lines, printed
+only when non-zero, so the US rendering is byte-for-byte what it was:
+`unplaced rows` (rows whose admin units the EM-DAT crosswalk could not place)
+and `regions dropped` (regions an event named that are outside the universe,
+on rows that still landed somewhere — the shape a crosswalk written against
+another geoBoundaries release takes).
 
 Not knowable offline: whether two real pilots pass. The geoBoundaries URL
 pattern and the EM-DAT column names are confirmed on the first real pull,

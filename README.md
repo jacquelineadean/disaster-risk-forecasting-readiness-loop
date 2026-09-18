@@ -73,14 +73,21 @@ their US defaults, so all nine contracts registered before this phase still
 hash to what they did. A pilot's ground truth is a partner's national
 record or an EM-DAT export, read by
 [`readiness/connectors/national_records.py`](readiness/connectors/national_records.py)
-or [`emdat.py`](readiness/connectors/emdat.py) and pinned by sha256 —
-**the bytes are never committed, copied or packed**, only the hash and the
-basename are; its region universe comes from
+or [`emdat.py`](readiness/connectors/emdat.py) and pinned by sha256 at
+`snapshots/records/<CC>/<basename>` — **neither the bytes nor the labels
+derived from them are ever committed, copied, packed or published**: the site
+publishes no pilot label bitmap, positive count, base rate or region name,
+and the committed manifest's notes carry counts and no text out of the file.
+What *is* published is the hash and the basename, because a panel cannot be
+reproduced without knowing which file it means — so operators are told to
+name the file neutrally ([DATA-LICENSES.md](DATA-LICENSES.md)). Its region
+universe comes from
 [`readiness/connectors/geoboundaries.py`](readiness/connectors/geoboundaries.py),
-ADM1 or ADM2 boundaries pinned to a named release. Terrain and the National
-Risk Index are US-only and refused by name, so a pilot runs the Phase 1
-queue on the `era5-antecedent` feature set alone; a pilot never counts
-toward Phase 2's national-contract total. Its exit — the Phase 1 contract
+ADM1 or ADM2 boundaries pinned to a named release, checked against the level
+and country that were asked for, and optionally pinned by their own sha256.
+Terrain and the National Risk Index are US-only and refused by name, so a
+pilot runs the Phase 1 queue on the `era5-antecedent` feature set alone; a
+pilot never counts toward Phase 2's national-contract total. Its exit — the Phase 1 contract
 passing in two non-US pilots on globally available data alone, checked by
 `readiness verify --phase 4` — needs the real-data run: a geoBoundaries
 release, a partner file or EM-DAT export with its crosswalk, and the ERA5
@@ -541,7 +548,7 @@ experiment.
 ```
 readiness contracts         list the registered contracts  [--names] [--national]
 readiness contract          print one contract and its hash        [-c NAME]
-readiness register NAME     pre-register a new contract from options  [--country CC] [--ground-truth storm_events|national_records|emdat --records PATH] [--record-start-year YYYY] [--admin-level ADM1|ADM2] [--regions-release RELEASE]
+readiness register NAME     pre-register a new contract from options  [--country CC] [--ground-truth storm_events|national_records|emdat --records PATH] [--record-start-year YYYY] [--admin-level ADM1|ADM2] [--regions-release RELEASE] [--regions-sha256 HEX]
 readiness hazards           list the hazard catalogue
 readiness models            list proposable models
 readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
@@ -714,10 +721,16 @@ redesign:
   `regions` sources (elided from the digest at their US defaults, so every
   contract registered before this phase hashes unchanged), the geoBoundaries,
   partner-records and EM-DAT connectors (bytes never committed, pinned by
-  sha256 alone), the generic `RecordEvent` label path (US panels
-  bit-identical), the pilots-not-national exclusion from `readiness fleet`,
-  and `verify --phase 4` with its `pilots`, `global inputs`,
-  `ground truth pinned` and `us digests` checks. *Remaining:* the real-data
+  sha256 alone; one country per EM-DAT export), the generic `RecordEvent`
+  label path (US panels bit-identical), the pilots-not-national exclusion
+  from `readiness fleet`, and `verify --phase 4` with its `pilots`,
+  `global inputs`, `ground truth pinned` and `us digests` checks. The review
+  round added the publication rules (no pilot labels on the site, counts-only
+  manifest notes), the strict pilot contract schema (unknown keys, release
+  pattern, integer start year, hazard mapped for its own source, optional
+  `regions.sha256`) and the connector hardening (leading-comment-only
+  stripping, finite numbers, level and country checks, https-only mirror,
+  size caps). *Remaining:* the real-data
   run — a geoBoundaries release, a partner file or EM-DAT export with its
   crosswalk, the ERA5 pulls, and whether two pilots actually pass; the URL
   pattern and EM-DAT columns are confirmed on the first real pull

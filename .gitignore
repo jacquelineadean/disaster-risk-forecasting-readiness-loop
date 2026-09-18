@@ -23,10 +23,17 @@ snapshots/*
 # The one exception is ours to publish: the EM-DAT admin-name crosswalk, which
 # is a judgement a person wrote down about which geoBoundaries region an
 # EM-DAT name means, and which has to be committed for a panel to be
-# reproducible at all.
+# reproducible at all. It is re-included by its *exact* shape — two letters,
+# the country code `emdat.crosswalk_path` builds — and not by the suffix: a
+# partner file named `PARTNER_CONFIDENTIAL_emdat_regions.csv` would otherwise
+# be re-included and committed by the next `git add -A`. `contracts.py` refuses
+# a ground-truth basename of that shape for the same reason, so the guard sits
+# on both sides of the boundary. A ground-truth file itself lives one level
+# down, at `snapshots/records/<CC>/<basename>`, and git does not descend into
+# an excluded directory, so it stays ignored.
 !snapshots/records/
 snapshots/records/*
-!snapshots/records/*_emdat_regions.csv
+!snapshots/records/??_emdat_regions.csv
 
 # Rendered ledger dashboards: regenerated in under a second from the committed
 # ledgers by `readiness dashboard --all`.

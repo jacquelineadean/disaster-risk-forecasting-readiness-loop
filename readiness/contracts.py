@@ -67,6 +67,7 @@ from readiness.config import (
     GROUND_TRUTH_SOURCES,
     HAZARD_CATEGORIES,
     HAZARDS,
+    global_hazards,
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -151,16 +152,31 @@ DEFAULTS: Mapping[str, object] = MappingProxyType(
     }
 )
 
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-STATE_RE = re.compile(r"^[A-Z]{2}$")
+# Every pattern below ends in `\Z`, not `$`. Python's `$` also matches just
+# before a final newline, so `"ZZ\n"` would validate as a country code and
+# then reach a manifest key, a cache filename and a URL. `\Z` is the end of
+# the string and nothing else.
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}\Z")
+STATE_RE = re.compile(r"^[A-Z]{2}\Z")
 #: ISO 3166-1 alpha-2, the code geoBoundaries files a release under.
-COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+COUNTRY_RE = re.compile(r"^[A-Z]{2}\Z")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}\Z")
 #: A ground-truth file is named by its basename alone. The directory is a
 #: property of whoever holds the bytes, and a committed contract must not
 #: record one operator's filesystem.
-BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-YEAR_RANGE_RE = re.compile(r"^(\d{4})-(\d{4})$")
+BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+#: The one basename in `snapshots/records/` that is *not* a ground-truth file:
+#: the committed EM-DAT admin-name crosswalk (`emdat.crosswalk_path`). It is
+#: the single re-inclusion in `.gitignore`, so a contract that pinned a
+#: partner file under that name would have git commit the bytes. Refused here
+#: as well, because a structural guard belongs on both sides of the boundary.
+CROSSWALK_BASENAME_RE = re.compile(r"^[A-Za-z]{2}_emdat_regions\.csv\Z")
+#: `regions.release`, checked at registration rather than at build time: a
+#: contract is a pre-registered, hashed artefact, so a release geoBoundaries
+#: cannot resolve must not reach a digest. Kept in step with
+#: `connectors.geoboundaries._RELEASE_RE` by a test.
+RELEASE_RE = re.compile(r"^gbOpen[ @][0-9][0-9A-Za-z._-]*\Z")
+YEAR_RANGE_RE = re.compile(r"^(\d{4})-(\d{4})\Z")
 
 
 class ContractError(ValueError):
@@ -437,15 +453,19 @@ class Contract:
         country = str(scope.get("country", d["country"])).upper()
 
         event_types = spec.get("event_types")
-        if event_types is None:
-            if country != "US":
-                # Outside the US there is no Storm Events vocabulary to name.
-                # The hazard reaches the records through
-                # `config.HAZARD_CATEGORIES`, which `validate` insists on, so
-                # copying NOAA's strings into a pilot's digest would hash a
-                # criterion nothing reads.
-                event_types = ()
-            elif hazard in HAZARDS:
+        if country != "US":
+            # Outside the US there is no Storm Events vocabulary to name, so
+            # the field is emptied whether or not the spec named one. The
+            # hazard reaches the records through `config.HAZARD_CATEGORIES`,
+            # which `validate` insists on and `_hazard_matches` short-circuits
+            # for a `RecordEvent`, so copying NOAA's strings into a pilot's
+            # digest would hash a criterion nothing reads — and two pilots with
+            # identical panels would carry different digests, which marks their
+            # ledgers incomparable for no reason. `readiness register` refuses
+            # `--event-type` outside the US rather than dropping it silently.
+            event_types = ()
+        elif event_types is None:
+            if hazard in HAZARDS:
                 event_types = HAZARDS[hazard].event_types
             else:
                 raise ContractError(
@@ -666,7 +686,19 @@ class Contract:
             raise ContractError(
                 f"contract {name!r}: hazard {self.hazard!r} has no global mapping, so "
                 "no EM-DAT type or partner hazard value can be matched to it; "
-                f"mapped hazards: {sorted(HAZARD_CATEGORIES)}"
+                f"mapped hazards: {list(global_hazards())}"
+            )
+        if gt_source not in HAZARD_CATEGORIES[self.hazard]:
+            # The table is data meant to be extended, so an entry that maps a
+            # hazard for one global source and not the other is expected to
+            # happen. It must be refused here, not at build time: a contract is
+            # hashed before anything reads a record.
+            raise ContractError(
+                f"contract {name!r}: hazard {self.hazard!r} has no {gt_source!r} "
+                "mapping in config.HAZARD_CATEGORIES, so no record value can be "
+                f"matched to it; it maps only "
+                f"{sorted(HAZARD_CATEGORIES[self.hazard])}. Hazards registrable "
+                f"outside the US: {list(global_hazards())}"
             )
         sha = str(self.ground_truth.get("sha256", ""))
         if not SHA256_RE.match(sha):
@@ -681,6 +713,13 @@ class Contract:
                 f"contract {name!r}: ground_truth.file must be the records file's "
                 f"basename (it names the manifest key), got {basename!r}"
             )
+        if CROSSWALK_BASENAME_RE.match(basename):
+            raise ContractError(
+                f"contract {name!r}: ground_truth.file {basename!r} is the shape of "
+                "the committed EM-DAT admin-name crosswalk, which is the one file "
+                "under snapshots/records/ that git does *not* ignore. A ground-truth "
+                "file named that way would be committed; rename the export."
+            )
         floor = GROUND_TRUTH_SOURCES[gt_source]
         declared = self.ground_truth.get("record_start_year")
         if declared is None:
@@ -689,7 +728,16 @@ class Contract:
                 f"{gt_source!r} — the first year the record is complete enough to "
                 "read an absence as a zero rather than as a gap"
             )
-        year = _cast("ground_truth.record_start_year", int, declared)
+        if not isinstance(declared, int) or isinstance(declared, bool):
+            # Not coerced: the value is hashed as it is written, so `"2005"`
+            # and `2005` would be the same contract under two digests.
+            raise ContractError(
+                f"contract {name!r}: ground_truth.record_start_year must be a JSON "
+                f"integer, got {declared!r} ({type(declared).__name__}). It is "
+                "hashed as written, so a string and a number would be the same "
+                "contract with two digests."
+            )
+        year = int(declared)
         if floor is not None and year < floor:
             raise ContractError(
                 f"contract {name!r}: ground_truth.record_start_year {year} precedes "
@@ -702,13 +750,40 @@ class Contract:
                 f"contract {name!r}: regions.admin_level must be one of "
                 f"{list(ADMIN_LEVELS)}, got {level!r}"
             )
-        release = str(self.regions.get("release", "")).strip()
-        if not release:
+        release = str(self.regions.get("release", ""))
+        if not RELEASE_RE.match(release):
             raise ContractError(
-                f"contract {name!r}: regions.release must name the geoBoundaries "
-                'release the universe was read from (e.g. "gbOpen 6.0.0"); boundaries '
-                "are renumbered between releases, so a panel is only reproducible "
-                "against a named one"
+                f"contract {name!r}: regions.release must be \"gbOpen <version>\" "
+                f'(e.g. "{GEOBOUNDARIES_RELEASE}"), got {release!r}. Boundaries are '
+                "renumbered between releases, so a panel is only reproducible "
+                "against a release the connector can actually resolve — and a "
+                "contract is hashed before anything tries."
+            )
+        regions_sha = self.regions.get("sha256")
+        if regions_sha is not None and not SHA256_RE.match(str(regions_sha)):
+            raise ContractError(
+                f"contract {name!r}: regions.sha256, when given, must be 64 "
+                f"lowercase hex digits, got {regions_sha!r}. It is optional (an "
+                "existing pilot's digest does not move when it is absent) and "
+                "pins the boundary file's exact bytes when present."
+            )
+        extra_gt = sorted(
+            set(self.ground_truth)
+            - {"source", "file", "sha256", "record_start_year"}
+        )
+        extra_rg = sorted(
+            set(self.regions) - {"source", "admin_level", "release", "sha256"}
+        )
+        if extra_gt or extra_rg:
+            # Exactly the rule the US branch applies. `to_spec` writes both
+            # sections back verbatim and `criteria()` hashes them, so an extra
+            # key — an operator's absolute path, say — would be committed,
+            # packed and published, which is what BASENAME_RE exists to prevent.
+            raise ContractError(
+                f"contract {name!r}: ground_truth and regions carry only the keys "
+                f"the schema defines, and this one also carries "
+                f"{extra_gt + extra_rg}. Both sections are hashed and published "
+                "verbatim, so an unknown key is a criterion nobody agreed to."
             )
 
     def _validate_splits(self) -> None:
@@ -960,15 +1035,28 @@ def pilot_sources(
     file: str,
     sha256: str,
     record_start_year: int,
-    admin_level: str = DEFAULTS["admin_level"],
-    release: str = GEOBOUNDARIES_RELEASE,
+    admin_level: str | None = None,
+    release: str | None = None,
+    regions_sha256: str | None = None,
 ) -> tuple[dict, dict]:
     """The `(ground_truth, regions)` pair a pilot contract needs, as data.
 
     One place builds the two sections, so `readiness register --country ZZ`,
     a test fixture and anything written later cannot disagree about which keys
-    a pilot carries.
+    a pilot carries. `admin_level` and `release` default here rather than in
+    the argument parser, so that `readiness register` can tell "not given"
+    from "given" and refuse either for a US contract instead of ignoring it.
+
+    `regions_sha256` is optional and omitted from the section when absent, so
+    a pilot registered without it keeps the digest it already has.
     """
+    regions: dict = {
+        "source": "geoboundaries",
+        "admin_level": admin_level or DEFAULTS["admin_level"],
+        "release": release or GEOBOUNDARIES_RELEASE,
+    }
+    if regions_sha256:
+        regions["sha256"] = regions_sha256
     return (
         {
             "source": source,
@@ -976,7 +1064,7 @@ def pilot_sources(
             "sha256": sha256,
             "record_start_year": int(record_start_year),
         },
-        {"source": "geoboundaries", "admin_level": admin_level, "release": release},
+        regions,
     )
 
 

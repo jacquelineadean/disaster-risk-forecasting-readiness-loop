@@ -43,9 +43,29 @@ hashed criterion, and in `snapshots/manifest.json`.
 
 | layer | source | manifest key | licence | share-alike? | obligations |
 |---|---|---|---|---|---|
-| Region universe (global) | geoBoundaries gbOpen ADM1/ADM2, William & Mary geoLab | `geoboundaries/` | CC BY 4.0 | no | attribution required: *"Administrative boundaries: geoBoundaries (CC BY 4.0), gbOpen &lt;release&gt;"*; the release is a hashed contract criterion because `shapeID`s change between releases; the vertex-mean centroid is a weather-lookup point, never published as a location |
-| Hazard ground truth (partner) | A national disaster management agency's own record, supplied per contract | `records/` | partner data; not redistributed | n/a | **bytes never committed, never copied, never packed**: the file stays under `snapshots/records/` (git-ignored) and only its sha256 is pinned; cite the partner as they ask; **never a feature** (label origin) |
-| Hazard ground truth (global) | EM-DAT, CRED / UCLouvain | `emdat/` | free for research, registration required; redistribution not permitted | n/a | **cite, do not mirror** — register at <https://public.emdat.be/> and download your own export; only the sha256 is committed; the admin-name crosswalk (`snapshots/records/<cc>_emdat_regions.csv`) is ours and *is* committed; **never a feature** (label origin) |
+| Region universe (global) | geoBoundaries gbOpen ADM1/ADM2, William & Mary geoLab | `geoboundaries/` | CC BY 4.0 | no | attribution required: *"Administrative boundaries: geoBoundaries (CC BY 4.0), gbOpen &lt;release&gt;"*; the release is a hashed contract criterion because `shapeID`s change between releases (and `regions.sha256` can pin the file's own bytes); a mirror set through `READINESS_GEOBOUNDARIES_URL` must be `https`; the vertex-mean centroid is a weather-lookup point, never published as a location |
+| Hazard ground truth (partner) | A national disaster management agency's own record, supplied per contract | `records/` | partner data; not redistributed | n/a | **bytes never committed, never copied, never packed, and neither are the labels derived from them**: the file stays at `snapshots/records/<CC>/<basename>` (git-ignored) and only its sha256 is pinned; the website publishes no pilot label bitmap, positive count, base rate or region name; cite the partner as they ask; **never a feature** (label origin) |
+| Hazard ground truth (global) | EM-DAT, CRED / UCLouvain | `emdat/` | free for research, registration required; redistribution not permitted | n/a | **cite, do not mirror** — register at <https://public.emdat.be/> and download your own export, **covering one country** (an export naming several is refused); only the sha256 is committed; the admin-name crosswalk (`snapshots/records/<cc>_emdat_regions.csv`, exactly two letters) is ours and *is* committed; **never a feature** (label origin) |
+
+### Name the file neutrally
+
+The one thing about a partner file that this repository *does* publish is its
+**basename**. `ground_truth.file` is a hashed criterion: it is in the
+committed contract, in `contracts/<name>.json` inside `sandbox.zip`, in
+`site/generated/contracts.json`, in `readiness contract`'s output and in every
+ledger card's `data_snapshot.inputs`. A panel cannot be reproduced without
+knowing which file it means, so the name is not, and cannot be, private. The
+packer drops the file's *manifest record* from the archive because a pilot's
+panel can never be built in the browser — that is a dangling pin removed, not
+a promise of secrecy.
+
+So: **name the file after the data, not after the relationship.**
+`zz_records.csv`, `ke_floods_2005_2024.csv`, `emdat_zy.xlsx` — not after the
+partner agency, the data-sharing agreement, the case, the individual who sent
+it, or anything marked confidential. `readiness register` prints this next to
+the path it tells you to use. A basename shaped like the committed crosswalk
+(`??_emdat_regions.csv`) is refused outright, because that is the one name
+under `snapshots/records/` that git would commit.
 
 None of these layers imposes a share-alike obligation on the derived panel or
 the feature frame, so **the Phase 0–1 derived data carries no inherited licence

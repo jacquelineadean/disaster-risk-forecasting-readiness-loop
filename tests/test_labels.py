@@ -461,6 +461,105 @@ class TestRecordEvents(unittest.TestCase):
         self.assertIn("other hazards", d.format())
         self.assertEqual(sum(panel.labels), 1)
 
+    def test_the_unplaced_row_count_rides_along_too(self):
+        # `emdat.Records.n_rows_unmapped` — the crosswalk's misses — used to
+        # be computed and thrown away at the `data.py` seam, so a crosswalk
+        # covering half a country read exactly like a country with half the
+        # events.
+        _panel, d = panel_and_diagnostics(
+            [make_record(damage=50_000)], self.regions, self.years, self.contract,
+            n_skipped_region=9,
+        )
+        self.assertEqual(d.n_skipped_region, 9)
+        self.assertIn("unplaced rows            9", d.format())
+        self.assertIn("the crosswalk could not place", d.format())
+
+    def test_regions_lost_on_a_row_that_still_landed_are_counted(self):
+        # `n_outside_universe` counts rows that lost *every* region. An event
+        # naming five districts of which four were renumbered by a different
+        # geoBoundaries release produced one positive and four silent losses,
+        # and the diagnostics said everything landed.
+        d = diagnose(
+            [make_record(
+                regions=(shape_id(0), "ZZ-ADM1-777", "ZZ-ADM1-888"), damage=50_000
+            )],
+            self.regions, self.years, self.contract,
+        )
+        self.assertEqual(d.n_outside_universe, 0)
+        self.assertEqual(d.n_regions_outside, 2)
+        self.assertEqual(d.n_positive_units, 1)
+        self.assertIn("regions dropped          2", d.format())
+
+    def test_a_row_that_lost_every_region_is_still_the_other_counter(self):
+        d = diagnose(
+            [make_record(regions=("ZZ-ADM1-777",), damage=50_000)],
+            self.regions, self.years, self.contract,
+        )
+        self.assertEqual((d.n_outside_universe, d.n_regions_outside), (1, 0))
+
+    def test_both_new_lines_appear_together_for_a_pilot(self):
+        _panel, d = panel_and_diagnostics(
+            [make_record(
+                regions=(shape_id(0), "ZZ-ADM1-777"), damage=50_000
+            )],
+            self.regions, self.years, self.contract,
+            n_skipped_hazard=4, n_skipped_region=3,
+        )
+        text = d.format()
+        self.assertEqual(
+            text,
+            "  inland_flood: 1 events in the contract's years\n"
+            "    ADM1-coded               1\n"
+            "    other hazards            4   rows of another hazard in the same "
+            "records file\n"
+            "    unplaced rows            3   rows whose admin units the crosswalk "
+            "could not place\n"
+            "    outside universe         0\n"
+            "    regions dropped          1   named regions outside the universe on "
+            "rows that had one inside\n"
+            "    damaging                 1   -> 1 positive units",
+        )
+
+
+class TestRecordEventValidatesItself(unittest.TestCase):
+    """The three things `_walk_events` assumes about a `RecordEvent`.
+
+    `_walk_events` turns a month into a period index and `_dense_panel` only
+    materialises periods inside the year, so a month outside 1..12 was counted
+    as a positive unit that was then not in the panel — contradicting the
+    walk's own invariant. Both connectors already satisfy all three; this is
+    where the next one finds out.
+    """
+
+    def test_a_month_outside_the_year_is_refused(self):
+        for month in (0, 13, -1, 99):
+            with self.subTest(month=month):
+                with self.assertRaises(ValueError) as ctx:
+                    make_record(month=month)
+                self.assertIn("is not 1-12", str(ctx.exception))
+
+    def test_a_year_that_is_not_a_year_is_refused(self):
+        with self.assertRaises(ValueError):
+            make_record(year=0)
+
+    def test_an_event_naming_no_region_is_refused(self):
+        with self.assertRaises(ValueError) as ctx:
+            RecordEvent(
+                event_id="E1", year=2006, month=8, hazard="flood", region_ids=(),
+                injuries=0, deaths=0, damage_property_usd=0.0,
+            )
+        self.assertIn("names no region", str(ctx.exception))
+
+    def test_the_positive_count_is_the_count_of_ones_in_the_panel(self):
+        # The invariant the validation protects, stated where it lives.
+        contract = make_pilot_contract()
+        regions, years = [shape_id(i) for i in range(3)], [2006, 2007]
+        events = [
+            make_record(month=m, damage=50_000, event_id=f"E{m}") for m in (1, 6, 12)
+        ]
+        panel, d = panel_and_diagnostics(events, regions, years, contract)
+        self.assertEqual(sum(panel.labels), d.n_positive_units)
+
 
 class TestUsPanelsAreUnchanged(unittest.TestCase):
     """The hard constraint: generalising the walk moved no US panel.

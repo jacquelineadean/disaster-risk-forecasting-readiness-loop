@@ -35,8 +35,11 @@ from __future__ import annotations
 import ast
 import csv
 import io
+import itertools
 import json
+import math
 import pathlib
+import re
 import zipfile
 from dataclasses import dataclass, field
 from typing import Iterator, Mapping
@@ -78,6 +81,27 @@ CROSSWALK_COLUMNS: tuple[str, ...] = ("emdat_name", "shape_id")
 #: EM-DAT reports damage in thousands of US dollars.
 DAMAGE_SCALE = 1_000.0
 
+#: The largest a single zip member may decompress to, and the largest
+#: compression ratio a member may claim, before it is refused unread. An xlsx
+#: is a zip of XML and `zipfile.read` decompresses a whole member into memory:
+#: a 199 KiB archive whose `sharedStrings.xml` expands to 210 MB is a denial of
+#: service, not an export. Both are checked from the central directory, so
+#: nothing is decompressed to find out. A real one-country EM-DAT export is a
+#: few hundred kilobytes.
+MAX_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
+
+#: EM-DAT's `Start Year` is an integer column in every release. A value
+#: outside this range is an Excel serial date or a shifted column, not a year;
+#: read as one it silently falls outside every split and empties the panel.
+YEAR_RANGE = (1900, 2100)
+
+_SHEET_NUM_RE = re.compile(r"(\d+)\.xml\Z")
+
+#: How many leading rows are scanned for the header before an export is
+#: declared to be schema drift. Exports sometimes carry a title or a banner row.
+HEADER_SCAN_ROWS = 10
+
 _NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 
 
@@ -104,6 +128,13 @@ class Records:
     countries: tuple[str, ...] = ()
 
     def summary(self) -> str:
+        """The terminal line: counts, and the admin names that did not map.
+
+        The names are free text out of the export, so this string is for the
+        operator's screen and `readiness panel` only — it is what tells them
+        which crosswalk rows to write. `counts()` is what the committed
+        manifest gets.
+        """
         parts = [f"{len(self.events):,} events of {self.n_rows:,} rows"]
         if self.n_skipped_hazard:
             parts.append(f"{self.n_skipped_hazard:,} rows of other hazards")
@@ -112,6 +143,22 @@ class Records:
                 f"{self.n_unmapped_units:,} admin units not in the crosswalk "
                 f"({', '.join(self.unmapped_names[:6])})"
             )
+        if self.n_rows_unmapped:
+            parts.append(f"{self.n_rows_unmapped:,} rows landed nowhere")
+        return "; ".join(parts)
+
+    def counts(self) -> str:
+        """The same account with no text lifted from the export.
+
+        `snapshots/manifest.json` is committed and published; EM-DAT's
+        free-text admin-unit names are not ours to republish out of a file
+        whose licence forbids redistribution.
+        """
+        parts = [f"{len(self.events):,} events of {self.n_rows:,} rows"]
+        if self.n_skipped_hazard:
+            parts.append(f"{self.n_skipped_hazard:,} rows of other hazards")
+        if self.n_unmapped_units:
+            parts.append(f"{self.n_unmapped_units:,} admin units not in the crosswalk")
         if self.n_rows_unmapped:
             parts.append(f"{self.n_rows_unmapped:,} rows landed nowhere")
         return "; ".join(parts)
@@ -132,21 +179,61 @@ def _column_index(ref: str) -> int:
     return index - 1
 
 
+def _read_member(zf: zipfile.ZipFile, name: str) -> bytes:
+    """One zip member, refused unread when it is too large or too compressed.
+
+    `ZipFile.read` decompresses the whole member into memory, so the size has
+    to be checked before the read, from the central directory, not after it.
+    """
+    info = zf.getinfo(name)
+    if info.file_size > MAX_MEMBER_BYTES:
+        raise ConnectorError(
+            f"EM-DAT export member {name} decompresses to {info.file_size:,} bytes, "
+            f"over the {MAX_MEMBER_BYTES:,}-byte cap. A one-country export is a few "
+            "hundred kilobytes; this was not read."
+        )
+    if info.compress_size and (
+        info.file_size / info.compress_size > MAX_COMPRESSION_RATIO
+    ):
+        raise ConnectorError(
+            f"EM-DAT export member {name} claims a compression ratio of "
+            f"{info.file_size / info.compress_size:,.0f}:1, over the "
+            f"{MAX_COMPRESSION_RATIO}:1 cap. That is a zip bomb's shape, not a "
+            "spreadsheet's; this was not read."
+        )
+    return zf.read(name)
+
+
 def _shared_strings(zf: zipfile.ZipFile) -> list[str]:
     """`xl/sharedStrings.xml` as a list; absent when every cell is inline."""
-    try:
-        blob = zf.read("xl/sharedStrings.xml")
-    except KeyError:
+    if "xl/sharedStrings.xml" not in zf.namelist():
         return []
+    blob = _read_member(zf, "xl/sharedStrings.xml")
     root = ElementTree.fromstring(blob)
     return ["".join(t.text or "" for t in si.iter(f"{_NS}t")) for si in root]
 
 
 def _sheet_name(zf: zipfile.ZipFile) -> str:
+    """The workbook's first worksheet part.
+
+    Sorted by the numeric suffix, not as a string: `sheet10.xml` sorts before
+    `sheet2.xml` lexicographically, and a workbook whose parts were renumbered
+    by a tool that deleted and re-added sheets would then be read from the
+    wrong table — with no error at all if that sheet's header happens to match.
+    """
     if "xl/worksheets/sheet1.xml" in zf.namelist():
         return "xl/worksheets/sheet1.xml"
+
+    def order(name: str) -> tuple[int, str]:
+        match = _SHEET_NUM_RE.search(name)
+        return (int(match.group(1)) if match else 1 << 30, name)
+
     sheets = sorted(
-        n for n in zf.namelist() if n.startswith("xl/worksheets/") and n.endswith(".xml")
+        (
+            n for n in zf.namelist()
+            if n.startswith("xl/worksheets/") and n.endswith(".xml")
+        ),
+        key=order,
     )
     if not sheets:
         raise ConnectorError("EM-DAT export holds no worksheet XML")
@@ -171,7 +258,7 @@ def rows(data: bytes) -> Iterator[list[str]]:
         raise ConnectorError(f"EM-DAT export is not a readable zip ({exc})") from None
     with zf:
         shared = _shared_strings(zf)
-        sheet = ElementTree.fromstring(zf.read(_sheet_name(zf)))
+        sheet = ElementTree.fromstring(_read_member(zf, _sheet_name(zf)))
         for row in sheet.iter(f"{_NS}row"):
             cells: dict[int, str] = {}
             for i, cell in enumerate(row.findall(f"{_NS}c")):
@@ -268,7 +355,10 @@ def admin_names(raw: str, admin_level: str) -> tuple[list[str], int]:
         try:
             parsed = reader(text)
             break
-        except (ValueError, SyntaxError):
+        except (ValueError, SyntaxError, RecursionError):
+            # A deeply nested cell exhausts the parser's stack. That is a
+            # malformed cell, which this function reports as zero units for
+            # the caller to count — not a bare traceback out of the CLI.
             continue
     if not isinstance(parsed, list):
         return [], 0
@@ -298,16 +388,33 @@ def parse(data: bytes, contract: Contract, crosswalk: Mapping[str, str]) -> Reco
         )
     level = contract.admin_level
     stream = rows(data)
-    header = next((r for r in stream if any(c.strip() for c in r)), None)
+    # The header is *detected*, not assumed to be the first non-blank row: an
+    # export that carries a title or a banner row would otherwise be reported
+    # as upstream schema drift when in fact one row needs skipping, which is
+    # the same loud voice this connector uses for a genuine renaming.
+    header = None
+    scanned: list[list[str]] = []
+    for row in itertools.islice(stream, HEADER_SCAN_ROWS):
+        if not any(c.strip() for c in row):
+            continue
+        scanned.append(row)
+        names = {c.strip() for c in row}
+        if all(c in names for c in COLUMNS):
+            header = row
+            break
     if header is None:
-        raise ConnectorError("EM-DAT export has no header row")
-    index = {name.strip(): i for i, name in enumerate(header)}
-    missing = [c for c in COLUMNS if c not in index]
-    if missing:
+        if not scanned:
+            raise ConnectorError("EM-DAT export has no header row")
+        present = {c.strip() for c in scanned[0]}
+        missing = [c for c in COLUMNS if c not in present]
+        looked_at = [[h for h in r if h.strip()][:6] for r in scanned]
         raise ConnectorError(
             f"EM-DAT schema drift: expected column(s) {missing} are absent "
-            f"(header: {[h for h in header if h.strip()]})"
+            f"(header: {[h for h in scanned[0] if h.strip()]}). The first "
+            f"{len(scanned)} non-blank row(s) were searched for a header "
+            f"carrying every expected column: {looked_at}"
         )
+    index = {name.strip(): i for i, name in enumerate(header)}
 
     events: list[RecordEvent] = []
     unmapped: dict[str, int] = {}
@@ -342,6 +449,13 @@ def parse(data: bytes, contract: Contract, crosswalk: Mapping[str, str]) -> Reco
             n_rows_unmapped += 1
             continue
         year = _int(cell("Start Year"), "Start Year", cell("DisNo."))
+        if not YEAR_RANGE[0] <= year <= YEAR_RANGE[1]:
+            raise ConnectorError(
+                f"EM-DAT row {cell('DisNo.') or '?'}: Start Year {year} is outside "
+                f"{YEAR_RANGE[0]}-{YEAR_RANGE[1]}. An Excel serial date or a shifted "
+                "column reads as a year here and then falls outside every split, "
+                "emptying the panel without an error."
+            )
         month = _int(cell("Start Month"), "Start Month", cell("DisNo."), default=0)
         if not 1 <= month <= 12:
             # EM-DAT leaves the month empty for slow-onset events (drought,
@@ -362,6 +476,22 @@ def parse(data: bytes, contract: Contract, crosswalk: Mapping[str, str]) -> Reco
                 )
                 * DAMAGE_SCALE,
             )
+        )
+    if len(countries) > 1:
+        # EM-DAT's public download is a query result, and normally covers a
+        # region or the world. Admin names collide constantly across borders
+        # ("Northern Province", "Central"), and `_norm_name` folds case and
+        # whitespace — so a cross-border row would be labelled as a damaging
+        # event in a district that saw nothing. Refused rather than filtered,
+        # because `Country` carries a name and not the alpha-2 code the
+        # contract names, so there is nothing here to compare it against.
+        raise ConnectorError(
+            f"EM-DAT export names {len(countries)} countries "
+            f"({', '.join(sorted(countries))}), and this connector cannot tell "
+            f"which rows belong to {contract.country}: the Country column carries "
+            "a name, not an ISO code, and admin-unit names collide across "
+            "borders. Export one country and register the contract against that "
+            "file."
         )
     return Records(
         events=events,
@@ -409,7 +539,9 @@ def load(
             "contract — register a new one rather than rebuilding this one's panel."
         )
     if crosswalk is None:
-        root = snapshot_dir if snapshot_dir is not None else path.parent.parent
+        # `records_path` is `<snapshots>/records/<CC>/<basename>`, so the
+        # snapshot root is three parents up when the caller did not name it.
+        root = snapshot_dir if snapshot_dir is not None else path.parents[2]
         crosswalk = load_crosswalk(crosswalk_path(root, contract.country))
     records = parse(data, contract, crosswalk)
     if manifest is not None:
@@ -422,33 +554,58 @@ def load(
                 bytes=len(data),
                 fetched_at=utc_now(),
                 license=LICENSE,
-                notes=f"{records.summary()}; export never committed or redistributed",
+                notes=f"{records.counts()}; export never committed or redistributed",
             ),
         )
     return records
 
 
 def _int(raw: str, column: str, where: str, default: int | None = None) -> int:
+    """One integer cell, or a refusal — never a NaN and never an OverflowError.
+
+    `float("inf")` parses and then `int()` raises `OverflowError`, which is not
+    a `ConnectorError`, so the CLI prints a traceback instead of the one-line
+    refusal it is built to print.
+    """
     text = (raw or "").strip().replace(",", "")
     if not text:
         if default is not None:
             return default
         raise ConnectorError(f"EM-DAT row {where or '?'}: {column} is empty")
     try:
-        return int(float(text))
+        number = float(text)
     except ValueError:
         raise ConnectorError(
             f"EM-DAT row {where or '?'}: {column} {raw!r} is not a number"
         ) from None
+    if not math.isfinite(number):
+        raise ConnectorError(
+            f"EM-DAT row {where or '?'}: {column} {raw!r} is not a finite number"
+        )
+    return int(number)
 
 
 def _float(raw: str, where: str) -> float:
+    """One damage cell, or a refusal.
+
+    `nan` is what many ad-hoc exporters write for a missing numeric, and read
+    as a damage figure it makes `is_damaging` return False — the row is
+    quietly labelled not-damaging rather than raising. A missing value is an
+    empty cell.
+    """
     text = (raw or "").strip().replace(",", "")
     if not text:
         return 0.0
     try:
-        return float(text)
+        number = float(text)
     except ValueError:
         raise ConnectorError(
             f"EM-DAT row {where or '?'}: damage {raw!r} is not a number"
         ) from None
+    if not math.isfinite(number):
+        raise ConnectorError(
+            f"EM-DAT row {where or '?'}: damage {raw!r} is not a finite number. A "
+            "missing value is an empty cell, not a NaN: read as a number it would "
+            "label the row not-damaging without a word."
+        )
+    return number

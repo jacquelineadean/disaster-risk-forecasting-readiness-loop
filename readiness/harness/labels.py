@@ -108,6 +108,33 @@ class RecordEvent:
     damage_property_usd: float
     damage_crops_usd: float = 0.0
 
+    def __post_init__(self) -> None:
+        """The three things `_walk_events` assumes and cannot check cheaply.
+
+        `_walk_events` turns a month into `period_index`, and `_dense_panel`
+        only materialises periods in `1..periods_per_year` — so a month outside
+        1..12 would be counted as a positive unit that is not in the panel,
+        contradicting the walk's own invariant that the positive-unit count is
+        the count of ones in the panel by construction. Both connectors already
+        satisfy all three; this is where the next one finds out.
+        """
+        if not 1 <= self.month <= 12:
+            raise ValueError(
+                f"record event {self.event_id!r}: month {self.month} is not 1-12; "
+                "a period outside the year would be counted as positive and then "
+                "not appear in the panel"
+            )
+        if self.year <= 0:
+            raise ValueError(
+                f"record event {self.event_id!r}: year {self.year} is not a year"
+            )
+        if not self.region_ids:
+            raise ValueError(
+                f"record event {self.event_id!r} names no region; a record event "
+                "carries its own region ids, and an event in no region is a row "
+                "the connector should have counted and dropped"
+            )
+
     def period_index(self, periods_per_year: int) -> int:
         """1-based period of the year: month 8 is quarter 3, half 2, month 8, year 1."""
         return (self.month - 1) * periods_per_year // 12 + 1
@@ -305,6 +332,18 @@ class Diagnostics:
     #: read them and carried here so `readiness panel` can print it. Zero on
     #: every US path, which is what keeps that path byte-identical.
     n_skipped_hazard: int = 0
+    #: Rows of a pilot's ground truth whose admin units the committed crosswalk
+    #: could not place in the region universe (`emdat.Records.n_rows_unmapped`;
+    #: a partner file names shapeIDs directly and passes 0). A large count is a
+    #: finding about the crosswalk, not a rounding error, so it is printed
+    #: rather than left in a transient progress line. Zero on every US path.
+    n_skipped_region: int = 0
+    #: Regions an event named that are outside the universe, on events that
+    #: still had at least one region inside it — those rows are *not* counted
+    #: by `n_outside_universe`, which only counts rows that lost every region.
+    #: A crosswalk written against a different geoBoundaries release loses
+    #: regions this way, one at a time, and used to do it silently.
+    n_regions_outside: int = 0
     #: What the directly-coded rows are coded against, for the printed line
     #: only: "county" for Storm Events, "ADM1"/"ADM2" for a pilot. The default
     #: keeps every US rendering byte-for-byte what it was.
@@ -340,7 +379,17 @@ class Diagnostics:
                 f"    other hazards     {self.n_skipped_hazard:>8,}"
                 "   rows of another hazard in the same records file"
             )
+        if self.n_skipped_region:
+            lines.append(
+                f"    unplaced rows     {self.n_skipped_region:>8,}"
+                "   rows whose admin units the crosswalk could not place"
+            )
         lines.append(f"    outside universe  {self.n_outside_universe:>8,}")
+        if self.n_regions_outside:
+            lines.append(
+                f"    regions dropped   {self.n_regions_outside:>8,}"
+                "   named regions outside the universe on rows that had one inside"
+            )
         lines.append(
             f"    damaging          {self.n_damaging:>8,}"
             f"   -> {self.n_positive_units:,} positive units"
@@ -381,6 +430,7 @@ def _walk_events(
     contract: Contract,
     crosswalk: Crosswalk | None,
     n_skipped_hazard: int = 0,
+    n_skipped_region: int = 0,
 ) -> tuple[set[Unit], Diagnostics]:
     """One pass over the events: the units to mark positive, and where every row went.
 
@@ -396,7 +446,7 @@ def _walk_events(
     region_set = set(regions)
     ppy = contract.periods_per_year
     n_events = n_in_years = n_county = n_zone = n_expanded = n_unmapped = 0
-    n_outside = n_damaging = 0
+    n_outside = n_damaging = n_regions_outside = 0
     positive: set[Unit] = set()
     for event in events:
         if not _hazard_matches(event, event_types):
@@ -418,6 +468,11 @@ def _walk_events(
         if not in_universe:
             n_outside += 1
             continue
+        # Regions the event named that this universe does not hold, on a row
+        # that still landed somewhere. `n_outside_universe` counts rows that
+        # lost *every* region; these lose some, which is what a crosswalk
+        # written against another boundary release does.
+        n_regions_outside += len(hit) - len(in_universe)
         if event.county_coded:
             n_county += 1
         if is_damaging(event, contract):
@@ -439,6 +494,8 @@ def _walk_events(
         n_positive_units=len(positive),
         crosswalk_edition=crosswalk.edition if crosswalk is not None else "",
         n_skipped_hazard=n_skipped_hazard,
+        n_skipped_region=n_skipped_region,
+        n_regions_outside=n_regions_outside,
         region_coding=(
             contract.admin_level if contract.regions_source != "census" else "county"
         ),
@@ -476,6 +533,7 @@ def panel_and_diagnostics(
     crosswalk: Crosswalk | None = None,
     *,
     n_skipped_hazard: int = 0,
+    n_skipped_region: int = 0,
 ) -> tuple[Panel, Diagnostics]:
     """The labelled panel and the account of how it was built, from one pass.
 
@@ -484,7 +542,8 @@ def panel_and_diagnostics(
     same events, so they cannot disagree.
     """
     positive, diagnostics = _walk_events(
-        events, regions, years, contract, crosswalk, n_skipped_hazard
+        events, regions, years, contract, crosswalk,
+        n_skipped_hazard, n_skipped_region,
     )
     return _dense_panel(positive, regions, years, contract), diagnostics
 

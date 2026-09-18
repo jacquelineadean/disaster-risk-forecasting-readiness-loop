@@ -58,6 +58,19 @@ CENSUS_KEY = "census/national_county2020"
 #: layers that declare a vintage year and may be refused by the firewall.
 FEATURE_CONNECTORS: tuple[str, ...] = ("era5", "terrain", "nri", "climada")
 
+#: Feature connectors that read a US-only source. A pilot that asks for one is
+#: refused by name rather than handed an empty source: "the model had no
+#: terrain features" is a different experiment from "the model had terrain
+#: features that were all missing", and only the first is honest here.
+#:
+#: `pinned()` answers False for them outside the US for the same reason. That
+#: is what makes the refusal a *skip* rather than a crash: `cli._features`
+#: selects every connector whose data is already pinned when no `--features`
+#: flag is given, so a pilot auto-selects `era5` alone and the candidates that
+#: need terrain are skipped by the orchestrator with a progress line and no
+#: card. An explicit `--features terrain` still raises, by name, in `build`.
+US_ONLY_FEATURES: tuple[str, ...] = ("terrain", "nri")
+
 
 def storm_events_key(year: int) -> str:
     """Manifest key of one Storm Events year file, as `storm_events.snapshot` pins it."""
@@ -78,8 +91,17 @@ def records_path(
 
     The contract names the basename only — a committed contract must not record
     one operator's filesystem — so the directory is policy, and this is it.
+    The country is part of that policy: the manifest key is already
+    `records/<CC>/<basename>`, and two agencies both calling their export
+    `records.csv` must not collide on one path backing two pinned hashes.
+    Nested directories under `snapshots/records/` stay git-ignored.
     """
-    return snapshot_dir / RECORDS_DIRNAME / str(contract.ground_truth.get("file", ""))
+    return (
+        snapshot_dir
+        / RECORDS_DIRNAME
+        / contract.country.upper()
+        / str(contract.ground_truth.get("file", ""))
+    )
 
 
 def records_key(contract: Contract) -> str:
@@ -219,13 +241,17 @@ def _pinned_pilot(
 ) -> bool:
     """`pinned` for a contract outside the US: boundaries, record, features.
 
-    The record is checked by hash rather than by existence, because the whole
-    point of the pinned hash is that the file on this disk may not be the file
-    the contract was registered against.
+    Both files are checked by hash rather than by existence, because the whole
+    point of a pinned hash is that the file on this disk may not be the file
+    the manifest records. An edited or half-written boundary cache is data of
+    unknown provenance: `pinned()` says so, and the site build skips the
+    contract instead of quietly going to the network for it.
     """
-    if not geoboundaries.cache_path(
-        snapshot_dir, contract.country, contract.admin_level
-    ).exists():
+    if not _pinned_file(
+        manifest,
+        regions_key(contract),
+        geoboundaries.cache_path(snapshot_dir, contract.country, contract.admin_level),
+    ):
         return False
     record = records_path(contract, snapshot_dir)
     if not _pinned_file(manifest, records_key(contract), record):
@@ -234,6 +260,13 @@ def _pinned_pilot(
         if not emdat.crosswalk_path(snapshot_dir, contract.country).exists():
             return False
     _check_feature_names(features)
+    if any(f in US_ONLY_FEATURES for f in features):
+        # There is no US-only source to pin outside the US. Answering True
+        # here (which is what the empty `_feature_files` list used to do, one
+        # layer below) let `cli._features` auto-select `terrain` for a pilot
+        # and `build` then refused the whole run — turning the documented
+        # graceful skip into a crash the moment a pilot's base data was pinned.
+        return False
     for key, path in _feature_files(
         contract, features, era5_parts(contract, ()), snapshot_dir
     ):
@@ -344,13 +377,6 @@ class Dataset:
             prov["feature_version"] = self.feature_version
             prov["feature_inputs"] = list(self.feature_inputs)
         return prov
-
-
-#: Feature connectors that read a US-only source. A pilot that asks for one is
-#: refused by name rather than handed an empty source: "the model had no
-#: terrain features" is a different experiment from "the model had terrain
-#: features that were all missing", and only the first is honest here.
-US_ONLY_FEATURES: tuple[str, ...] = ("terrain", "nri")
 
 
 def _load_features(
@@ -561,7 +587,8 @@ def _build_pilot(
     level, release = contract.admin_level, str(contract.regions.get("release", ""))
     progress(f"geoboundaries: {contract.country} {level} ({release})")
     regions = geoboundaries.load(
-        contract.country, level, release, snapshot_dir, manifest, refresh=refresh
+        contract.country, level, release, snapshot_dir, manifest, refresh=refresh,
+        expected_sha256=str(contract.regions.get("sha256") or "") or None,
     )
     manifest.save()
     progress(f"geoboundaries: {len(regions)} {level} regions in {contract.country}")
@@ -584,6 +611,7 @@ def _build_pilot(
         contract,
         None,
         n_skipped_hazard=records.n_skipped_hazard,
+        n_skipped_region=getattr(records, "n_rows_unmapped", 0),
     )
     sources = _load_features(
         contract, features, regions, snapshot_dir, manifest,

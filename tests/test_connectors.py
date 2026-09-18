@@ -2110,3 +2110,474 @@ class TestEmdat(unittest.TestCase):
         with self.assertRaises(ConnectorError) as ctx:
             emdat.load(path, contract, manifest, snapshot_dir=self.dir)
         self.assertIn(contract.ground_truth["sha256"], str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 review round: what the reviewers reproduced, as regressions
+# ---------------------------------------------------------------------------
+
+
+class TestGeoBoundariesChecksWhatItParsed(unittest.TestCase):
+    """`ADMIN_LEVELS` used to be enforced on the request and never on the file.
+
+    gbOpen features carry `shapeType` and `shapeGroup`, which say which level
+    and which country the file actually holds. Without checking them an ADM3
+    file admitted as a pilot's ADM1 universe publishes sub-county names in the
+    site's region lists, and a mirror template with no `{level}` field serves
+    one file for both levels with nothing to notice it.
+    """
+
+    def wrong_level(self) -> bytes:
+        blob = json.loads(make_geojson(n_regions=2).decode())
+        for feature in blob["features"]:
+            feature["properties"]["shapeType"] = "ADM3"
+            feature["properties"]["shapeID"] = (
+                feature["properties"]["shapeID"].replace("ADM1", "ADM3")
+            )
+        return json.dumps(blob).encode()
+
+    def test_an_adm3_file_is_refused_where_adm1_was_asked_for(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            geoboundaries.parse(self.wrong_level(), expect_level="ADM1")
+        self.assertIn("ADM3", str(ctx.exception))
+        self.assertIn("ADM1 was requested", str(ctx.exception))
+
+    def test_another_countrys_file_is_refused(self):
+        blob = json.loads(make_geojson(n_regions=2).decode())
+        for feature in blob["features"]:
+            feature["properties"]["shapeGroup"] = "XX"
+        with self.assertRaises(ConnectorError) as ctx:
+            geoboundaries.parse(json.dumps(blob).encode(), expect_group="ZZ")
+        self.assertIn("XX", str(ctx.exception))
+
+    def test_a_release_that_omits_the_properties_still_parses(self):
+        # Skipped when absent, so an older release is not broken by the check.
+        blob = json.loads(make_geojson(n_regions=2).decode())
+        for feature in blob["features"]:
+            feature["properties"].pop("shapeType")
+            feature["properties"].pop("shapeGroup")
+        regions = geoboundaries.parse(
+            json.dumps(blob).encode(), expect_level="ADM1", expect_group="ZZ"
+        )
+        self.assertEqual(len(regions), 2)
+
+    def test_load_passes_the_level_and_the_country_it_asked_for(self):
+        # The mirror-serves-one-file case: a template with no {level} field
+        # returns the same ADM1 bytes for ADM2, which used to pin the same
+        # sha256 under two manifest keys with nothing to notice it.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        manifest = Manifest(path=root / "manifest.json")
+        served = make_geojson(n_regions=2)
+        with mock.patch.object(geoboundaries, "fetch", lambda _url: served), \
+                mock.patch.dict(
+                    os.environ,
+                    {geoboundaries.URL_ENV: "https://mirror.invalid/{country}.geojson"},
+                ):
+            geoboundaries.load("ZZ", "ADM1", "gbOpen 6.0.0", root, manifest)
+            with self.assertRaises(ConnectorError) as ctx:
+                geoboundaries.load("ZZ", "ADM2", "gbOpen 6.0.0", root, manifest)
+        self.assertIn("ADM2 was requested", str(ctx.exception))
+
+
+class TestGeoBoundariesMirrorAndHash(unittest.TestCase):
+    """The override is a mirror, not an injection point."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = pathlib.Path(self.tmp.name)
+        self.blob = make_geojson(n_regions=3)
+
+    def test_a_non_https_override_is_refused(self):
+        for bad in ("http://attacker.invalid/{country}/{level}/{ref}.geojson",
+                    "file:///data/{country}.geojson",
+                    "ftp://x.invalid/{country}.geojson"):
+            with self.subTest(url=bad):
+                with mock.patch.dict(os.environ, {geoboundaries.URL_ENV: bad}):
+                    with self.assertRaises(ConnectorError) as ctx:
+                        geoboundaries.url_for("ZZ", "ADM1", "gbOpen 6.0.0")
+                    self.assertIn("https", str(ctx.exception))
+
+    def test_an_https_override_still_works_and_is_pinned(self):
+        manifest = Manifest(path=self.root / "manifest.json")
+        url = "https://mirror.invalid/{ref}/{country}/{level}.geojson"
+        with mock.patch.object(geoboundaries, "fetch", lambda _u: self.blob), \
+                mock.patch.dict(os.environ, {geoboundaries.URL_ENV: url}):
+            regions = geoboundaries.load("ZZ", "ADM1", "gbOpen 6.0.0", self.root, manifest)
+        self.assertEqual(len(regions), 3)
+        record = manifest.records["geoboundaries/ZZ/ADM1"]
+        self.assertEqual(record.url, "https://mirror.invalid/6.0.0/ZZ/ADM1.geojson")
+        self.assertEqual(record.sha256, sha256_bytes(self.blob))
+
+    def test_a_contracts_regions_sha_refuses_other_bytes(self):
+        manifest = Manifest(path=self.root / "manifest.json")
+        other = make_geojson(n_regions=2)
+        with mock.patch.object(geoboundaries, "fetch", lambda _u: other):
+            with self.assertRaises(ConnectorError) as ctx:
+                geoboundaries.load(
+                    "ZZ", "ADM1", "gbOpen 6.0.0", self.root, manifest,
+                    expected_sha256=sha256_bytes(self.blob),
+                )
+        message = str(ctx.exception)
+        self.assertIn(sha256_bytes(other), message)
+        self.assertIn(sha256_bytes(self.blob), message)
+
+    def test_the_matching_bytes_are_accepted(self):
+        manifest = Manifest(path=self.root / "manifest.json")
+        with mock.patch.object(geoboundaries, "fetch", lambda _u: self.blob):
+            regions = geoboundaries.load(
+                "ZZ", "ADM1", "gbOpen 6.0.0", self.root, manifest,
+                expected_sha256=sha256_bytes(self.blob),
+            )
+        self.assertEqual(len(regions), 3)
+
+    def test_a_boundary_file_over_the_cap_is_refused_unparsed(self):
+        manifest = Manifest(path=self.root / "manifest.json")
+        with mock.patch.object(geoboundaries, "MAX_BYTES", 64), \
+                mock.patch.object(geoboundaries, "fetch", lambda _u: self.blob):
+            with self.assertRaises(ConnectorError) as ctx:
+                geoboundaries.load("ZZ", "ADM1", "gbOpen 6.0.0", self.root, manifest)
+        self.assertIn("cap", str(ctx.exception))
+
+
+class TestNationalRecordsCommentStripping(unittest.TestCase):
+    """Only the *leading* comment block is stripped, and rows are file rows.
+
+    Filtering every `#` line deleted a data row whose `event_id` is a case
+    reference written `#2006/0012` — counted in neither `n_rows` nor
+    `n_skipped_hazard`, a silent zero in the panel — and cut the continuation
+    of a quoted field, leaving the quote unterminated and swallowing the row
+    after it.
+    """
+
+    HEADER = ",".join(national_records.COLUMNS)
+
+    def parse(self, body: str):
+        return national_records.parse(body.encode(), make_pilot_contract())
+
+    def test_a_row_whose_event_id_starts_with_a_hash_is_a_row(self):
+        records = self.parse(
+            "# record_start_year: 2005\n"
+            + self.HEADER + "\n"
+            + "E1,2006-03-14,ZZ-ADM1-001,flood,1,2,450000,A\n"
+            + "#E2,2006-04-14,ZZ-ADM1-002,flood,9,9,999999,A\n"
+            + "E4,2006-06-14,ZZ-ADM1-001,flood,1,2,450000,A\n"
+        )
+        self.assertEqual(records.n_rows, 3)
+        self.assertEqual([e.event_id for e in records.events], ["E1", "#E2", "E4"])
+
+    def test_a_quoted_field_whose_continuation_starts_with_a_hash_survives(self):
+        records = self.parse(
+            self.HEADER + "\n"
+            + 'E1,2006-03-14,ZZ-ADM1-001,flood,1,2,450000,"Agency note:\n'
+            + '# revised 2019"\n'
+            + "E2,2006-06-14,ZZ-ADM1-002,flood,1,2,450000,A\n"
+        )
+        self.assertEqual(records.n_rows, 2)
+        self.assertEqual([e.event_id for e in records.events], ["E1", "E2"])
+
+    def test_the_reported_row_number_is_the_line_of_the_file_sent(self):
+        # Three comment lines, a header, one good row, then a bad date on
+        # line 6 — which is what the partner will look at.
+        with self.assertRaises(ConnectorError) as ctx:
+            self.parse(
+                "# partner export\n"
+                "# record_start_year: 2005\n"
+                "# columns as agreed\n"
+                + self.HEADER + "\n"
+                + "E1,2006-03-14,ZZ-ADM1-001,flood,1,2,450000,A\n"
+                + "E2,14/06/2006,ZZ-ADM1-002,flood,1,2,450000,A\n"
+            )
+        self.assertIn("row 6", str(ctx.exception))
+
+    def test_the_committed_sample_still_reads_the_same(self):
+        sample = (DATA / "national_records_sample.csv").read_bytes()
+        records = national_records.parse(sample, make_pilot_contract())
+        self.assertEqual(records.n_rows, 5)
+        self.assertEqual(records.record_start_year, 2005)
+
+
+class TestNationalRecordsNumbersAndRegions(unittest.TestCase):
+    """A malformed number raises; it never becomes a zero or a traceback."""
+
+    HEADER = ",".join(national_records.COLUMNS)
+
+    def row(self, **over) -> bytes:
+        values = {
+            "event_id": "E1", "start_date": "2006-03-14",
+            "region_id": "ZZ-ADM1-001", "hazard": "flood",
+            "deaths": "0", "injured": "0", "damage_usd": "450000", "source": "A",
+        }
+        values.update(over)
+        body = self.HEADER + "\n" + ",".join(
+            values[c] for c in national_records.COLUMNS
+        ) + "\n"
+        return body.encode()
+
+    def test_nan_is_refused_rather_than_labelled_not_damaging(self):
+        for value in ("nan", "NaN", "-nan"):
+            with self.subTest(value=value):
+                with self.assertRaises(ConnectorError) as ctx:
+                    national_records.parse(
+                        self.row(damage_usd=value), make_pilot_contract()
+                    )
+                self.assertIn("finite", str(ctx.exception))
+
+    def test_infinity_is_a_connector_error_not_an_overflow_error(self):
+        for column in ("deaths", "injured", "damage_usd"):
+            with self.subTest(column=column):
+                with self.assertRaises(ConnectorError) as ctx:
+                    national_records.parse(
+                        self.row(**{column: "inf"}), make_pilot_contract()
+                    )
+                self.assertIn("finite", str(ctx.exception))
+
+    def test_an_empty_region_id_raises_rather_than_labelling_nowhere(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            national_records.parse(self.row(region_id="  "), make_pilot_contract())
+        self.assertIn("region_id is empty", str(ctx.exception))
+
+    def test_an_ordinary_number_is_unaffected(self):
+        # Quoted, because thousands separators are what the connector strips.
+        records = national_records.parse(
+            self.row(damage_usd='"1,250,000"'), make_pilot_contract()
+        )
+        self.assertEqual(records.events[0].damage_property_usd, 1_250_000.0)
+
+
+class TestRecordNotesCarryNoPartnerText(unittest.TestCase):
+    """`snapshots/manifest.json` is committed and published.
+
+    The connector's `summary()` interpolates the partner's own hazard-column
+    strings and EM-DAT's free-text admin names; real archives carry operation
+    names, outbreak names and place names there. The manifest gets `counts()`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = pathlib.Path(self.tmp.name)
+
+    def test_a_partner_hazard_string_never_reaches_the_manifest(self):
+        path = self.dir / "zz_records.csv"
+        draft = make_pilot_contract()
+        sha = make_records_csv(
+            path, draft,
+            record_row(event_id="E1", damage_usd=50_000),
+            record_row(event_id="E2", hazard="ebola_outbreak_kivu"),
+            record_row(event_id="E3", hazard="armed_conflict_operation_linda_nchi"),
+        )
+        contract = make_pilot_contract(sha256=sha)
+        manifest = Manifest(path=self.dir / "manifest.json")
+        records = national_records.load(path, contract, manifest)
+        notes = manifest.records["records/ZZ/zz_records.csv"].notes
+        self.assertIn("2 rows of other hazards", notes)
+        for name in ("ebola", "armed_conflict", "kivu", "linda"):
+            self.assertNotIn(name, notes.lower(), notes)
+        # ...but the operator's own screen still names them, which is how the
+        # thin panel gets explained.
+        self.assertIn("ebola_outbreak_kivu", records.summary())
+
+    def test_an_emdat_admin_name_never_reaches_the_manifest(self):
+        blob = (DATA / "emdat_sample.xlsx").read_bytes()
+        path = self.dir / "records" / "ZZ" / "zz_emdat.xlsx"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(blob)
+        (self.dir / "records" / "zz_emdat_regions.csv").write_bytes(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", sha256=sha256_bytes(blob)
+        )
+        manifest = Manifest(path=self.dir / "manifest.json")
+        records = emdat.load(path, contract, manifest, snapshot_dir=self.dir)
+        notes = manifest.records["emdat/ZZ/zz_emdat.xlsx"].notes
+        self.assertIn("admin units not in the crosswalk", notes)
+        self.assertNotIn("Eastern Marches", notes)
+        self.assertIn("Eastern Marches", records.summary())
+
+
+class TestEmdatOneCountryPerExport(unittest.TestCase):
+    """EM-DAT's public download is a query result, not a country file.
+
+    Admin names collide constantly across borders ("Northern Province",
+    "Central"), and `_norm_name` folds case and whitespace, so a cross-border
+    row becomes a damaging event in a district that saw nothing. The Country
+    column carries a name and not the alpha-2 code the contract names, so
+    there is nothing to filter on: the export is refused instead.
+    """
+
+    def setUp(self):
+        self.crosswalk = emdat.parse_crosswalk(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        self.contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", record_start_year=2005
+        )
+
+    def test_a_second_country_in_the_export_is_refused(self):
+        rows = [
+            list(emdat.COLUMNS),
+            _emdat_row(),
+            _emdat_row(**{"DisNo.": "2006-0099-XX", "Country": "Elbonia",
+                          "Start Year": 2007,
+                          "Total Damage ('000 US$)": 500}),
+        ]
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+        message = str(ctx.exception)
+        self.assertIn("Elbonia", message)
+        self.assertIn("Zzland", message)
+        self.assertIn("Export one country", message)
+
+    def test_one_country_still_parses(self):
+        records = emdat.parse(
+            emdat_xlsx([list(emdat.COLUMNS), _emdat_row()]),
+            self.contract, self.crosswalk,
+        )
+        self.assertEqual(records.countries, ("Zzland",))
+        self.assertEqual(len(records.events), 1)
+
+
+class TestEmdatSheetAndHeader(unittest.TestCase):
+    """The workbook's first sheet, and a header that is actually the header."""
+
+    def setUp(self):
+        self.crosswalk = emdat.parse_crosswalk(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        self.contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", record_start_year=2005
+        )
+
+    def two_sheets(self) -> bytes:
+        """An xlsx with `sheet2.xml` and `sheet10.xml` and no `sheet1.xml`."""
+        first = emdat_xlsx([list(emdat.COLUMNS), _emdat_row()])
+        decoy = emdat_xlsx(
+            [list(emdat.COLUMNS), _emdat_row(**{"DisNo.": "DECOY-ROW"})]
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(first)) as a, \
+                zipfile.ZipFile(io.BytesIO(decoy)) as b, \
+                zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+            out.writestr("[Content_Types].xml", a.read("[Content_Types].xml"))
+            out.writestr("_rels/.rels", a.read("_rels/.rels"))
+            out.writestr("xl/workbook.xml", a.read("xl/workbook.xml"))
+            out.writestr("xl/sharedStrings.xml", a.read("xl/sharedStrings.xml"))
+            # Written in zip order decoy-first, so only the numeric sort saves it.
+            out.writestr("xl/worksheets/sheet10.xml", b.read("xl/worksheets/sheet1.xml"))
+            out.writestr("xl/worksheets/sheet2.xml", a.read("xl/worksheets/sheet1.xml"))
+        return buf.getvalue()
+
+    def test_sheet2_beats_sheet10(self):
+        blob = self.two_sheets()
+        self.assertEqual(emdat._sheet_name(zipfile.ZipFile(io.BytesIO(blob))),
+                         "xl/worksheets/sheet2.xml")
+        rows = list(emdat.rows(blob))
+        self.assertNotIn("DECOY-ROW", [r[0] for r in rows if r])
+
+    def test_a_banner_row_before_the_header_is_not_schema_drift(self):
+        rows = [
+            ["EM-DAT public table, exported 2026-01-01"],
+            [],
+            list(emdat.COLUMNS),
+            _emdat_row(),
+        ]
+        records = emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+        self.assertEqual([e.event_id for e in records.events], ["2006-0001-ZZ"])
+
+    def test_a_real_renaming_is_still_loud_and_says_what_it_looked_at(self):
+        header = [c if c != "Total Deaths" else "Deaths" for c in emdat.COLUMNS]
+        rows = [["EM-DAT public table"], header, _emdat_row()]
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+        message = str(ctx.exception)
+        self.assertIn("Total Deaths", message)
+        self.assertIn("non-blank row(s) were searched", message)
+        self.assertIn("EM-DAT public table", message)
+
+    def test_a_start_year_outside_the_range_is_refused(self):
+        rows = [list(emdat.COLUMNS), _emdat_row(**{"Start Year": 38000})]
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+        self.assertIn("outside 1900-2100", str(ctx.exception))
+
+
+class TestEmdatNumbersAndBounds(unittest.TestCase):
+    """Malformed cells raise a `ConnectorError`; a huge member is never read."""
+
+    def setUp(self):
+        self.crosswalk = emdat.parse_crosswalk(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        self.contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", record_start_year=2005
+        )
+
+    def parse(self, **over):
+        rows = [list(emdat.COLUMNS), _emdat_row(**over)]
+        return emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+
+    def test_a_non_numeric_count_raises_rather_than_becoming_zero(self):
+        for column in ("Total Deaths", "No. Injured", "Start Year"):
+            with self.subTest(column=column):
+                with self.assertRaises(ConnectorError) as ctx:
+                    self.parse(**{column: "many"})
+                self.assertIn("is not a number", str(ctx.exception))
+
+    def test_a_non_numeric_damage_raises(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            self.parse(**{"Total Damage ('000 US$)": "lots"})
+        self.assertIn("is not a number", str(ctx.exception))
+
+    def test_infinity_and_nan_are_connector_errors(self):
+        for column, value in (
+            ("Total Deaths", "inf"),
+            ("No. Injured", "inf"),
+            ("Total Damage ('000 US$)", "nan"),
+        ):
+            with self.subTest(column=column, value=value):
+                with self.assertRaises(ConnectorError) as ctx:
+                    self.parse(**{column: value})
+                self.assertIn("finite", str(ctx.exception))
+
+    def test_a_zip_bomb_is_refused_before_it_is_decompressed(self):
+        rows = [list(emdat.COLUMNS), _emdat_row()]
+        blob = emdat_xlsx(rows)
+        with mock.patch.object(emdat, "MAX_COMPRESSION_RATIO", 1):
+            with self.assertRaises(ConnectorError) as ctx:
+                list(emdat.rows(blob))
+        self.assertIn("zip bomb", str(ctx.exception))
+        with mock.patch.object(emdat, "MAX_MEMBER_BYTES", 8):
+            with self.assertRaises(ConnectorError) as ctx:
+                list(emdat.rows(blob))
+        self.assertIn("cap", str(ctx.exception))
+        # Unpatched, the same bytes read normally.
+        self.assertEqual(list(emdat.rows(blob))[0], list(emdat.COLUMNS))
+
+    def test_a_deeply_nested_admin_cell_is_counted_not_a_recursion_error(self):
+        deep = "[" * 3000 + "]" * 3000
+        self.assertEqual(emdat.admin_names(deep, "ADM1"), ([], 0))
+
+
+class TestEmdatCrosswalkRootIsTheSnapshotDir(unittest.TestCase):
+    """`records_path` is `<snapshots>/records/<CC>/<basename>` now."""
+
+    def test_load_finds_the_crosswalk_without_being_told_the_root(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = pathlib.Path(tmp.name)
+        blob = (DATA / "emdat_sample.xlsx").read_bytes()
+        contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", sha256=sha256_bytes(blob)
+        )
+        path = root / "records" / "ZZ" / "zz_emdat.xlsx"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(blob)
+        (root / "records" / "zz_emdat_regions.csv").write_bytes(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        records = emdat.load(path, contract, Manifest(path=root / "manifest.json"))
+        self.assertEqual(len(records.events), 2)

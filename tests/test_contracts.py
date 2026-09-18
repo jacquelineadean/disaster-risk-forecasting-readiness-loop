@@ -610,6 +610,266 @@ class TestRecordStartYear(unittest.TestCase):
             )
         self.assertIn("precedes 2000", str(ctx.exception))
 
+    def test_the_floor_is_refused_at_the_boundary_not_only_in_bulk(self):
+        # A gross undercut was already caught; one year short was not, which
+        # is the shape a real mistake takes. `floor` is inclusive: 2000 is the
+        # first year EM-DAT can be trusted, 1999 is not.
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(
+                source="emdat", file="zz.xlsx", record_start_year=1999,
+                splits={**PILOT_SPLITS, "train": [1999, 2014]},
+            )
+        self.assertIn("precedes 2000", str(ctx.exception))
+        make_pilot_contract(
+            source="emdat", file="zz.xlsx", record_start_year=2000
+        ).validate()
+
+    def test_the_year_is_an_integer_and_is_not_coerced(self):
+        # `criteria()` hashes the section as written, so "2005" and 2005 would
+        # be one contract under two digests. Refused rather than normalised.
+        # Written straight into the section, as a hand-written or
+        # machine-written contract file would be: the fixture's own
+        # `record_start_year=` goes through `pilot_sources`, which int-casts.
+        for value in ("2005", 2005.7, True, 2005.0):
+            with self.subTest(value=value):
+                with self.assertRaises(ContractError) as ctx:
+                    make_pilot_contract(ground_truth={"record_start_year": value})
+                self.assertIn("must be a JSON integer", str(ctx.exception))
+        make_pilot_contract(ground_truth={"record_start_year": 2005}).validate()
+
+
+class TestPilotSectionsRefuseUnknownKeys(unittest.TestCase):
+    """The pilot branch is as strict about extra keys as the US branch is.
+
+    `to_spec()` writes both sections back verbatim, `criteria()` hashes them
+    and the site publishes them, so an extra key — an operator's absolute path,
+    say — would be committed, packed and published. That is exactly what
+    `BASENAME_RE` exists to prevent one field along.
+    """
+
+    def reject(self, fragment, **over):
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(**over)
+        self.assertIn(fragment, str(ctx.exception))
+
+    def test_an_operator_path_in_ground_truth_is_refused(self):
+        self.reject(
+            "unknown key is a criterion nobody agreed to",
+            ground_truth={"path": "/home/operator/share/zz_records.csv"},
+        )
+
+    def test_an_unknown_regions_key_is_refused(self):
+        self.reject("unknown key is a criterion nobody agreed to",
+                    regions={"mirror": "http://elsewhere.invalid"})
+
+    def test_the_named_key_is_in_the_message(self):
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(ground_truth={"path": "/tmp/x"})
+        self.assertIn("'path'", str(ctx.exception))
+
+    def test_the_schema_keys_themselves_are_fine(self):
+        make_pilot_contract().validate()
+        make_pilot_contract(regions={"sha256": "b" * 64}).validate()
+
+
+class TestPilotRegionsSha(unittest.TestCase):
+    """`regions.sha256` is optional, hashed when present, elided when absent."""
+
+    def test_absent_by_default_so_an_existing_digest_does_not_move(self):
+        c = make_pilot_contract()
+        self.assertNotIn("sha256", c.regions)
+        self.assertEqual(c.digest(), make_pilot_contract().digest())
+
+    def test_present_it_is_a_criterion(self):
+        base = make_pilot_contract()
+        pinned = make_pilot_contract(regions={"sha256": "b" * 64})
+        self.assertNotEqual(base.digest(), pinned.digest())
+        self.assertNotEqual(
+            pinned.digest(), make_pilot_contract(regions={"sha256": "c" * 64}).digest()
+        )
+
+    def test_it_must_be_a_sha256(self):
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(regions={"sha256": "nope"})
+        self.assertIn("regions.sha256", str(ctx.exception))
+
+    def test_pilot_sources_omits_it_unless_asked(self):
+        _gt, regions = contracts.pilot_sources(
+            source="national_records", file="x.csv", sha256="a" * 64,
+            record_start_year=2005,
+        )
+        self.assertEqual(sorted(regions), ["admin_level", "release", "source"])
+        _gt, regions = contracts.pilot_sources(
+            source="national_records", file="x.csv", sha256="a" * 64,
+            record_start_year=2005, regions_sha256="b" * 64,
+        )
+        self.assertEqual(regions["sha256"], "b" * 64)
+
+    def test_pilot_sources_resolves_its_own_defaults(self):
+        # The argument parser passes None for "not given" so it can refuse a
+        # flag that does not apply; the defaults live here.
+        _gt, regions = contracts.pilot_sources(
+            source="emdat", file="x.xlsx", sha256="a" * 64, record_start_year=2000,
+            admin_level=None, release=None,
+        )
+        self.assertEqual(regions["admin_level"], contracts.DEFAULTS["admin_level"])
+        self.assertEqual(regions["release"], contracts.GEOBOUNDARIES_RELEASE)
+
+
+class TestContractPatternsEndAtTheString(unittest.TestCase):
+    """`$` also matches before a final newline; `\Z` does not.
+
+    A country code with a trailing newline would reach a manifest key, a cache
+    filename and the geoBoundaries URL; a sha256 with one can never match any
+    file, and prints as two hashes that look identical.
+    """
+
+    CASES = (
+        ("NAME_RE", "flood-zz"),
+        ("STATE_RE", "LA"),
+        ("COUNTRY_RE", "ZZ"),
+        ("SHA256_RE", "a" * 64),
+        ("BASENAME_RE", "zz_records.csv"),
+        ("RELEASE_RE", "gbOpen 6.0.0"),
+        ("YEAR_RANGE_RE", "1996-2015"),
+    )
+
+    def test_every_pattern_refuses_a_trailing_newline(self):
+        for name, good in self.CASES:
+            pattern = getattr(contracts, name)
+            with self.subTest(pattern=name):
+                self.assertTrue(pattern.match(good), good)
+                self.assertFalse(pattern.match(good + "\n"), name)
+
+    def test_the_contract_itself_refuses_them(self):
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(name="flood-zz\n")
+        self.assertIn("contract name", str(ctx.exception))
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(scope={"country": "ZZ\n", "states": []})
+        self.assertIn("alpha-2", str(ctx.exception))
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(sha256="a" * 64 + "\n")
+        self.assertIn("64 lowercase hex", str(ctx.exception))
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(file="zz_records.csv\n")
+        self.assertIn("basename", str(ctx.exception))
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(release="gbOpen 6.0.0\n")
+        self.assertIn("regions.release", str(ctx.exception))
+
+
+class TestPilotReleaseIsCheckedAtRegistration(unittest.TestCase):
+    """A contract is hashed before anything tries to resolve its release."""
+
+    def test_a_release_geoboundaries_cannot_read_is_refused(self):
+        for bad in ("latest", "6.0.0", "gbOpen", "gbOpen ", "gbHumanitarian 6.0.0"):
+            with self.subTest(release=bad):
+                with self.assertRaises(ContractError) as ctx:
+                    make_pilot_contract(release=bad)
+                self.assertIn("gbOpen <version>", str(ctx.exception))
+
+    def test_the_shapes_the_connector_reads_are_accepted(self):
+        for good in ("gbOpen 6.0.0", "gbOpen@6.0.0", "gbOpen 5.0.0"):
+            with self.subTest(release=good):
+                make_pilot_contract(release=good).validate()
+
+    def test_the_pattern_is_the_connectors_pattern(self):
+        from readiness.connectors import geoboundaries
+
+        # Two copies on purpose (contracts must not import a connector), so a
+        # test ties them together rather than a comment asking nicely.
+        for value in ("gbOpen 6.0.0", "gbOpen@6.0.0", "latest", "6.0.0", "gbOpen",
+                      "gbOpen 6.0.0\n", "gbopen 6.0.0"):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    bool(contracts.RELEASE_RE.match(value)),
+                    bool(geoboundaries._RELEASE_RE.match(value)),
+                    value,
+                )
+
+
+class TestPilotHazardMapsToItsOwnSource(unittest.TestCase):
+    """A hazard mapped for one global source and not the other is refused now.
+
+    `config.HAZARD_CATEGORIES` is data meant to be extended — "a partner whose
+    vocabulary is not here does not need a code change" — so a one-sided entry
+    will happen. Caught at registration, not at build time, because a contract
+    is hashed before anything reads a record.
+    """
+
+    def test_a_one_sided_mapping_is_refused_for_the_missing_source(self):
+        table = {**HAZARD_CATEGORIES, "lightning": {"national_records": ("lightning",)}}
+        with mock.patch.dict(contracts.HAZARD_CATEGORIES, table, clear=True):
+            make_pilot_contract(hazard="lightning").validate()
+            with self.assertRaises(ContractError) as ctx:
+                make_pilot_contract(
+                    hazard="lightning", source="emdat", file="zz.xlsx",
+                    record_start_year=2000,
+                )
+            self.assertIn("has no 'emdat' mapping", str(ctx.exception))
+
+    def test_the_two_hazard_tables_agree(self):
+        # `global_hazards()` is the one statement of "registrable outside the
+        # US", read by the contract validator's message and by `readiness
+        # hazards`. It is only meaningful while the two tables agree.
+        from readiness import config
+
+        self.assertEqual(set(HAZARD_CATEGORIES) - set(HAZARDS), set())
+        self.assertEqual(
+            config.global_hazards(),
+            tuple(h for h in HAZARDS if h in HAZARD_CATEGORIES),
+        )
+        for hazard, mapping in HAZARD_CATEGORIES.items():
+            with self.subTest(hazard=hazard):
+                self.assertEqual(sorted(mapping), ["emdat", "national_records"])
+                self.assertTrue(all(mapping.values()), hazard)
+
+    def test_the_message_lists_the_hazards_that_can_be_registered(self):
+        from readiness import config
+
+        with self.assertRaises(ContractError) as ctx:
+            make_pilot_contract(hazard="dust_storm")
+        text = str(ctx.exception)
+        self.assertIn("inland_flood", text)
+        self.assertEqual(
+            [h for h in config.global_hazards() if h in text], list(config.global_hazards())
+        )
+
+
+class TestPilotEventTypesAreAlwaysEmpty(unittest.TestCase):
+    """Two pilots with identical panels must not carry different digests."""
+
+    def test_a_spec_that_names_event_types_outside_the_us_has_them_dropped(self):
+        named = make_pilot_contract(event_types=["Flood"])
+        self.assertEqual(named.event_types, ())
+        self.assertEqual(named.digest(), make_pilot_contract().digest())
+
+    def test_the_us_still_fills_them_from_the_catalogue(self):
+        self.assertEqual(
+            make_contract().event_types, HAZARDS["inland_flood"].event_types
+        )
+
+
+class TestTheCrosswalkBasenameIsNotAGroundTruth(unittest.TestCase):
+    """`.gitignore` re-includes `snapshots/records/??_emdat_regions.csv`.
+
+    That is the only file in the private directory git will commit, so a
+    ground-truth file may not be named like one: the structural guard belongs
+    on both sides of the boundary, not only in the ignore file.
+    """
+
+    def test_a_crosswalk_shaped_basename_is_refused(self):
+        for bad in ("zz_emdat_regions.csv", "ZZ_emdat_regions.csv"):
+            with self.subTest(file=bad):
+                with self.assertRaises(ContractError) as ctx:
+                    make_pilot_contract(file=bad)
+                self.assertIn("git does *not* ignore", str(ctx.exception))
+
+    def test_a_name_git_would_not_re_include_is_fine(self):
+        # Not two letters: the ignore file no longer re-includes it either.
+        make_pilot_contract(file="PARTNER_CONFIDENTIAL_emdat_regions.csv").validate()
+
 
 class TestPilotDescription(unittest.TestCase):
     def test_describe_names_both_sources(self):
