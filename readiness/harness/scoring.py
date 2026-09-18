@@ -9,10 +9,19 @@ the labels. Keeping those steps in that order in one place is what makes the
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 from readiness.contracts import Contract, Split
 from readiness.harness import metrics
+from readiness.harness.features import (
+    FeatureAdmissionError,
+    FeatureAudit,
+    FeatureFrame,
+    FeatureSource,
+    FeatureSpec,
+    audit_frame,
+    build_frame,
+)
 from readiness.harness.labels import Panel, Unit
 from readiness.harness.splits import (
     PredictionRequest,
@@ -61,6 +70,11 @@ class Scorecard:
     reliability_bins: tuple[dict, ...]
     panel_digest: str
     train_digest: str
+    # Trailing, defaulted: cards from Phase 0 have none of these, and the
+    # reproducibility fingerprint never reads them.
+    feature_digest: str = ""
+    feature_columns: tuple[str, ...] = ()
+    feature_audit: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -125,29 +139,86 @@ def _resolve(contract: Contract, split: Split | str) -> Split:
     return get_split(contract, split) if isinstance(split, str) else split
 
 
-def score(
+@dataclass(frozen=True)
+class _Run:
+    """One fit/predict pass, with the labels fetched only after it finished.
+
+    Everything a scorecard or a canary needs comes from here, so a model is
+    fitted exactly once per screening and the card and the canary arrays are
+    guaranteed to describe the same forecasts.
+    """
+
+    split: Split
+    view: TrainingView
+    train_panel: Panel
+    eval_panel: Panel
+    probs: list[float]
+    outcomes: list[int]
+    audit: FeatureAudit | None = None
+
+
+Sources = Mapping[str, FeatureSource]
+
+
+def _features(
+    model: Model,
+    contract: Contract,
+    train_panel: Panel,
+    eval_panel: Panel,
+    sources: Sources | None,
+) -> tuple[FeatureFrame | None, FeatureFrame | None, FeatureAudit | None]:
+    """Build and audit the frames a model asks for, or nothing at all.
+
+    A model declares `feature_specs`; the harness builds the rows for the
+    training and the scored units from the loaded sources under its own
+    cutoffs, audits the whole frame, and refuses to go on unless the audit is
+    clean. A model with no specs gets no frame, and a Phase 0 run is
+    byte-identical to before.
+    """
+    specs: tuple[FeatureSpec, ...] = tuple(getattr(model, "feature_specs", ()) or ())
+    if not specs:
+        return None, None, None
+    if not sources:
+        raise FeatureAdmissionError(
+            f"{model.name} declares {len(specs)} feature column(s) but no feature "
+            "sources were loaded; run with the sources the contract's data pins"
+        )
+    units = list(train_panel.units) + list(eval_panel.units)
+    frame = build_frame(specs, sources, units, contract.periods_per_year)
+    audit = audit_frame(specs, sources, units, contract, frame)
+    if not audit.clean:
+        raise FeatureAdmissionError(
+            f"features refused for {model.name}:\n{audit.format()}"
+        )
+    return frame.restrict(train_panel.units), frame.restrict(eval_panel.units), audit
+
+
+def _fit_predict(
     model: Model,
     panel: Panel,
     contract: Contract,
-    split: Split | str,
-    *,
-    reference_probs: Sequence[float] | None = None,
-) -> Scorecard:
-    """Fit `model` on the contract's training split and score it against `split`.
+    split: Split,
+    sources: Sources | None = None,
+) -> _Run:
+    """The fixed sequence: training view, fit, bare request, predict, *then* labels.
 
-    `reference_probs` lets a caller supply an explicit reference forecast; by
-    default the harness uses its own constant climatology, which is what the
-    contract names.
+    This is the one place the sequence is written down. `score`, `predictions_for`
+    and `screen` all go through it, so the "no model ever sees a holdout label"
+    invariant is audited by reading this function and nothing else. Features,
+    when a model asks for them, are built and audited before the view exists,
+    from units alone.
     """
-    split = _resolve(contract, split)
     train_split = contract.splits.train
     train_panel = split_panel(panel, train_split)
     eval_panel = split_panel(panel, split)
 
-    view = TrainingView(train_panel, train_split)
+    train_frame, eval_frame, audit = _features(
+        model, contract, train_panel, eval_panel, sources
+    )
+    view = TrainingView(train_panel, train_split, train_frame)
     model.fit(view)
 
-    request = PredictionRequest.from_panel(eval_panel, split)
+    request = PredictionRequest.from_panel(eval_panel, split, eval_frame)
     probs = list(model.predict(request))
     if len(probs) != len(request):
         raise ValueError(
@@ -157,10 +228,14 @@ def score(
 
     # Labels are fetched only now — after predict() has returned.
     outcomes = list(eval_panel.labels)
+    return _Run(split, view, train_panel, eval_panel, probs, outcomes, audit)
 
-    if reference_probs is None:
-        p_ref = _reference_probability(train_panel)
-        reference_probs = [p_ref] * len(outcomes)
+
+def _scorecard(model: Model, contract: Contract, run: _Run) -> Scorecard:
+    """Every number on the card, from one run's forecasts and outcomes."""
+    probs, outcomes = run.probs, run.outcomes
+    p_ref = _reference_probability(run.train_panel)
+    reference_probs = [p_ref] * len(outcomes)
 
     bs = metrics.brier_score(probs, outcomes)
     bs_ref = metrics.brier_score(reference_probs, outcomes)
@@ -172,7 +247,7 @@ def score(
         version=model.version,
         contract=contract.name,
         contract_digest=contract.digest(),
-        split=split.name,
+        split=run.split.name,
         n_units=len(outcomes),
         n_positive=sum(outcomes),
         base_rate=metrics.base_rate(outcomes),
@@ -195,48 +270,78 @@ def score(
             }
             for b in table
         ),
-        panel_digest=eval_panel.digest(),
-        train_digest=view.digest,
+        panel_digest=run.eval_panel.digest(),
+        train_digest=run.view.digest,
+        feature_digest=run.view.feature_digest,
+        feature_columns=run.view.features.columns if run.view.features else (),
+        feature_audit=run.audit.to_dict() if run.audit is not None else None,
     )
 
 
+def score(
+    model: Model,
+    panel: Panel,
+    contract: Contract,
+    split: Split | str,
+    *,
+    sources: Sources | None = None,
+) -> Scorecard:
+    """Fit `model` on the contract's training split and score it against `split`.
+
+    The reference forecast is always the harness's own constant climatology —
+    the one the contract names. There is deliberately no way to pass another:
+    a caller-supplied reference would make the skill score measure whatever
+    the caller chose. `sources` are the loaded feature sources, used only when
+    the model declares feature specs.
+    """
+    split = _resolve(contract, split)
+    return _scorecard(model, contract, _fit_predict(model, panel, contract, split, sources))
+
+
 def predictions_for(
-    model: Model, panel: Panel, contract: Contract, split: Split | str
+    model: Model,
+    panel: Panel,
+    contract: Contract,
+    split: Split | str,
+    *,
+    sources: Sources | None = None,
 ) -> tuple[list[Unit], list[float], list[int]]:
     """Same fit/predict sequence as `score`, exposing the raw arrays.
 
-    Used by the canary, which needs to inspect the forecasts themselves rather
-    than the summary statistics.
+    Used by the reproducibility guard, which pins the forecasts themselves
+    rather than the summary statistics.
     """
-    split = _resolve(contract, split)
-    train_split = contract.splits.train
-    train_panel = split_panel(panel, train_split)
-    eval_panel = split_panel(panel, split)
-    view = TrainingView(train_panel, train_split)
-    model.fit(view)
-    request = PredictionRequest.from_panel(eval_panel, split)
-    probs = list(model.predict(request))
-    return list(eval_panel.units), probs, list(eval_panel.labels)
+    run = _fit_predict(model, panel, contract, _resolve(contract, split), sources)
+    return list(run.eval_panel.units), run.probs, run.outcomes
 
 
-def screen(model: Model, panel: Panel, contract: Contract, split: Split | str):
-    """Score a model and run the leakage canary over the same fit/predict path.
+def screen(
+    model: Model,
+    panel: Panel,
+    contract: Contract,
+    split: Split | str,
+    *,
+    sources: Sources | None = None,
+):
+    """Score a model and run the leakage canary over the same forecasts.
 
     Returns `(scorecard, canary_report)`. Every command that scores anything
-    goes through here so that a scorecard is never produced without its canary.
+    goes through here so that a scorecard is never produced without its canary,
+    and the model is fitted once: the card and the canary describe one set of
+    probabilities, not two runs that are merely assumed to agree.
     """
     from readiness.harness import canary as canary_mod
 
-    split = _resolve(contract, split)
-    card = score(model, panel, contract, split)
-    _units, probs, outcomes = predictions_for(model, panel, contract, split)
-    view = TrainingView(split_panel(panel, contract.splits.train), contract.splits.train)
+    run = _fit_predict(model, panel, contract, _resolve(contract, split), sources)
+    card = _scorecard(model, contract, run)
     report = canary_mod.run(
-        probs=probs,
-        outcomes=outcomes,
+        probs=run.probs,
+        outcomes=run.outcomes,
         brier_skill_score=card.brier_skill_score,
         auc=card.auc,
-        view=view,
+        view=run.view,
         declared_train_digest=getattr(model, "training_digest", None),
+        declared_feature_digest=getattr(model, "feature_digest", None),
+        frame_digest=run.view.feature_digest or None,
     )
     return card, report

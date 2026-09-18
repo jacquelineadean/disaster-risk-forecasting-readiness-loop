@@ -216,58 +216,6 @@ def _regions_hit(
     return crosswalk.counties_for(event.state_fips, event.cz_fips)
 
 
-def build_panel(
-    events: Iterable[StormEvent],
-    regions: Sequence[str],
-    years: Sequence[int],
-    contract: Contract,
-    crosswalk: Crosswalk | None = None,
-) -> Panel:
-    """Cross regions x years x periods, then mark cells with a damaging event.
-
-    `events` should already be filtered to the scope's states; hazard filtering
-    happens here so the caller cannot accidentally pass a different event-type
-    set than the contract declares. A contract whose `zone_policy` is `expand`
-    must be given the crosswalk; this refuses to guess.
-    """
-    _require_crosswalk(contract, crosswalk)
-    event_types = set(contract.event_types)
-    year_set = set(years)
-    region_set = set(regions)
-    ppy = contract.periods_per_year
-
-    positive: set[Unit] = set()
-    for event in events:
-        if event.event_type not in event_types:
-            continue
-        if event.year not in year_set:
-            continue
-        hit = _regions_hit(event, contract, crosswalk)
-        if not hit or not is_damaging(event, contract):
-            continue
-        period = event.period_index(ppy)
-        for region in hit:
-            if region in region_set:
-                positive.add((region, event.year, period))
-
-    units: list[Unit] = []
-    labels: list[int] = []
-    for region in sorted(region_set):
-        for year in sorted(year_set):
-            for period in range(1, ppy + 1):
-                unit = (region, year, period)
-                units.append(unit)
-                labels.append(1 if unit in positive else 0)
-
-    return Panel(
-        tuple(units),
-        tuple(labels),
-        hazard=contract.hazard,
-        scope=contract.scope_key,
-        period=contract.period,
-    )
-
-
 @dataclass(frozen=True)
 class Diagnostics:
     """Where the hazard's events went while the panel was being built."""
@@ -330,14 +278,21 @@ class Diagnostics:
         return "\n".join(lines)
 
 
-def diagnose(
+def _walk_events(
     events: Iterable[StormEvent],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
-    crosswalk: Crosswalk | None = None,
-) -> Diagnostics:
-    """Count what `build_panel` keeps and drops, so a thin panel is explained."""
+    crosswalk: Crosswalk | None,
+) -> tuple[set[Unit], Diagnostics]:
+    """One pass over the events: the units to mark positive, and where every row went.
+
+    `build_panel` and `diagnose` are projections of this walk. They used to be
+    two copies of the same filter chain, which is how a panel and its
+    explanation drift apart — and how an iterator of events, walked once by the
+    first, arrives empty at the second. One walk means the positive-unit count
+    on the diagnostics is the count of ones in the panel by construction.
+    """
     _require_crosswalk(contract, crosswalk)
     event_types = set(contract.event_types)
     year_set = set(years)
@@ -373,7 +328,7 @@ def diagnose(
             period = event.period_index(ppy)
             for region in in_universe:
                 positive.add((region, event.year, period))
-    return Diagnostics(
+    diagnostics = Diagnostics(
         hazard=contract.hazard,
         zone_policy=contract.zone_policy,
         n_events=n_events,
@@ -387,3 +342,71 @@ def diagnose(
         n_positive_units=len(positive),
         crosswalk_edition=crosswalk.edition if crosswalk is not None else "",
     )
+    return positive, diagnostics
+
+
+def _dense_panel(
+    positive: set[Unit], regions: Sequence[str], years: Sequence[int], contract: Contract
+) -> Panel:
+    """Cross regions x years x periods; a cell not in `positive` is an explicit zero."""
+    ppy = contract.periods_per_year
+    units: list[Unit] = []
+    labels: list[int] = []
+    for region in sorted(set(regions)):
+        for year in sorted(set(years)):
+            for period in range(1, ppy + 1):
+                unit = (region, year, period)
+                units.append(unit)
+                labels.append(1 if unit in positive else 0)
+    return Panel(
+        tuple(units),
+        tuple(labels),
+        hazard=contract.hazard,
+        scope=contract.scope_key,
+        period=contract.period,
+    )
+
+
+def panel_and_diagnostics(
+    events: Iterable[StormEvent],
+    regions: Sequence[str],
+    years: Sequence[int],
+    contract: Contract,
+    crosswalk: Crosswalk | None = None,
+) -> tuple[Panel, Diagnostics]:
+    """The labelled panel and the account of how it was built, from one pass.
+
+    This is what `data.build` calls: the panel a model is scored against and
+    the diagnostics `readiness panel` prints come from the same walk over the
+    same events, so they cannot disagree.
+    """
+    positive, diagnostics = _walk_events(events, regions, years, contract, crosswalk)
+    return _dense_panel(positive, regions, years, contract), diagnostics
+
+
+def build_panel(
+    events: Iterable[StormEvent],
+    regions: Sequence[str],
+    years: Sequence[int],
+    contract: Contract,
+    crosswalk: Crosswalk | None = None,
+) -> Panel:
+    """Cross regions x years x periods, then mark cells with a damaging event.
+
+    `events` should already be filtered to the scope's states; hazard filtering
+    happens here so the caller cannot accidentally pass a different event-type
+    set than the contract declares. A contract whose `zone_policy` is `expand`
+    must be given the crosswalk; this refuses to guess.
+    """
+    return panel_and_diagnostics(events, regions, years, contract, crosswalk)[0]
+
+
+def diagnose(
+    events: Iterable[StormEvent],
+    regions: Sequence[str],
+    years: Sequence[int],
+    contract: Contract,
+    crosswalk: Crosswalk | None = None,
+) -> Diagnostics:
+    """Count what `build_panel` keeps and drops, so a thin panel is explained."""
+    return _walk_events(events, regions, years, contract, crosswalk)[1]

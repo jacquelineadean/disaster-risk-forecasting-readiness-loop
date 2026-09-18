@@ -59,7 +59,8 @@ import json
 import os
 import pathlib
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
+from types import MappingProxyType
 from typing import Iterator, Mapping, Sequence
 
 from readiness.config import HAZARDS, RECORD_START_YEAR
@@ -80,6 +81,33 @@ ZONE_POLICIES: tuple[str, ...] = ("drop", "expand")
 #: explicit on the card, but the harness will not fit anything else as a
 #: reference — see `readiness.harness.scoring.climatology_reference`.
 REFERENCE_MODELS: tuple[str, ...] = ("climatology-pooled",)
+
+#: What a contract gets for everything it does not say. This is the one
+#: statement of the documented defaults: `Contract.from_spec` fills a spec's
+#: gaps from it, `new()` reads its keyword defaults from it, and the
+#: `readiness register` parser takes every `default=` and "default N" help
+#: text from it, so the three cannot disagree. Read-only, because a default
+#: that one caller edits at run time is a criterion nobody hashed.
+DEFAULTS: Mapping[str, object] = MappingProxyType(
+    {
+        "version": "1.0.0",
+        "country": "US",
+        "period": "quarter",
+        "property_usd_min": 10_000.0,
+        "count_casualties": True,
+        "zone_policy": "drop",
+        "train": "1996-2015",
+        "validate": "2016-2020",
+        "test": "2021-2025",
+        "test_touch_budget": 1,
+        "reference_model": REFERENCE_MODELS[0],
+        "min_brier_skill_score": 0.0,
+        "reliability_tolerance_pp": 0.05,
+        "reliability_min_bin_count": 30,
+        "min_auc": 0.70,
+        "n_reliability_bins": 10,
+    }
+)
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 STATE_RE = re.compile(r"^[A-Z]{2}$")
@@ -165,7 +193,7 @@ class Contract:
     reliability_min_bin_count: int
     min_auc: float
     n_reliability_bins: int
-    version: str = "1.0.0"
+    version: str = DEFAULTS["version"]
     description: str = ""
 
     LABELS = ("name", "version", "description")
@@ -271,18 +299,18 @@ class Contract:
     @classmethod
     def from_spec(cls, spec: Mapping) -> "Contract":
         """Build a contract from the JSON layout, filling defaults where allowed."""
+        if not isinstance(spec, Mapping):
+            raise ContractError("contract spec must be a JSON object")
         try:
             hazard = str(spec["hazard"])
-            scope = spec.get("scope") or {}
-            damaging = spec.get("damaging") or {}
             splits = spec["splits"]
-            thresholds = spec.get("thresholds") or {}
         except KeyError as exc:
             raise ContractError(
                 f"contract is missing required field {exc.args[0]!r}"
             ) from None
-        except TypeError:
-            raise ContractError("contract spec must be a JSON object") from None
+        scope = _section(spec, "scope")
+        damaging = _section(spec, "damaging")
+        thresholds = _section(spec, "thresholds")
 
         event_types = spec.get("event_types")
         if event_types is None:
@@ -293,32 +321,43 @@ class Contract:
                 )
             event_types = HAZARDS[hazard].event_types
 
+        d = DEFAULTS
         return cls(
             name=str(spec.get("name", "")),
-            version=str(spec.get("version", "1.0.0")),
+            version=str(spec.get("version", d["version"])),
             description=str(spec.get("description", "")),
             hazard=hazard,
-            event_types=tuple(str(t) for t in event_types),
-            country=str(scope.get("country", "US")),
-            states=tuple(str(s).upper() for s in scope.get("states", ())),
-            period=str(spec.get("period", "quarter")),
-            damage_property_usd_min=float(damaging.get("property_usd_min", 10_000.0)),
-            damage_count_casualties=bool(damaging.get("count_casualties", True)),
-            zone_policy=str(spec.get("zone_policy", "drop")),
+            event_types=_cast("event_types", _strings, event_types, "a list"),
+            country=str(scope.get("country", d["country"])),
+            states=_cast(
+                "scope.states", _state_codes, scope.get("states", ()), "a list"
+            ),
+            period=str(spec.get("period", d["period"])),
+            damage_property_usd_min=_cast(
+                "damaging.property_usd_min", float,
+                damaging.get("property_usd_min", d["property_usd_min"]),
+            ),
+            damage_count_casualties=bool(
+                damaging.get("count_casualties", d["count_casualties"])
+            ),
+            zone_policy=str(spec.get("zone_policy", d["zone_policy"])),
             train_years=_years(splits, "train"),
             validate_years=_years(splits, "validate"),
             test_years=_years(splits, "test"),
-            test_touch_budget=int(spec.get("test_touch_budget", 1)),
-            reference_model=str(spec.get("reference_model", REFERENCE_MODELS[0])),
-            min_brier_skill_score=float(thresholds.get("min_brier_skill_score", 0.0)),
-            reliability_tolerance_pp=float(
-                thresholds.get("reliability_tolerance_pp", 0.05)
+            test_touch_budget=_cast(
+                "test_touch_budget", int,
+                spec.get("test_touch_budget", d["test_touch_budget"]),
             ),
-            reliability_min_bin_count=int(
-                thresholds.get("reliability_min_bin_count", 30)
+            reference_model=str(spec.get("reference_model", d["reference_model"])),
+            min_brier_skill_score=_threshold(thresholds, "min_brier_skill_score", float),
+            reliability_tolerance_pp=_threshold(
+                thresholds, "reliability_tolerance_pp", float
             ),
-            min_auc=float(thresholds.get("min_auc", 0.70)),
-            n_reliability_bins=int(thresholds.get("n_reliability_bins", 10)),
+            reliability_min_bin_count=_threshold(
+                thresholds, "reliability_min_bin_count", int
+            ),
+            min_auc=_threshold(thresholds, "min_auc", float),
+            n_reliability_bins=_threshold(thresholds, "n_reliability_bins", int),
         )
 
     @classmethod
@@ -494,6 +533,46 @@ class Contract:
         return "\n".join(lines)
 
 
+def _cast(field: str, caster, value, kind: str | None = None):
+    """Coerce one spec value, naming the field when it cannot be coerced.
+
+    A `float("high")` or `int(None)` deep inside `from_spec` would otherwise
+    surface as a traceback that never says which field of the contract was
+    wrong; the CLI turns a `ContractError` into a one-line refusal instead.
+    """
+    try:
+        return caster(value)
+    except (TypeError, ValueError) as exc:
+        raise ContractError(
+            f"contract field {field!r}: cannot read {value!r} as "
+            f"{kind or caster.__name__} ({exc})"
+        ) from None
+
+
+def _section(spec: Mapping, key: str) -> Mapping:
+    """An optional nested object of the spec, absent meaning empty."""
+    value = spec.get(key) or {}
+    if not isinstance(value, Mapping):
+        raise ContractError(
+            f"contract field {key!r} must be a JSON object, got {value!r}"
+        )
+    return value
+
+
+def _threshold(thresholds: Mapping, key: str, caster):
+    return _cast(f"thresholds.{key}", caster, thresholds.get(key, DEFAULTS[key]))
+
+
+def _strings(values) -> tuple[str, ...]:
+    if isinstance(values, str):
+        raise TypeError("expected a list of strings, not one string")
+    return tuple(str(v) for v in values)
+
+
+def _state_codes(values) -> tuple[str, ...]:
+    return tuple(s.upper() for s in _strings(values))
+
+
 def _years(splits: Mapping, label: str) -> tuple[int, ...]:
     try:
         raw = splits[label]
@@ -504,7 +583,8 @@ def _years(splits: Mapping, label: str) -> tuple[int, ...]:
     if isinstance(raw, str) and YEAR_RANGE_RE.match(raw):
         first, last = (int(x) for x in YEAR_RANGE_RE.match(raw).groups())
     elif isinstance(raw, Sequence) and len(raw) == 2 and not isinstance(raw, str):
-        first, last = int(raw[0]), int(raw[1])
+        first = _cast(f"splits.{label}[0]", int, raw[0])
+        last = _cast(f"splits.{label}[1]", int, raw[1])
     else:
         raise ContractError(
             f"splits.{label} must be [first_year, last_year] or 'YYYY-YYYY', got {raw!r}"
@@ -524,24 +604,30 @@ def new(
     *,
     hazard: str,
     states: Sequence[str] = (),
-    period: str = "quarter",
+    period: str = DEFAULTS["period"],
     event_types: Sequence[str] | None = None,
-    property_usd_min: float = 10_000.0,
-    count_casualties: bool = True,
-    zone_policy: str = "drop",
-    train: str = "1996-2015",
-    validate: str = "2016-2020",
-    test: str = "2021-2025",
+    property_usd_min: float = DEFAULTS["property_usd_min"],
+    count_casualties: bool = DEFAULTS["count_casualties"],
+    zone_policy: str = DEFAULTS["zone_policy"],
+    train: str = DEFAULTS["train"],
+    validate: str = DEFAULTS["validate"],
+    test: str = DEFAULTS["test"],
     description: str = "",
-    version: str = "1.0.0",
+    version: str = DEFAULTS["version"],
     **thresholds,
 ) -> Contract:
+    """A contract from options, the way `readiness register` builds one.
+
+    A threshold passed as None means "the default", so a caller can forward
+    optional values without knowing them; `from_spec` fills the gaps from
+    `DEFAULTS`.
+    """
     spec: dict = {
         "name": name,
         "version": version,
         "description": description,
         "hazard": hazard,
-        "scope": {"country": "US", "states": list(states)},
+        "scope": {"country": DEFAULTS["country"], "states": list(states)},
         "period": period,
         "damaging": {
             "property_usd_min": property_usd_min,

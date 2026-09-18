@@ -16,19 +16,31 @@ step-by-step tour with screenshots and a recording of a real run, see
 [website](#the-website), which walks through the design and runs the real
 code in your browser.
 
-**Status: Phase 0 complete, for any hazard.** The eval plane is built and its
-exit criteria are met on real NOAA data. The whole loop is *contract-driven*:
-the hazard, the geography, the forecast period, the damage definition, the
-locked splits and the acceptance thresholds are all declared in a registered
-contract, and the same harness runs against any of them. There is no
-forecasting model yet, on purpose — see
-[Why there is no model yet](#why-there-is-no-model-yet).
+**Status: Phase 0 complete, Phase 1 built; the Phase 1 exit needs the
+real-data run.** The eval plane is built and its Phase 0 exit criteria are
+met on real NOAA data. The whole loop is *contract-driven*: the hazard, the
+geography, the forecast period, the damage definition, the locked splits and
+the acceptance thresholds are all declared in a registered contract, and the
+same harness runs against any of them. Phase 1 adds the feature channel with
+its temporal firewall, four candidate models, the one atomic test touch
+(`readiness promote`) and the backtest report. Its exit criterion — BSS > 0
+on the untouched test years with reliability within ±5 points, published
+with the ledger — is checked by this repository's own CI with the pinned
+data, through
+[`.github/workflows/real-data.yml`](.github/workflows/real-data.yml), and it
+is met only when a test card **passes and is published**. Until that run, no
+test touch has been spent. Why the harness came before any model:
+[Harness before model](#harness-before-model).
 
 ---
 
 ## Quickstart
 
 No dependencies. Python 3.10+.
+
+```bash
+make install   # pip install -e ., so the `readiness` entry point exists
+```
 
 ```bash
 readiness register flood-xx --hazard inland_flood --state XX   # pre-register a contract
@@ -47,7 +59,7 @@ make verify CONTRACT=flood-xx     # check the Phase 0 exit criteria
 ```
 
 ```bash
-make test                         # 260 tests, no network needed
+make test                         # no network needed
 ```
 
 Replace `XX` with a two-letter US state, or omit `--state` for the whole
@@ -55,6 +67,18 @@ country, and `inland_flood` with any hazard from `readiness hazards`. Three
 example contracts ship registered, with their ledgers and blessed fingerprints
 — see [Examples](#examples) — so `make loop CONTRACT=tornado-ok` works from a
 clean clone once the data is pulled.
+
+`make loop` appends to the contract's **committed** ledger in `experiments/`.
+To try a contract without touching those files — for a scratch run, a fourth
+contract you are not ready to commit, or CI — point the whole experiments tree
+somewhere else first:
+
+```bash
+READINESS_EXPERIMENTS_DIR=/tmp/readiness-scratch make loop CONTRACT=tornado-ok
+```
+
+Every command that reads or writes `experiments/<contract>/` (`loop`,
+`promote`, `backtest`, `ledger`, `verify`, `dashboard`) honours it.
 
 ---
 
@@ -79,10 +103,24 @@ contract's own ledger. The queue is the same for every contract:
 |---|---|---|
 | `climatology-pooled` | the training base rate, issued everywhere | the contract's reference; scored against itself it must show exactly zero skill and AUC 0.5, or the yardstick is bent |
 | `climatology-seasonal` | per-region, per-period frequency, shrunk toward the scope-wide seasonal rate | the first candidate with any structure — it should beat the reference |
-| `persistence-last-year` | a sharp, fixed-level forecast | expected to *fail* on reliability, so the contract is seen rejecting something |
+| `persistence-last-year` | persists the last *training* year's outcome and issues it for every holdout year — no holdout label ever reaches a model, so this is a sharp, fixed-level forecast, constant across the holdout years | expected to *fail* on reliability, so the contract is seen rejecting something |
 | `leaky-oracle` | reads the outcomes it is scored on | must be **REJECTED** by the leakage canary; this is the Phase 0 exit criterion |
 
-## Why there is no model yet
+`readiness loop -c <name> --queue phase1 --features era5,terrain` runs the
+baselines and then the Phase 1 candidates (`make phase1 CONTRACT=<name>`
+chains it with the snapshot, the promotion, the report and the check). Each is a registered
+model whose features the harness builds and audits before the fit
+([Features](#features)); a candidate whose feature sets need sources that
+were not loaded is skipped with a progress line, not a card:
+
+| model | what it is |
+|---|---|
+| `logistic` | L2 logistic regression on the harness-built features plus a leave-one-year-out seasonal-rate logit from the training labels; full-batch gradient descent, fixed iterations, no RNG |
+| `logistic+iso` | the same, then an isotonic map fitted on the last three training years only — the calibrator never sees a holdout year |
+| `gbm` | histogram gradient boosting with depth-limited stumps, quantile cuts on training rows, no subsampling; deterministic |
+| `gbm+iso` | `gbm` with the same isotonic calibrator |
+
+## Harness before model
 
 > Phase 0 — Harness before model. Build the eval plane first, with no
 > forecasting at all.
@@ -117,7 +155,7 @@ is seen running across hazards, scopes, periods and zone policies:
 
 | contract | hazard | scope | period | zone events | panel |
 |---|---|---|---|---|---|
-| `inland-flood-la` | inland flood | one state (64 parishes) | quarter | dropped (county-coded hazard) | 7,680 units, base rate 8.0% |
+| `inland-flood-la` | inland flood | one state (64 parishes) | quarter | dropped (inland_flood is mixed-coded; Flash Flood is county-coded, Flood mostly so) | 7,680 units, base rate 8.0% |
 | `tornado-ok` | tornado | one state (77 counties) | quarter | dropped (county-coded hazard) | 9,240 units, base rate 6.8% |
 | `tropical-cyclone-gulf` | tropical cyclone | five states (534 counties) | month | expanded via the NWS crosswalk | 192,240 units, base rate 0.66% |
 
@@ -150,16 +188,27 @@ Read the tables as assertions about the harness, not as forecasts:
 1. **The reference scores exactly 0.0000 / 0.5000 on every contract**, and
    still fails every contract, because being climatology is not beating it.
 2. **The same seasonal model lands differently on each hazard.** On the
-   flood contract it has slight skill and misses the AUC floor; on tornadoes
-   it discriminates well (AUC 0.82) and fails only on calibration, a 12-point
-   miss in one bin; on monthly tropical cyclones it *passes* — the season is
-   so sharp that knowing the region and the month clears every clause. Its
-   skill score there is +0.009, because at a 0.66% base rate the pooled
-   reference is already nearly right nearly everywhere. A passing contract
-   is permission to spend one test touch, not a claim of a forecast.
-3. **The persistence baseline is rejected on every contract**, for a different
-   clause each time. On the tornado contract it is the only model that gains
-   skill from last year's events; on tropical cyclones it has none.
+   flood contract it has slight skill (+0.0169) but fails both reliability
+   (worst populated bin [0.2, 0.3), n=55, deviates 10.3 points against a
+   5-point tolerance) and the AUC floor (0.5957); on tornadoes it discriminates
+   well (AUC 0.82) and fails only on calibration — its worst populated bin
+   ([0.2, 0.3), n=90) forecasts 0.245 against an observed 0.322, a 7.7-point
+   miss where the contract allows 5; on monthly tropical cyclones it *passes*
+   — the season is so sharp that knowing the region and the month clears
+   every clause. Its skill score there is +0.009, because at a 0.66% base
+   rate the pooled reference is already nearly right nearly everywhere. A
+   passing contract is permission to spend one test touch, not a claim of a
+   forecast.
+3. **The persistence baseline is FAILED, not rejected, on every contract** —
+   only the leakage canary rejects; the contract fails things. It issues the
+   last training year's outcome as a fixed level for every holdout year, so
+   it never discriminates well enough to clear the AUC floor anywhere (0.50
+   on flood and tropical cyclones, 0.54 on tornadoes). On the flood contract
+   that fixed level also has negative skill (BSS -0.0526) and misses
+   reliability; on tropical cyclones it has negative skill too (-0.0588) but
+   passes reliability; on tornadoes it is the one contract where the fixed
+   level carries a little real skill (BSS +0.0114) and clears reliability —
+   AUC alone still fails it.
 4. **The leaky oracle is rejected everywhere**, tripping all four canary
    checks. Running the canary across base rates from 8% to 0.66% is what
    exposed — and fixed — a check that had been calibrated to one hazard:
@@ -235,9 +284,11 @@ Two invariants hold everywhere, and most of the design follows from them:
 
 **No model ever receives a holdout label.** `splits.TrainingView` is the only
 channel a model gets data through, and it raises if handed a panel containing a
-validate or test year. `predict()` receives bare units. Labels are fetched in
-`scoring.score()` *after* `predict()` has returned — one function, readable in
-one sitting, which is the point.
+validate or test year. `predict()` receives units and — for a Phase 1 model —
+the harness-built and audited feature rows for exactly those units; never a
+label. Labels are fetched in `scoring._fit_predict()` *after* `predict()` has
+returned — one function, readable in one sitting, which is the point;
+`score()`, `predictions_for()` and `screen()` all go through it.
 
 **Nothing in the harness calls a language model.** Verification has to be
 rules-based to be worth anything. If an LLM wants these numbers it reads them
@@ -256,6 +307,7 @@ hazard          inland_flood  ['Flood', 'Flash Flood']
 geography       US, XX
 forecast unit   region x quarter
 damaging event  property >= $10,000 or any casualty
+zone events     dropped (do not join to counties)
 train           1996-2015  (20y)
 validate        2016-2020  (5y)
 test            2021-2025  (5y, 1 touch)
@@ -271,8 +323,14 @@ everything else is. Every contract gets its own ledger, its own test-touch
 budget and its own blessed fingerprints under its name.
 
 The test-touch budget is persisted to disk, not held in memory — a budget that
-resets when you restart the process is not a budget. Scoring against `test`
-additionally requires an explicit `--spend-test-touch` flag.
+resets when you restart the process is not a budget. The only command that
+spends it is `readiness promote MODEL -c NAME --spend-test-touch`, which
+refuses without a prior validate PASS for the same model, version and
+arguments, refuses if any test card already exists under the contract
+digest, and otherwise charges the budget and writes the test card in one
+step. `readiness score --split test` is refused outright and names
+`promote`: a test touch without a ledger card would be a spent budget with
+no record.
 
 ### The hazard catalogue
 
@@ -286,10 +344,16 @@ listing its event types.
 One caveat the catalogue makes explicit: Storm Events codes convective hazards
 against counties and most broad-scale hazards — heat, tropical cyclones,
 winter storms, wildfire — against NWS forecast zones. Zone-coded rows do not
-join to a county universe, and the label builder drops them. `readiness panel`
-reports exactly how many events went where, and warns when a hazard is mostly
-zone-coded, so a thin panel is explained rather than mistaken for a rare
-hazard. Joining zones to counties is the next step on the data plane.
+join to a county universe on their own, and by default (`zone_policy: drop`)
+the label builder discards them. The join exists:
+[`readiness/connectors/nws_zones.py`](readiness/connectors/nws_zones.py) pins
+the NWS zone-county correlation file, and a contract registered with
+`--zone-policy expand` has the label builder map each zone-coded event to
+every county in its NWS zone instead of dropping it — `tropical-cyclone-gulf`
+is registered this way. `readiness panel` reports exactly how many events went
+where under either policy — dropped, expanded, unmapped — and warns when a
+hazard is mostly zone-coded and still set to `drop`, so a thin panel is
+explained rather than mistaken for a rare hazard.
 
 ### The ledger
 
@@ -314,7 +378,33 @@ invariants above. The canary catches the cases where that structure is breached
 by an accidental join carrying the label column, a feature computed over the
 full panel, or an agent that read a file it should not have. A sufficiently
 subtle leak that produces merely-excellent rather than impossible scores will
-pass it. Documented rather than papered over.
+pass it. Documented rather than papered over. Phase 1 adds a fifth check:
+the feature digest a model declares must equal the digest of the frame the
+harness handed it.
+
+### Features
+
+A Phase 1 model does not construct features; it names feature *sets* from
+the engine's catalogue, and the harness builds every row under its own
+temporal firewall ([`readiness/harness/features.py`](readiness/harness/features.py)).
+Sources hand over raw monthly series and static tables and never decide a
+cutoff; the harness computes each unit's cutoff as the period's first month
+minus the spec's lag (at least one month, so a July forecast is built from
+data through May); a closed vocabulary of transforms is the only code that
+touches a series; and before any fit, an audit rebuilds every value with the
+months at or after the cutoff poisoned and requires the frame to be
+bit-identical.
+
+Admission is where the firewall shows on real data. A source built from the
+ground truth is refused outright. A static layer declares the last year it
+encodes and is refused for any contract whose validate split starts at or
+before it — so **FEMA's National Risk Index (v1.20, through 2023) is refused
+under every current contract**, and `readiness features --features nri`
+prints that refusal as a finding, not an error. A layer that claims to be
+timeless must be on the harness's short allow-list of physical geometry
+(county centroids, elevation). The whole of it, with the transform
+vocabulary and what the harness proves versus trusts, is in
+[docs/features.md](docs/features.md).
 
 ---
 
@@ -328,6 +418,7 @@ clone reproduces the exact data version without carrying the bytes.
 |---|---|---|
 | ground truth | NOAA Storm Events, 1996– | the validation target, every hazard |
 | region universe | Census national county file | the panel denominator, any state or all |
+| zone-county crosswalk | NWS zone-county correlation file | joins zone-coded events (heat, tropical cyclones, winter storms, wildfire, …) to counties, pinned only for contracts registered with `--zone-policy expand` |
 
 Each Storm Events year file is national, so one download serves every state
 and every hazard: it is checksummed, split into one compact extract per state
@@ -356,11 +447,14 @@ readiness hazards           list the hazard catalogue
 readiness models            list proposable models
 readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
 readiness panel             build the labelled panel, print coverage   [-c NAME]
-readiness score MODEL       fit and score one model  [-c NAME] [--split, --spend-test-touch]
-readiness loop              run the full experimental loop  [-c NAME] [--backend local|claude]
+readiness features          load the feature sources, print admission verdicts and the audit  [-c NAME] [--features era5,terrain,nri,climada]
+readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features ...] [--param k=v]*
+readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1] [--features ...] [--promote] [--backend local|claude]
+readiness promote MODEL     the one atomic test touch: spend the budget and write the test card  [-c NAME] --spend-test-touch
+readiness backtest          write experiments/<name>/backtest.html from committed files only  [-c NAME] [-o PATH]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
-readiness ledger            show and verify the experiment ledger  [-c NAME]
-readiness verify            check the Phase 0 exit criteria  [-c NAME] [--bless]
+readiness ledger            show and verify the experiment ledger  [-c NAME] [--show] [--id ID]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1] [--replay] [--bless]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]
@@ -369,6 +463,9 @@ readiness mcp               run the read-only MCP data server on stdio  [-c NAME
 `-c/--contract` takes a registered name or a path to a contract JSON. If it is
 omitted the CLI uses `$READINESS_CONTRACT`, then the sole registered contract
 if there is exactly one; with several registered it refuses and lists them.
+
+`readiness ledger --id exp-0002` prints that one card on its own; `--id`
+implies `--show`, so it is sufficient by itself.
 
 ### The agent backends
 
@@ -381,6 +478,14 @@ on a language model cannot have a bit-for-bit criterion.
 the subagents from report §4 (a hazard analyst for the contract's hazard, a
 calibration critic, a data steward). Needs `pip install 'readiness-loop[agent]'`
 and an API key. The harness is unchanged; no subagent is granted a write tool.
+Because Bash is a write channel whatever the prompt says, `readiness.agent.guard`
+hashes the harness, the contract machinery, the data plane (`readiness/data.py`,
+`readiness/connectors/`, the manifest and the pinned extracts), the guard
+itself and `contracts/` before the run and again after it, and stamps every
+card the run writes with the digest of that code as it stood at scoring time.
+Any byte that moved, even one restored before the run ended, fails the run
+with the list of paths, and the cards it wrote are not to be trusted or
+committed.
 
 ### MCP
 
@@ -402,24 +507,32 @@ There is no tool that returns a holdout outcome, and a test asserts it.
 readiness/
   contracts.py       the contract schema, validation, digest and registry. Do not edit while iterating.
   config.py          harness-wide policy: the hazard catalogue, record start, canary ceilings
-  connectors/        data plane: base (pinning, HTTP), census, storm_events, mcp_server
-  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
-  engine/            proposable models: climatologies, persistence, the canary target
-  agent/             orchestrator + subagent definitions
+  data.py            builds a contract's dataset: snapshot, panel, provenance; input_keys/pinned
+  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only)
+  backtest.py        the Phase 1 report, rendered from committed files only
+  connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server,
+                     gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources)
+  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger,
+                     features.py (the feature channel and its temporal firewall)
+  engine/            proposable models: climatologies, persistence, the canary target,
+                     features.py (the catalogue), history.py, linear.py, boosting.py, calibrate.py
+  agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
 contracts/           registered contracts, one JSON file each; three examples ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
-docs/                how-it-works.md (the walkthrough), contracts.md (the reference), media/
-skills/              agent runbooks: verification protocol, experiment-card format
-tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media)
+docs/                how-it-works.md (the walkthrough), contracts.md (the reference), features.md (the
+                     firewall), backtest.md (the report), plan.md and plan-design-annex.md, media/
+skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
+tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media),
+                     climada/ (run_event_set.py, the GPL tool that writes a pinned layer, never imported)
 site/                the overview website: pages, and the browser sandbox that runs the package
 plans/               scenario library — the Phase 3 seed
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
-tests/               260 tests, no network required
+tests/               unittest suite, no network required
 ```
 
 ---
@@ -430,9 +543,15 @@ Phases 1–4 are specified in [report §6](report/index.html#roadmap). Each has 
 falsifiable exit criterion, and the architecture is meant to absorb them without
 redesign:
 
-- **Phase 1 — the loop, on one hazard.** Real candidate models, ERA5 features,
-  CLIMADA integration. *Exit: BSS > 0 on untouched test years with reliability
-  within ±5 pts, published with the ledger.*
+- **Phase 1 — the loop, on one hazard.** *Built:* the harness-owned feature
+  channel and its firewall, the ERA5, Gazetteer, NRI and pinned-CLIMADA
+  connectors, the `logistic`/`gbm` candidates with an isotonic calibrator,
+  `loop --queue phase1`, `promote` as the one atomic test touch, the
+  backtest report and `verify --phase 1`. *Remaining:* the real-data run
+  (`make phase1 CONTRACT=<name>` through `real-data.yml`) that spends the
+  touch — whether any candidate clears the contract on Louisiana or Oklahoma
+  2021–2025 is not knowable offline. *Exit: BSS > 0 on untouched test years
+  with reliability within ±5 pts, published with the ledger.*
 - **Phase 2 — multi-hazard, national, with exposure.** One registered contract
   per peril against the same harness; join to USA Structures so outputs become
   human.

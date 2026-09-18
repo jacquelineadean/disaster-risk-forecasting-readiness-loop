@@ -1,6 +1,16 @@
-"""The command line: contract selection and registration, without any network."""
+"""The command line, without any network.
+
+Contract selection and registration run against a temporary registry. The
+data commands (`panel`, `score`, `canary`, `loop`, `verify`) run against a
+synthetic `Dataset` injected in place of `data.build`, with the experiments
+tree and the blessed-fingerprint directory pointed at a temporary directory so
+the committed ledgers and `harness_expected/` are never touched. The Phase 1
+commands (`features`, `loop --queue phase1`, `promote`, `backtest`,
+`verify --phase 1`) run against a dataset with synthetic feature sources.
+"""
 
 import contextlib
+import functools
 import io
 import json
 import os
@@ -9,7 +19,45 @@ import tempfile
 import unittest
 from unittest import mock
 
-from readiness import cli, contracts
+from readiness import cli, contracts, data as data_mod, verify
+from readiness.agent import orchestrator
+from readiness.connectors.base import Manifest
+from readiness.connectors.census import County
+from readiness.harness.labels import diagnose
+from tests.fixtures import make_panel
+from tests.test_features import FakeStatic
+from tests.test_orchestrator import quick, signal_dataset
+
+
+def synthetic_dataset(contract, tmp: pathlib.Path) -> data_mod.Dataset:
+    """A dataset with a region universe, as the CLI's `panel` output needs one."""
+    panel = make_panel(contract=contract, n_regions=10)
+    state = contract.states[0] if contract.states else "ZZ"
+    return data_mod.Dataset(
+        contract=contract,
+        panel=panel,
+        regions=tuple(County(r, state, f"county {r}") for r in panel.regions),
+        data_version="synthetic",
+        manifest=Manifest(path=tmp / "manifest.json"),
+        diagnostics=diagnose([], panel.regions, panel.years, contract),
+    )
+
+
+#: `register` option destination -> the `contracts.DEFAULTS` entry it must equal.
+REGISTER_DEFAULTS = {
+    "period": "period",
+    "damage_usd": "property_usd_min",
+    "zone_policy": "zone_policy",
+    "train": "train",
+    "validate": "validate",
+    "test": "test",
+    "min_bss": "min_brier_skill_score",
+    "tolerance": "reliability_tolerance_pp",
+    "min_bin_count": "reliability_min_bin_count",
+    "min_auc": "min_auc",
+    "bins": "n_reliability_bins",
+    "version": "version",
+}
 
 
 class CliCase(unittest.TestCase):
@@ -48,6 +96,24 @@ class TestParser(unittest.TestCase):
         parser = cli.build_parser()
         with self.assertRaises(SystemExit):
             parser.parse_args(["register", "x"])
+
+    def test_every_register_default_is_the_contracts_default(self):
+        args = cli.build_parser().parse_args(["register", "x", "--hazard", "tornado"])
+        for dest, key in REGISTER_DEFAULTS.items():
+            with self.subTest(option=dest):
+                self.assertEqual(getattr(args, dest), contracts.DEFAULTS[key])
+        self.assertEqual((not args.no_casualties), contracts.DEFAULTS["count_casualties"])
+
+    def test_register_help_quotes_the_contracts_defaults(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["register", "--help"])
+        text = out.getvalue()
+        d = contracts.DEFAULTS
+        for needle in (d["train"], d["validate"], d["test"], str(d["min_auc"]),
+                       str(d["reliability_tolerance_pp"]),
+                       str(d["reliability_min_bin_count"]), str(d["n_reliability_bins"])):
+            self.assertIn(needle, text)
 
 
 class TestRegistration(CliCase):
@@ -99,6 +165,16 @@ class TestRegistration(CliCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["hazard"], "hail")
         self.assertFalse((self.dir / "x.json").exists())
+
+    def test_bare_register_yields_exactly_the_default_contract(self):
+        code, out = self.run_cli(
+            "register", "x", "--hazard", "tornado", "--state", "ZZ", "--dry-run"
+        )
+        self.assertEqual(code, 0)
+        want = contracts.new("x", hazard="tornado", states=["ZZ"])
+        self.assertEqual(json.loads(out), want.to_spec())
+        self.assertEqual(contracts.Contract.from_spec(json.loads(out)).digest(),
+                         want.digest())
 
     def test_custom_hazard_via_event_types(self):
         code, _ = self.run_cli(
@@ -165,6 +241,520 @@ class TestSelection(CliCase):
         code, out = self.run_cli("models")
         self.assertEqual(code, 0)
         self.assertIn("climatology-pooled", out)
+
+
+class DataCase(CliCase):
+    """A registered contract plus a synthetic dataset behind `data.build`."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_cli("register", "flood-zz", "--hazard", "inland_flood", "--state", "zz")
+        self.contract = contracts.load("flood-zz")
+        self.dataset = synthetic_dataset(self.contract, self.dir)
+        self.experiments = self.dir / "experiments"
+        self.expected = self.dir / "expected"
+        self.patches = [
+            mock.patch.dict(os.environ, {data_mod.EXPERIMENTS_DIR_ENV: str(self.experiments)}),
+            mock.patch.object(data_mod, "build", lambda _c, **_kw: self.dataset),
+            mock.patch.object(
+                data_mod, "paths",
+                functools.partial(data_mod.paths, expected_dir=self.expected),
+            ),
+        ]
+        for p in self.patches:
+            p.start()
+        self.where = data_mod.paths(self.contract)
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        super().tearDown()
+
+
+class TestVerify(DataCase):
+    def test_bless_then_verify_meets_every_criterion(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--bless", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertTrue(self.where.expected.exists())
+        self.assertEqual(self.where.expected, self.expected / "flood-zz.json")
+        self.assertIn("[ok]   blessed baseline fingerprints", out)
+
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        lines = [line for line in out.splitlines() if line.startswith("[")]
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(all(line.startswith("[ok]   ") for line in lines), lines)
+        self.assertIn(f"[ok]   contract flood-zz validates (sha256:{self.contract.digest()})", out)
+        self.assertIn("[ok]   climatology baselines reproduce bit-for-bit", out)
+        self.assertIn("[ok]   leakage canary rejected leaky-oracle (tripped: ", out)
+        self.assertIn("[ok]   ledger chain intact: 0 card(s)", out)
+        self.assertTrue(out.rstrip().endswith("Phase 0 exit criteria met for flood-zz."))
+
+    def test_nothing_blessed_is_a_failure_with_the_remedy(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] reproducibility: nothing to compare against", out)
+        self.assertIn("readiness verify -c flood-zz --bless", out)
+        self.assertIn("Phase 0 NOT met for flood-zz", out)
+        self.assertNotIn("Phase 0 exit criteria met", out)
+
+    def test_a_disagreeing_blessed_file_fails_with_the_diff(self):
+        self.run_cli("verify", "-c", "flood-zz", "--bless", "--quiet")
+        blessed = json.loads(self.where.expected.read_text())
+        blessed["climatology-seasonal"]["auc"] = 0.999
+        self.where.expected.write_text(json.dumps(blessed))
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] reproducibility: 1 field group(s) differ", out)
+        self.assertIn("         climatology-seasonal", out)
+        self.assertIn("           expected ", out)
+        self.assertIn("           observed ", out)
+        self.assertIn("[ok]   leakage canary rejected leaky-oracle", out)
+        self.assertIn("Phase 0 NOT met for flood-zz — 1 failure(s):", out)
+
+    def test_verify_phase_defaults_to_zero(self):
+        args = cli.build_parser().parse_args(["verify", "-c", "x"])
+        self.assertEqual(args.phase, 0)
+        self.assertFalse(args.replay)
+        _code, out = self.run_cli("verify", "-c", "flood-zz", "--quiet")
+        self.assertIn("Phase 0 exit criteria  (flood-zz)", out)
+        self.assertNotIn("Phase 1", out)
+
+    def test_phase_one_is_ledger_only_and_fails_on_an_empty_ledger(self):
+        with mock.patch.object(data_mod, "build", side_effect=AssertionError("built")):
+            code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 1 exit criteria  (flood-zz)", out)
+        self.assertIn("[ok]   ledger chain intact: 0 card(s)", out)
+        self.assertIn("[FAIL] test card: none under contract", out)
+        self.assertIn("Phase 1 NOT met for flood-zz — 1 failure(s):", out)
+
+
+class TestScore(DataCase):
+    def test_validate_split_scores_and_judges(self):
+        code, out = self.run_cli("score", "climatology-seasonal", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("model            climatology-seasonal@", out)
+        self.assertIn("split            validate", out)
+        self.assertIn("contract flood-zz 1.0.0", out)
+        self.assertIn("canary", out.lower())
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_score_on_test_refuses_and_points_to_promote(self):
+        code, out = self.run_cli("score", "climatology-pooled", "-c", "flood-zz",
+                                 "--split", "test", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("refusing to score against the test split", out)
+        self.assertIn(
+            "readiness promote climatology-pooled -c flood-zz --spend-test-touch", out
+        )
+        self.assertNotIn("split            test", out)
+        self.assertFalse(self.where.touch_budget.exists())
+        self.assertFalse(self.where.ledger.exists())
+
+    def test_spend_test_touch_is_withdrawn_from_score_and_loop(self):
+        withdrawn = (
+            ("score", "climatology-pooled", "--split", "test", "--spend-test-touch"),
+            ("loop", "--split", "test", "--spend-test-touch"),
+            ("loop", "--split", "test"),
+        )
+        for argv in withdrawn:
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit):
+                        cli.build_parser().parse_args(list(argv))
+
+    def test_params_are_typed_by_the_registry(self):
+        code, out = self.run_cli("score", "climatology-seasonal", "-c", "flood-zz",
+                                 "--param", "shrinkage=2.5", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn('arguments        {"shrinkage": 2.5}', out)
+
+    def test_unknown_param_is_refused_naming_the_known_ones(self):
+        code, out = self.run_cli("score", "climatology-seasonal", "-c", "flood-zz",
+                                 "--param", "kappa=2", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("no parameter 'kappa'", out)
+        self.assertIn("known: shrinkage", out)
+        code, out = self.run_cli("score", "climatology-seasonal", "-c", "flood-zz",
+                                 "--param", "shrinkage=lots", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("'lots' is not a float", out)
+        code, out = self.run_cli("score", "no-such-model", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown model 'no-such-model'", out)
+
+    def test_parse_params_handles_every_declared_type(self):
+        kwargs = cli.parse_params("gbm", [
+            "feature_sets=era5-antecedent,terrain", "history=false", "rounds=12",
+            "lr=0.5",
+        ])
+        self.assertEqual(kwargs, {"feature_sets": ["era5-antecedent", "terrain"],
+                                  "history": False, "rounds": 12, "lr": 0.5})
+        self.assertEqual(cli.parse_params("gbm", ["feature_sets="]), {"feature_sets": []})
+        with self.assertRaises(cli.UsageError):
+            cli.parse_params("gbm", ["history=maybe"])
+        with self.assertRaises(cli.UsageError):
+            cli.parse_params("gbm", ["rounds"])
+
+    def test_a_feature_model_without_sources_is_refused_cleanly(self):
+        code, out = self.run_cli("score", "logistic", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("no feature sources were loaded", out)
+
+    def test_unknown_feature_connector_is_refused(self):
+        code, out = self.run_cli("score", "logistic", "-c", "flood-zz",
+                                 "--features", "era5,gut-feeling", "--quiet")
+        self.assertEqual(code, 2)
+        self.assertIn("unknown feature connector(s) ['gut-feeling']", out)
+
+    def test_a_rejected_model_exits_one(self):
+        code, out = self.run_cli("score", "leaky-oracle", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 1)
+        self.assertIn("REJECTED", out)
+
+
+class TestCanaryPanelAndLoop(DataCase):
+    def test_canary_passes_when_the_harness_rejects(self):
+        code, out = self.run_cli("canary", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("leakage canary  (target: leaky-oracle, split=validate", out)
+        self.assertIn("contract, if it were honoured:", out)
+        self.assertTrue(out.rstrip().endswith("PASS: the harness rejected a leaked model."))
+
+    def test_panel_reports_regions_and_coverage(self):
+        code, out = self.run_cli("panel", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("region-quarter panel  (flood-zz)", out)
+        self.assertIn("regions: 10  (", out)
+        self.assertIn("split coverage", out)
+        self.assertIn("event coverage", out)
+
+    def test_loop_writes_the_ledger_and_reports_it(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz")
+        self.assertEqual(code, 0, out)
+        self.assertIn("gather context", out)
+        self.assertIn("take action", out)
+        self.assertIn("ledger: ", out)
+        self.assertTrue(self.where.ledger.exists())
+
+    def test_loop_quiet_silences_progress_but_prints_the_result(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("gather context", out)
+        self.assertNotIn("take action", out)
+        self.assertIn("leaky-oracle", out)
+        self.assertIn("ledger: ", out)
+        self.assertTrue(self.where.ledger.exists())
+
+
+class FeatureCase(DataCase):
+    """The synthetic dataset carries feature sources with planted signal."""
+
+    def setUp(self):
+        super().setUp()
+        self.dataset = signal_dataset(self.contract, self.dir)
+        # Fewer steps than the registry defaults; the wiring is what is under test.
+        phase1 = orchestrator.BASELINE_QUEUE + tuple(quick(orchestrator.PHASE1_QUEUE))
+        fast = {"phase1": phase1}
+        self.queue_patch = mock.patch.dict(orchestrator.QUEUES, fast)
+        self.queue_patch.start()
+
+    def tearDown(self):
+        self.queue_patch.stop()
+        super().tearDown()
+
+    def promote_pass(self, *extra):
+        """`promote` for the candidate the quick phase1 queue passes first."""
+        return self.run_cli(
+            "promote", "logistic+iso", "-c", "flood-zz", "--quiet",
+            "--param", "feature_sets=era5-antecedent,terrain", "--param", "iters=60",
+            *extra,
+        )
+
+
+class TestFeaturesCommand(FeatureCase):
+    def test_prints_admission_verdicts_columns_and_the_audit(self):
+        code, out = self.run_cli("features", "-c", "flood-zz",
+                                 "--features", "era5,terrain", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("feature sources  (flood-zz: era5, terrain)", out)
+        self.assertIn("[admitted] era5        series", out)
+        self.assertIn("[admitted] gazetteer   static, timeless geometry", out)
+        self.assertIn("feature version sha256:synthetic-features", out)
+        self.assertIn("  era5-antecedent", out)
+        self.assertIn("  terrain", out)
+        self.assertNotIn("  nri\n", out)
+        self.assertIn(
+            "precip_3m          era5.precip_mm  trailing_sum over 3 month(s), lag 1", out
+        )
+        self.assertIn("audit over", out)
+        self.assertIn("feature audit -> clean", out)
+        self.assertFalse(self.where.ledger.exists())
+
+    def test_a_refused_layer_is_a_finding_not_an_error(self):
+        self.dataset.sources["nri"] = FakeStatic("nri", derived_through=2023)
+        code, out = self.run_cli("features", "-c", "flood-zz",
+                                 "--features", "era5,terrain,nri", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[REFUSED] nri", out)
+        self.assertIn("encodes data through 2023", out)
+        self.assertIn("  nri\n", out)
+        self.assertIn("feature audit -> REFUSED", out)
+        self.assertIn("[REFUSED] admission", out)
+
+    def test_build_receives_the_requested_connectors(self):
+        seen = {}
+
+        def capture(_c, **kw):
+            seen.update(kw)
+            return self.dataset
+
+        with mock.patch.object(data_mod, "build", capture):
+            code, _out = self.run_cli("features", "-c", "flood-zz",
+                                      "--features", "terrain", "--quiet")
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["features"], ["terrain"])
+        with mock.patch.object(data_mod, "build", capture):
+            self.run_cli("features", "-c", "flood-zz", "--quiet")
+        # Nothing is pinned in this checkout's snapshot tree for ZZ.
+        self.assertEqual(seen["features"], [])
+
+
+class TestPhase1Loop(FeatureCase):
+    def test_queue_phase1_with_promote_writes_the_test_card(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--features", "era5,terrain")
+        self.assertEqual(code, 0, out)
+        self.assertIn("queue=phase1", out)
+        self.assertIn("take action  [logistic[history-only]]", out)
+        self.assertIn("promote      [logistic+iso[era5-antecedent+terrain]]", out)
+        self.assertIn("test touch 1/1 spent", out)
+        self.assertIn("promoted to test  logistic+iso@1.0.0 -> PASS", out)
+        self.assertNotIn("skip ", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+        _code, ledger = self.run_cli("ledger", "-c", "flood-zz")
+        self.assertIn("test", ledger)
+        self.assertIn("chain intact", ledger)
+
+    def test_candidates_are_skipped_when_the_sources_are_missing(self):
+        self.dataset.sources.pop("elevation")
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("skipped (sources)", out)
+        self.assertIn("gbm+iso[era5-antecedent+terrain]", out)
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_a_refused_promotion_prints_the_loop_and_exits_two(self):
+        # The second run's queue is fine; it is the promotion that cannot
+        # happen, because the first run already spent the ledger's one touch.
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 2, out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("ran ", out)  # the loop's own result, before the reason
+        self.assertIn("ledger: ", out)
+        self.assertIn("already holds a test card", out)
+        self.assertIn("A new contract name, not a second touch", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+
+    def test_baseline_queue_is_the_default_and_promotes_nothing(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--promote", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("promoted to test", out)
+        self.assertFalse(self.where.touch_budget.exists())
+
+
+class TestPromoteCommand(FeatureCase):
+    def test_refuses_without_spend_test_touch(self):
+        code, out = self.promote_pass()
+        self.assertEqual(code, 2)
+        self.assertIn("refusing to promote logistic+iso without --spend-test-touch", out)
+        self.assertFalse(self.where.touch_budget.exists())
+        self.assertFalse(self.where.ledger.exists())
+
+    def test_refuses_without_a_validate_pass(self):
+        code, out = self.promote_pass("--spend-test-touch")
+        self.assertEqual(code, 2)
+        self.assertIn("no validate card", out)
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_promotes_once_then_refuses_a_second_test_card(self):
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
+        code, out = self.promote_pass("--spend-test-touch")
+        self.assertEqual(code, 0, out)
+        self.assertIn("promote  logistic+iso  to test  (flood-zz)", out)
+        self.assertIn("split            test", out)
+        self.assertIn("readiness backtest -c flood-zz", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+        code, out = self.promote_pass("--spend-test-touch")
+        self.assertEqual(code, 2)
+        self.assertIn("already holds a test card", out)
+        code, out = self.run_cli("promote", "gbm", "-c", "flood-zz", "--quiet",
+                                 "--spend-test-touch", "--param", "rounds=40",
+                                 "--param", "feature_sets=era5-antecedent,terrain")
+        self.assertEqual(code, 2)
+
+    def test_refuses_named_arguments_no_validate_card_carries(self):
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
+        code, out = self.run_cli("promote", "logistic+iso", "-c", "flood-zz", "--quiet",
+                                 "--spend-test-touch", "--param", "iters=61",
+                                 "--param", "feature_sets=era5-antecedent,terrain")
+        self.assertEqual(code, 2)
+        self.assertIn("no validate card for exactly this model, version and arguments",
+                      out)
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_without_param_the_validate_cards_arguments_are_adopted(self):
+        # `make promote MODEL=logistic+iso` and the documented command name no
+        # arguments at all; the registry's defaults are not what was validated.
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
+        code, out = self.run_cli("promote", "logistic+iso", "-c", "flood-zz",
+                                 "--spend-test-touch")
+        self.assertEqual(code, 0, out)
+        self.assertIn("adopted from validate card", out)
+        self.assertIn('"iters": 60', out)
+        self.assertIn("arguments        {", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+        card = json.loads(self.where.ledger.read_text().splitlines()[-1])
+        self.assertEqual(card["split"], "test")
+        self.assertEqual(card["data_snapshot"]["model_kwargs"]["iters"], 60)
+
+
+class TestBacktestAndPhase1Verify(FeatureCase):
+    def test_backtest_writes_the_report_and_its_twin(self):
+        code, out = self.run_cli("backtest", "-c", "flood-zz")
+        self.assertEqual(code, 0, out)
+        page = self.where.directory / "backtest.html"
+        self.assertTrue(page.exists())
+        self.assertTrue(page.with_suffix(".json").exists())
+        self.assertIn("backtest.html", out)
+        self.assertIn("backtest.json", out)
+        target = self.dir / "out.html"
+        code, _out = self.run_cli("backtest", "-c", "flood-zz", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(target.exists())
+
+    def test_the_phase1_flow_meets_the_exit_criteria(self):
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--promote",
+                     "--quiet")
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1")
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] published: no backtest report", out)
+        self.run_cli("backtest", "-c", "flood-zz")
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1")
+        self.assertEqual(code, 0, out)
+        lines = [line for line in out.splitlines() if line.startswith("[")]
+        self.assertEqual(len(lines), 8)
+        self.assertTrue(all(line.startswith("[ok]   ") for line in lines), lines)
+        self.assertTrue(out.rstrip().endswith("Phase 1 exit criteria met for flood-zz."))
+        touches = self.where.touch_budget.read_text()
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ok]   replay brier_score: agrees", out)
+        self.assertIn("[ok]   replay feature_digest: card ", out)
+        for i in range(self.contract.n_reliability_bins):
+            self.assertIn(f"[ok]   replay reliability_bins[{i}]: agrees", out)
+        self.assertEqual(self.where.touch_budget.read_text(), touches)
+
+    def test_replay_never_prints_a_score_from_the_test_split(self):
+        # The refit rescores the one-shot holdout; the command may say whether
+        # it agrees with the card and nothing more. Where they agree the card's
+        # own rendering *is* the refit's, so neither may be printed.
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--promote",
+                     "--quiet")
+        self.run_cli("backtest", "-c", "flood-zz")
+        result = verify.phase1(
+            self.contract, ledger_path=self.where.ledger,
+            touch_path=self.where.touch_budget,
+            backtest_path=self.where.directory / "backtest.html",
+        )
+        rows = verify.replay(self.contract, self.dataset, result.card)
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        replay_lines = "\n".join(x for x in out.splitlines() if "replay " in x)
+        scored = {f: (e, o) for f, e, o, _ok in rows
+                  if f not in verify.REPLAY_SHOWN_FIELDS and not f.startswith("reli")}
+        self.assertIn("brier_score", scored)
+        for field, (expected, observed) in scored.items():
+            with self.subTest(field=field):
+                self.assertNotIn(verify.sig(observed), replay_lines)
+                self.assertNotIn(repr(observed), replay_lines)
+                self.assertNotIn(verify.sig(expected), replay_lines)
+                self.assertIn(f"replay {field}: agrees", out)
+
+    def test_replay_without_a_test_card_is_a_failure(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",
+                                 "--quiet")
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL] replay: no test card to replay", out)
+
+
+class TestLedgerCommand(DataCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("loop", "-c", "flood-zz", "--quiet")
+
+    def test_summary_by_default(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz")
+        self.assertEqual(code, 0)
+        self.assertIn("exp-0001", out)
+        self.assertIn("chain intact", out)
+        self.assertNotIn('"card_hash"', out)
+
+    def test_id_implies_show(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--id", "exp-0002")
+        self.assertEqual(code, 0)
+        card = json.loads(out[out.index("{"):out.rindex("}") + 1])  # exactly one card
+        self.assertEqual(card["experiment_id"], "exp-0002")
+        self.assertIn("card_hash", card)
+        self.assertNotIn("exp-0001", out)
+
+    def test_unknown_id_is_a_failure_with_a_message(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--id", "exp-9999")
+        self.assertEqual(code, 1)
+        self.assertIn("no experiment 'exp-9999'", out)
+
+    def test_show_prints_every_card(self):
+        code, out = self.run_cli("ledger", "-c", "flood-zz", "--show")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count('"card_hash"'), 4)
+
+
+class TestDashboardCommand(DataCase):
+    def setUp(self):
+        super().setUp()
+        self.run_cli("loop", "-c", "flood-zz", "--quiet")
+
+    def test_all_refuses_a_contract_or_an_output_path(self):
+        for extra in (("-c", "flood-zz"), ("-o", str(self.dir / "page.html"))):
+            with self.subTest(extra=extra):
+                code, out = self.run_cli("dashboard", "--all", *extra)
+                self.assertEqual(code, 2)
+                self.assertEqual(len(out.strip().splitlines()), 1)
+                self.assertIn("--all cannot be combined", out)
+        self.assertFalse((self.dir / "page.html").exists())
+        self.assertFalse((self.experiments / "index.html").exists())
+
+    def test_all_alone_writes_the_index(self):
+        code, out = self.run_cli("dashboard", "--all")
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.experiments / "index.html").exists())
+
+    def test_output_path_is_honoured_for_one_contract(self):
+        target = self.dir / "page.html"
+        code, _out = self.run_cli("dashboard", "-c", "flood-zz", "-o", str(target))
+        self.assertEqual(code, 0)
+        self.assertTrue(target.exists())
 
 
 if __name__ == "__main__":

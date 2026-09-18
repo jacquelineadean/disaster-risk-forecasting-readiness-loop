@@ -15,7 +15,6 @@ dataset.
 
 from __future__ import annotations
 
-import io
 import json
 import math
 import os
@@ -33,12 +32,13 @@ os.chdir(REPO)
 os.environ.setdefault("READINESS_EXPERIMENTS_DIR", str(SANDBOX / "experiments"))
 (SANDBOX / "experiments").mkdir(parents=True, exist_ok=True)
 
-from readiness import __version__, config, contracts, dashboard  # noqa: E402
+from readiness import __version__, config, contracts, dashboard, verify  # noqa: E402
 from readiness import cli as _cli  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness.connectors.base import ConnectorError  # noqa: E402
 from readiness.contracts import ContractError  # noqa: E402
-from readiness.engine import build_model, needs_panel  # noqa: E402
+from readiness.engine import build_model  # noqa: E402
+from readiness.engine.features import FEATURE_SETS  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
 from readiness.harness import contract as contract_mod  # noqa: E402
 from readiness.harness import scoring  # noqa: E402
@@ -62,14 +62,94 @@ def _fail(exc: BaseException) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Commands the browser refuses outright, and why. `promote` is the one
+#: atomic test touch and writes a card the repository is meant to commit; a
+#: touch spent in a tab is a spent budget with no record, so it is refused
+#: here rather than budgeted — and so is `loop --promote`, which ends in the
+#: same touch by another route (see `_promotes`). `backtest` reads only
+#: committed files, but its report is the published record of that touch and
+#: belongs beside the ledger in git, not in a browser's memory.
+NOT_IN_BROWSER = {
+    "snapshot": "a network connection",
+    "mcp": "a process",
+    "report": "a process",
+    "promote": "the committed test-touch budget; a test touch spent from a browser "
+               "would be a spent budget with no card in the repository",
+    "backtest": "the committed ledger and backtest report of a real-data run; "
+                "there is nothing to publish from a browser",
+}
+
+
+def _refuse(command: str, needs: str | None = None) -> int:
+    print(f"`readiness {command}` is not available in the browser sandbox: "
+          f"it needs {needs or NOT_IN_BROWSER[command]}.")
+    return 2
+
+
+def _promotes(argv: list[str]) -> bool:
+    """True when this `loop` would spend the test touch.
+
+    `loop --promote` ends in the very same atomic touch as `promote` — one
+    test card, one line in the committed budget file — so the browser has to
+    refuse it for the same reason, and has to do so for every spelling
+    argparse would accept, abbreviations included.
+    """
+    return argv[:1] == ["loop"] and any(
+        len(arg) > 2 and "--promote".startswith(arg) for arg in argv
+    )
+
+
+def _requested_features(argv: list[str]) -> list[str]:
+    """The connectors `--features a,b` names, or every connector by default."""
+    for i, arg in enumerate(argv):
+        if arg == "--features" and i + 1 < len(argv):
+            return [x for x in argv[i + 1].split(",") if x]
+        if arg.startswith("--features="):
+            return [x for x in arg.split("=", 1)[1].split(",") if x]
+    return list(data_mod.FEATURE_CONNECTORS)
+
+
+def _features_in_browser(argv: list[str]) -> int:
+    """What `readiness features` can say here: the archive packs no feature data.
+
+    The sandbox carries Storm Events extracts only, so instead of failing on a
+    missing pinned file it reports, per connector, that nothing is packed,
+    and lists the feature sets that would need each. Admission verdicts and
+    the audit are what the real command prints on a machine with the data.
+    """
+    names = _requested_features(argv)
+    unknown = sorted(set(names) - set(data_mod.FEATURE_CONNECTORS))
+    if unknown:
+        print(f"unknown feature connector(s) {unknown}; "
+              f"known: {list(data_mod.FEATURE_CONNECTORS)}")
+        return 2
+    print()
+    print("feature sources  (browser sandbox)")
+    print("-" * 60)
+    for name in names:
+        print(f"  {name:<10} no feature sources packed in the browser sandbox")
+    print()
+    print("feature sets in the catalogue (none can be built here):")
+    for set_name, specs in FEATURE_SETS.items():
+        sources = sorted({spec.source for spec in specs})
+        print(f"  {set_name:<18} {', '.join(s.column for s in specs)}  "
+              f"[sources: {', '.join(sources)}]")
+    print()
+    print("Run `readiness features -c <contract>` on a machine with the pinned "
+          "feature data (`readiness snapshot --features era5,terrain`) for the "
+          "admission verdicts and the audit.")
+    return 0
+
+
 def run_cli(argv_json: str) -> int:
     """Run `readiness <argv>` exactly as the console script would."""
     argv = json.loads(argv_json)
-    if argv and argv[0] in ("mcp", "report", "snapshot"):
-        needs = "a network connection" if argv[0] == "snapshot" else "a process"
-        print(f"`readiness {argv[0]}` is not available in the browser sandbox: "
-              f"it needs {needs}.")
-        return 2
+    if argv and argv[0] in NOT_IN_BROWSER:
+        return _refuse(argv[0])
+    if _promotes(argv):
+        return _refuse("loop --promote", NOT_IN_BROWSER["promote"])
+    if argv and argv[0] == "features":
+        return _features_in_browser(argv)
     try:
         return int(_cli.main(argv) or 0)
     except SystemExit as exc:  # argparse errors and explicit exits
@@ -90,12 +170,7 @@ def run_cli(argv_json: str) -> int:
 
 
 def _state_fips() -> dict[str, str]:
-    from readiness.connectors import census
-
-    cache = data_mod.SNAPSHOT_DIR / "census" / "national_county2020.txt"
-    if not cache.exists():
-        return {}
-    return {c.state: c.fips[:2] for c in census.parse(cache.read_bytes())}
+    return data_mod.state_fips()
 
 
 def _packed_types() -> dict[str, list[str] | None]:
@@ -168,6 +243,11 @@ def sandbox_info(_raw: str | None = None) -> str:
                 for name, h in config.HAZARDS.items()
             },
             "models": list(REGISTRY),
+            # The archive packs Storm Events extracts only: no ERA5, terrain,
+            # NRI or CLIMADA layer. The page says so before a visitor asks a
+            # feature model for a non-empty feature-set list.
+            "feature_sources_packed": [],
+            "feature_connectors": list(data_mod.FEATURE_CONNECTORS),
         }
     )
 
@@ -182,15 +262,19 @@ def set_tree(raw: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# datasets, cached per contract for the guided demos
+# datasets, cached per contract digest for the guided demos
 # ---------------------------------------------------------------------------
 
+#: Keyed by contract digest, not name: `register --force` keeps the name and
+#: changes the criteria, and a panel built under the old criteria must not be
+#: served for the new ones. The digest is a function of exactly the fields
+#: the panel depends on.
 _DATASETS: dict[str, data_mod.Dataset] = {}
 
 
-def _dataset(name: str) -> data_mod.Dataset:
-    if name not in _DATASETS:
-        c = contracts.load(name)
+def _dataset(c: contracts.Contract) -> data_mod.Dataset:
+    key = c.digest()
+    if key not in _DATASETS:
         gap = _data_gap(c, _state_fips())
         if gap is not None:
             raise ConnectorError(
@@ -198,8 +282,8 @@ def _dataset(name: str) -> data_mod.Dataset:
                 "contract registers and reads here; building its panel needs "
                 "`readiness snapshot` on a machine with a network connection."
             )
-        _DATASETS[name] = data_mod.build(c)
-    return _DATASETS[name]
+        _DATASETS[key] = data_mod.build(c)
+    return _DATASETS[key]
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +336,14 @@ class Recalibrated:
         ]
 
 
+#: Base (unrecalibrated) scorecards, keyed by contract digest like the datasets.
 _BASE_CARDS: dict[tuple, dict] = {}
+
+#: The only split the browser may score. The test split is a one-shot holdout
+#: whose touches are budgeted on disk by `readiness promote`; the playground
+#: has no budget, so it has no business there, and the training split is not
+#: a holdout at all.
+PLAYGROUND_SPLIT = "validate"
 
 
 def score_playground(raw: str) -> str:
@@ -264,15 +355,21 @@ def score_playground(raw: str) -> str:
         params = {k: v for k, v in (a.get("params") or {}).items() if v is not None}
         scale = float(a.get("scale", 1.0))
         shift = float(a.get("shift", 0.0))
-        split = a.get("split", "validate")
-        ds = _dataset(name)
-        c = ds.contract
+        split = a.get("split", PLAYGROUND_SPLIT)
+        if split != PLAYGROUND_SPLIT:
+            raise SplitViolation(
+                f"the playground scores the {PLAYGROUND_SPLIT} split only; "
+                f"{split!r} is refused. The test split is spent through "
+                "`readiness promote MODEL --spend-test-touch`, the one atomic "
+                "test touch, which charges the budget and writes the card together."
+            )
+        c = contracts.load(name)
+        ds = _dataset(c)
 
         def build():
-            panel = ds.panel if needs_panel(model_name) else None
-            return build_model(model_name, panel=panel, **params)
+            return build_model(model_name, canary_panel=ds.panel, **params)
 
-        key = (name, model_name, json.dumps(params, sort_keys=True), split)
+        key = (c.name, c.digest(), model_name, json.dumps(params, sort_keys=True), split)
         if key not in _BASE_CARDS:
             base_card = scoring.score(build(), ds.panel, c, split)
             _BASE_CARDS[key] = base_card.to_dict()
@@ -356,7 +453,32 @@ def tamper(raw: str) -> str:
         text = where.ledger.read_text(encoding="utf-8")
         lines = [line for line in text.splitlines() if line.strip()]
 
-        if action == "edit" and len(lines) > 1:
+        # Each action needs a minimum number of cards to make sense against;
+        # a ledger shorter than that cannot be tampered with the way the demo
+        # describes, and must say so rather than silently do nothing and
+        # report success.
+        needs = {"edit": 2, "swap": 3, "delete-middle": 3, "truncate": 1, "forge": 1}
+        minimum = needs.get(action, 0)
+        if len(lines) < minimum:
+            status = ledger.verify()
+            return json.dumps(
+                {
+                    "contract": c.name,
+                    "action": action,
+                    "description": (
+                        f"could not apply — {c.name}'s ledger has only "
+                        f"{len(lines)} card(s), and {action!r} needs at least "
+                        f"{minimum}. Run the loop again first. The ledger was "
+                        "not touched."
+                    ),
+                    "applied": False,
+                    "valid": status.valid,
+                    "status": status.format(),
+                    "forged": False,
+                }
+            )
+
+        if action == "edit":
             import re
 
             def bump(m: "re.Match[str]") -> str:
@@ -365,11 +487,11 @@ def tamper(raw: str) -> str:
             lines[1] = re.sub(
                 r'"brier_skill_score":(-?[0-9.eE+-]+)', bump, lines[1], count=1
             )
-        elif action == "swap" and len(lines) > 2:
+        elif action == "swap":
             lines[1], lines[2] = lines[2], lines[1]
-        elif action == "delete-middle" and len(lines) > 2:
+        elif action == "delete-middle":
             del lines[2]
-        elif action in ("truncate", "forge") and lines:
+        elif action in ("truncate", "forge"):
             lines.pop()
         elif action == "no-anchor":
             if ledger.anchor_path.exists():
@@ -384,6 +506,7 @@ def tamper(raw: str) -> str:
                 "contract": c.name,
                 "action": action,
                 "description": TAMPER_ACTIONS[action],
+                "applied": True,
                 "valid": status.valid,
                 "status": status.format(),
                 "forged": action == "forge",
@@ -434,14 +557,7 @@ def fingerprints(raw: str) -> str:
     a = _args(raw)
     try:
         c = contracts.load(a["contract"])
-        ds = _dataset(c.name)
-        split = c.splits.validate
-        observed: dict = {}
-        for model_name in _cli._REPRO_MODELS:
-            card = scoring.score(build_model(model_name), ds.panel, c, split)
-            observed[model_name] = _cli._repro_fingerprint(card)
-        observed["_data_version"] = ds.data_version
-        observed["_contract"] = c.digest()
+        observed = verify.fingerprints(_dataset(c))
         expected_path = data_mod.paths(c).expected
         expected = None
         if expected_path.exists():

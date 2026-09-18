@@ -83,7 +83,7 @@
   // --- page state --------------------------------------------------------------------
   const term = new Term($("#term"));
   const sb = new Sandbox();
-  let coverage = null, hazards = {}, contracts = [], models = null;
+  let coverage = null, hazards = {}, contracts = [], models = null, features = [];
   let queuedCmd = null, busy = false, bootedAt = 0;
 
   function setStatus(kind, text, sub) {
@@ -186,17 +186,42 @@
   }));
 
   // --- demo 2: register a contract -----------------------------------------------------
+  // The form's defaults are the package's (readiness.contracts.DEFAULTS), read from
+  // generated/contract_defaults.json; the values written in playground.html only
+  // hold the form until that file has loaded. A field left at its default is not
+  // put on the command line, because `readiness register` fills it in itself.
+  const REG_FIELDS = {
+    period: ["#reg-period", "--period"], property_usd_min: ["#reg-usd", "--damage-usd"],
+    zone_policy: ["#reg-zone", "--zone-policy"], train: ["#reg-train", "--train"],
+    validate: ["#reg-validate", "--validate"], test: ["#reg-test", "--test"],
+  };
+  const REG_THRESHOLDS = {
+    min_brier_skill_score: "#reg-bss", reliability_tolerance_pp: "#reg-tol", reliability_min_bin_count: "#reg-minbin",
+    min_auc: "#reg-auc", n_reliability_bins: "#reg-bins",
+  };
+  function formDefaults() {
+    const d = {};
+    for (const [k, [id]] of Object.entries(REG_FIELDS)) d[k] = $(id).value;
+    for (const [k, id] of Object.entries(REG_THRESHOLDS)) d[k] = $(id).placeholder;
+    d.count_casualties = !$("#reg-nocas").checked;
+    return d;
+  }
+  let defaults = formDefaults();
+  function applyDefaults(d) {
+    defaults = d;
+    for (const [k, [id]] of Object.entries(REG_FIELDS)) $(id).value = String(d[k]);
+    for (const [k, id] of Object.entries(REG_THRESHOLDS)) $(id).placeholder = String(d[k]);
+    $("#reg-nocas").checked = !d.count_casualties;
+  }
+  const sameValue = (a, b) => a === String(b) || (a !== "" && !isNaN(a) && !isNaN(b) && Number(a) === Number(b));
   function registerArgv() {
     const v = (id) => $(id).value.trim();
     const parts = ["register", v("#reg-name") || "my-contract", "--hazard", v("#reg-hazard")];
     for (const st of v("#reg-states").toUpperCase().split(/[\s,]+/).filter(Boolean)) parts.push("--state", st);
-    if (v("#reg-period") !== "quarter") parts.push("--period", v("#reg-period"));
-    if (v("#reg-usd") && Number(v("#reg-usd")) !== 10000) parts.push("--damage-usd", v("#reg-usd"));
+    const opt = (k) => { const [id, flag] = REG_FIELDS[k]; if (v(id) !== "" && !sameValue(v(id), defaults[k])) parts.push(flag, v(id)); };
+    opt("period"); opt("property_usd_min");
     if ($("#reg-nocas").checked) parts.push("--no-casualties");
-    if (v("#reg-zone") !== "drop") parts.push("--zone-policy", v("#reg-zone"));
-    if (v("#reg-train") !== "1996-2015") parts.push("--train", v("#reg-train"));
-    if (v("#reg-validate") !== "2016-2020") parts.push("--validate", v("#reg-validate"));
-    if (v("#reg-test") !== "2021-2025") parts.push("--test", v("#reg-test"));
+    opt("zone_policy"); opt("train"); opt("validate"); opt("test");
     if (v("#reg-bss")) parts.push("--min-bss", v("#reg-bss"));
     if (v("#reg-tol")) parts.push("--tolerance", v("#reg-tol"));
     if (v("#reg-minbin")) parts.push("--min-bin-count", v("#reg-minbin"));
@@ -246,16 +271,43 @@
   });
 
   // --- demo 3: the calibration playground -----------------------------------------------
-  const PARAMS = {
-    "climatology-seasonal": [["shrinkage", "shrinkage κ (pseudo-observations)", 10, 0, 200, 1]],
-    "persistence-last-year": [["hit", "forecast after a hit", 0.35, 0.01, 0.99, 0.01], ["miss", "forecast after a miss", 0.03, 0.001, 0.5, 0.001]],
-    "leaky-oracle": [["confidence", "oracle confidence", 0.999, 0.5, 1, 0.001]],
-    "climatology-pooled": [],
-  };
+  // Which parameters a model takes, their defaults and what they mean come from
+  // generated/models.json (each registry entry's `params`, the package's
+  // ModelSpec.params). Only the input ranges, which are presentation, live here.
+  const RANGES = { shrinkage: [0, 200, 1], hit: [0.01, 0.99, 0.01], miss: [0.001, 0.5, 0.001] };
+  function modelEntry(name) { return models && models.registry.find((x) => x.name === name); }
+  function modelParams(name) {
+    const m = modelEntry(name);
+    return (m && m.params) || [];
+  }
+  // One input per parameter, by the schema's JSON type: a `list` (the feature
+  // sets) is a comma-separated text field whose default is the registry's, a
+  // `bool` a checkbox, a `str` a text field, `float`/`int` a number field.
+  function paramInput(p) {
+    const id = `cal-p-${p.name}`, attrs = `id="${id}" data-param="${p.name}" data-type="${p.type}"`;
+    if (p.type === "list") {
+      const names = features.map((f) => f.name);
+      return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="text" ${attrs} value="${RL.esc((p.default || []).join(","))}" list="cal-feature-sets" placeholder="comma-separated set names, empty for none"><datalist id="cal-feature-sets">${names.map((n) => `<option value="${RL.esc(n)}">`).join("")}</datalist></div>`;
+    }
+    if (p.type === "bool") return `<div class="field"><label></label><span class="check"><input type="checkbox" ${attrs}${p.default ? " checked" : ""}><label for="${id}" style="color:inherit">${RL.esc(p.help)}</label></span></div>`;
+    if (p.type === "str") return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="text" ${attrs} value="${RL.esc(String(p.default))}"></div>`;
+    const [lo, hi, step] = RANGES[p.name] || [undefined, undefined, p.type === "int" ? 1 : "any"];
+    const bounds = lo === undefined ? "" : ` min="${lo}" max="${hi}"`;
+    return `<div class="field"><label for="${id}">${RL.esc(p.help)}</label><input type="number" ${attrs} value="${p.default}"${bounds} step="${step}"></div>`;
+  }
+  function paramValue(el) {
+    const t = el.dataset.type;
+    if (t === "list") return el.value.split(",").map((x) => x.trim()).filter(Boolean);
+    if (t === "bool") return el.checked;
+    if (t === "str") return el.value;
+    return Number(el.value);
+  }
   function renderParams() {
-    const m = $("#cal-model").value;
-    $("#cal-params").innerHTML = (PARAMS[m] || []).map(([k, label, d, lo, hi, step]) =>
-      `<div class="field"><label for="cal-p-${k}">${RL.esc(label)}</label><input type="number" id="cal-p-${k}" data-param="${k}" value="${d}" min="${lo}" max="${hi}" step="${step}"></div>`).join("");
+    const m = $("#cal-model").value, entry = modelEntry(m);
+    const note = entry && entry.needs_features
+      ? `<p class="small"><span class="pill warn">needs features</span> the sandbox packs no feature sources (ERA5, terrain, NRI, CLIMADA), so a non-empty feature-set list is refused here. Clear the field to run the history-only variant; on a machine with the pinned data, <code>readiness score ${RL.esc(m)} --features era5,terrain</code> runs the full model.</p>`
+      : "";
+    $("#cal-params").innerHTML = modelParams(m).map(paramInput).join("") + note;
     $$("#cal-params input").forEach((el) => el.addEventListener("change", () => calibrate.scheduled && calibrate()));
   }
   $("#cal-model").addEventListener("change", () => { renderParams(); if (calibrate.scheduled) calibrate(); });
@@ -266,7 +318,7 @@
   $("#cal-run").addEventListener("click", () => { calibrate.scheduled = true; calibrate(); });
   async function calibrate() {
     if (!sb.ready || busy) return;
-    const params = {}; $$("#cal-params input").forEach((el) => { params[el.dataset.param] = Number(el.value); });
+    const params = {}; $$("#cal-params input").forEach((el) => { params[el.dataset.param] = paramValue(el); });
     const args = { contract: $("#cal-contract").value, model: $("#cal-model").value, params, scale: Number($("#cal-scale").value), shift: Number($("#cal-shift").value) };
     const out = $("#cal-result");
     out.innerHTML = `<p class="small">fitting and scoring with the harness…</p>`;
@@ -380,10 +432,13 @@
     sb.onStatus = (stage, detail) => setStatus(stage === "error" ? "err" : "busy", detail);
     sb.onOut = (text, stream) => term.line(text, stream === "err" ? "err" : null);
     try {
-      [coverage, hazards, contracts, models] = await Promise.all([
+      let contractDefaults;
+      [coverage, hazards, contracts, models, contractDefaults, features] = await Promise.all([
         RL.fetchJSON("sandbox.json").catch(() => null), RL.fetchJSON("hazards.json").catch(() => ({})),
         RL.fetchJSON("contracts.json").catch(() => []), RL.fetchJSON("models.json").catch(() => null),
+        RL.fetchJSON("contract_defaults.json").catch(() => null), RL.fetchJSON("features.json").catch(() => []),
       ]);
+      if (contractDefaults) applyDefaults(contractDefaults);
       fill($("#reg-hazard"), Object.keys(hazards).map((h) => `<option value="${RL.esc(h)}">${RL.esc(h)}</option>`).join(""));
       if (models) fill($("#cal-model"), models.registry.map((m) => `<option value="${RL.esc(m.name)}"${m.name === "climatology-seasonal" ? " selected" : ""}>${RL.esc(m.name)}</option>`).join(""));
       renderParams(); showVal();

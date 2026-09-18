@@ -13,6 +13,7 @@ particular disk.
 
 from __future__ import annotations
 
+import base64
 import datetime as _dt
 import hashlib
 import http.client
@@ -21,6 +22,7 @@ import pathlib
 import socket
 import threading
 import urllib.parse
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Iterable
 
@@ -88,12 +90,22 @@ class Manifest:
         return True
 
     def add(self, key: str, record: SourceRecord) -> None:
+        """Pin a record, noting an upstream change rather than hiding it.
+
+        The notice is *appended* to whatever the connector wrote. Its notes
+        are load-bearing — `backtest` reads `derived_through=YYYY` out of them
+        to decide whether a static layer may be a feature at all — and
+        replacing them turned a re-pull of the National Risk Index into a
+        layer with no declared vintage, which is a layer the firewall can no
+        longer refuse for the right reason.
+        """
         prior = self.records.get(key)
         if prior and prior.sha256 != record.sha256:
-            record.notes = (
+            notice = (
                 f"upstream content changed (was sha256:{prior.sha256[:12]}...); "
                 "prior experiments were run against the old bytes"
-            ).strip()
+            )
+            record.notes = f"{record.notes}; {notice}" if record.notes else notice
         self.records[key] = record
         self.dirty = True
 
@@ -154,6 +166,38 @@ def utc_now() -> str:
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def pinned_bytes(
+    cache: pathlib.Path, record: SourceRecord | None, *, allow_fetch: bool = True
+) -> bytes | None:
+    """The cached bytes if — and only if — they are the ones the manifest pins.
+
+    The checksum in the manifest is what pins an experiment (module docstring),
+    so a cached file is trustworthy only when it hashes to the manifest's
+    record. Bytes on disk with no record, or with a record they no longer
+    match (a partial write, a hand edit, a file copied in from elsewhere), are
+    unpinned: they are data of unknown provenance and no experiment run against
+    them could be reproduced.
+
+    Returns `None` for anything unpinned so the caller re-fetches. When the
+    caller cannot fetch (`allow_fetch=False`) a mismatch is an error that names
+    the file and both hashes, rather than a silent download or a silent reuse.
+    """
+    if record is None or not cache.exists():
+        if not allow_fetch:
+            raise ConnectorError(f"{cache} is unpinned and fetching is not allowed")
+        return None
+    data = cache.read_bytes()
+    actual = sha256_bytes(data)
+    if actual == record.sha256:
+        return data
+    if not allow_fetch:
+        raise ConnectorError(
+            f"{cache} does not match its manifest record: on disk "
+            f"sha256:{actual}, pinned sha256:{record.sha256}; fetching is not allowed"
+        )
+    return None
 
 
 #: Per-address connect timeout. Short on purpose — see `_connect_socket`.
@@ -225,6 +269,34 @@ class _HappyHTTPSConnection(http.client.HTTPSConnection):
         )
 
 
+def proxy_for(scheme: str, host: str) -> urllib.parse.SplitResult | None:
+    """The proxy the environment names for this scheme and host, or `None`.
+
+    `urllib` honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, and the same
+    rules apply here so `readiness snapshot` works wherever urllib would: on a
+    corporate network, in a container whose only egress is a policy-enforcing
+    proxy. The stdlib's own readers are reused rather than re-implemented, so
+    the two agree on every corner case (case of the variable names, `no_proxy`
+    suffix matching, `REQUEST_METHOD` disabling `HTTP_PROXY` under CGI).
+    """
+    url = urllib.request.getproxies().get(scheme)
+    if not url or urllib.request.proxy_bypass(host):
+        return None
+    parts = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+    if not parts.hostname:
+        raise ConnectorError(f"cannot parse {scheme.upper()}_PROXY={url!r}")
+    return parts
+
+
+def _proxy_auth(proxy: urllib.parse.SplitResult) -> dict[str, str]:
+    """`Proxy-Authorization` for a `user:pass@` proxy URL, else nothing."""
+    if not proxy.username:
+        return {}
+    creds = f"{urllib.parse.unquote(proxy.username)}:"
+    creds += urllib.parse.unquote(proxy.password or "")
+    return {"Proxy-Authorization": "Basic " + base64.b64encode(creds.encode()).decode()}
+
+
 class Session:
     """HTTPS session with keep-alive, one persistent connection per thread.
 
@@ -233,6 +305,14 @@ class Session:
     crippling behind a slow or filtered egress path, where connection setup can
     dominate transfer time by two orders of magnitude. Reusing one connection
     per worker amortises that cost across the whole pull.
+
+    Behind a proxy (`HTTPS_PROXY` / `HTTP_PROXY`, minus `NO_PROXY`) the
+    connection is made to the proxy instead: https through a CONNECT tunnel, so
+    TLS still terminates at the origin (or at a re-terminating proxy whose CA
+    the default context trusts via `SSL_CERT_FILE`); http by sending the
+    absolute URI on the request line, as HTTP/1.1 requires of a proxy client.
+    Hosts the proxy does not cover take the direct Happy-Eyeballs path exactly
+    as before.
     """
 
     def __init__(self, timeout: int = 180, retries: int = 3) -> None:
@@ -245,9 +325,31 @@ class Session:
             self._local.conns = {}
         return self._local.conns
 
-    def _connect(self, scheme: str, host: str) -> http.client.HTTPConnection:
+    def _connect(self, scheme: str, netloc: str) -> http.client.HTTPConnection:
+        """A connection for `scheme://netloc`, direct or through the proxy.
+
+        The returned connection carries `absolute_uri`: whether requests on it
+        must name the full URL (plain http through a proxy) rather than a path.
+        """
         cls = _HappyHTTPSConnection if scheme == "https" else _HappyHTTPConnection
-        return cls(host, timeout=self.timeout)
+        proxy = proxy_for(scheme, urllib.parse.urlsplit(f"{scheme}://{netloc}").hostname)
+        if proxy is None:
+            conn = cls(netloc, timeout=self.timeout)
+            conn.absolute_uri = False
+            return conn
+        proxy_netloc = f"{proxy.hostname}:{proxy.port or 80}"
+        if scheme == "https":
+            # CONNECT to the proxy over plain TCP, then TLS to the origin
+            # through the tunnel: `_HappyHTTPSConnection.connect` wraps the
+            # socket only after `_tunnel()` and names the origin as SNI.
+            conn = cls(proxy_netloc, timeout=self.timeout)
+            conn.set_tunnel(netloc, headers=_proxy_auth(proxy))
+            conn.absolute_uri = False
+        else:
+            conn = _HappyHTTPConnection(proxy_netloc, timeout=self.timeout)
+            conn.absolute_uri = True
+        conn.proxy_headers = _proxy_auth(proxy)
+        return conn
 
     def _request(self, url: str) -> tuple[int, dict, bytes]:
         parts = urllib.parse.urlsplit(url)
@@ -259,15 +361,16 @@ class Session:
         path = parts.path or "/"
         if parts.query:
             path += "?" + parts.query
-        conn.request(
-            "GET",
-            path,
-            headers={
-                "User-Agent": USER_AGENT,
-                "Accept-Encoding": "identity",
-                "Connection": "keep-alive",
-            },
-        )
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept-Encoding": "identity",
+            "Connection": "keep-alive",
+        }
+        if getattr(conn, "absolute_uri", False):
+            # A proxy receiving plain http needs the origin on the request line.
+            path = f"{parts.scheme}://{parts.netloc}{path}"
+            headers.update(getattr(conn, "proxy_headers", {}))
+        conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         body = resp.read()  # must drain before the connection can be reused
         return resp.status, dict(resp.getheaders()), body

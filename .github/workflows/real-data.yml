@@ -1,0 +1,80 @@
+# Pull real, pinned data for one contract and verify it, on demand.
+#
+# Nothing on `main` is written by this workflow: it snapshots and verifies in
+# the runner's own checkout and uploads the result as a downloadable
+# artifact. A person reviews it and commits what the run produced (an updated
+# snapshots/manifest.json, a new or refreshed harness_expected/<contract>.json,
+# ledger cards) themselves, the same as any other change to those files.
+
+name: real-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      contract:
+        description: "Registered contract name"
+        required: false
+        default: "tornado-ok"
+      phase:
+        description: "Exit criteria to verify: 0 (baselines reproduce) or 1 (the promoted test card)"
+        required: false
+        default: "0"
+      features:
+        description: "Feature connectors to pull and load, comma-separated (era5,terrain,nri,climada)"
+        required: false
+        default: "era5,terrain"
+      extra_args:
+        description: "Extra arguments appended to `readiness verify`"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Restore the pinned data
+        uses: actions/cache@v4
+        with:
+          path: |
+            snapshots/open_meteo
+            snapshots/census
+            snapshots/nws
+            snapshots/storm_events
+            snapshots/fema
+            snapshots/climada
+          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
+      - name: Pull and pin the contract's data
+        run: >
+          python -m readiness.cli snapshot -c ${{ inputs.contract }}
+          --features "${{ inputs.features }}"
+      - name: Show the feature sources and their admission verdicts
+        if: ${{ inputs.phase == '1' }}
+        run: >
+          python -m readiness.cli features -c ${{ inputs.contract }}
+          --features "${{ inputs.features }}"
+      - name: Run the Phase 1 queue and promote the first validate pass
+        if: ${{ inputs.phase == '1' }}
+        run: >
+          python -m readiness.cli loop -c ${{ inputs.contract }}
+          --features "${{ inputs.features }}" --queue phase1 --promote
+      - name: Write the backtest report
+        if: ${{ inputs.phase == '1' }}
+        run: python -m readiness.cli backtest -c ${{ inputs.contract }}
+      - name: Verify the exit criteria
+        run: >
+          python -m readiness.cli verify -c ${{ inputs.contract }}
+          --phase ${{ inputs.phase }}
+          ${{ inputs.extra_args }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-data-${{ inputs.contract }}
+          path: |
+            experiments/${{ inputs.contract }}
+            snapshots/manifest.json

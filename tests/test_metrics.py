@@ -128,7 +128,10 @@ class TestMurphy(unittest.TestCase):
 
 class TestSharpness(unittest.TestCase):
     def test_constant_forecast_is_perfectly_unsharp(self):
-        self.assertEqual(metrics.sharpness([0.3] * 50), 0.0)
+        # sum() only became compensated (Neumaier) in Python 3.12; on 3.10/3.11
+        # this variance can land a few ulps off exact zero (~2.7e-16), so the
+        # comparison tolerates that rather than pinning the pre-3.12 rounding.
+        self.assertAlmostEqual(metrics.sharpness([0.3] * 50), 0.0, places=12)
 
     def test_varied_forecast_is_sharper(self):
         self.assertGreater(metrics.sharpness([0.1, 0.9] * 25), 0.0)

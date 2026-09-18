@@ -3,9 +3,14 @@
 Report §4: the agent "reads the score report, writes an experiment card (what
 changed, why, result), adjusts features or calibration, and reruns".
 
-Every scored run produces a card, appended to the contract's own ledger at
-`experiments/<contract>/ledger.jsonl`. The ledger is hash-chained and anchored,
-so cards cannot be edited, reordered, or quietly deleted after the fact.
+`readiness loop` writes cards, one per candidate it runs, appended to the
+contract's own ledger at `experiments/<contract>/ledger.jsonl`; `readiness
+promote` writes the one test card, through the same path. `readiness score`
+runs the same scoring path for a single model but only prints the result —
+it writes nothing. If you scored a model by hand and want it on the record,
+it goes through the loop, not a manual append. The ledger is
+hash-chained and anchored, so cards cannot be edited, reordered, or quietly
+deleted after the fact.
 
 ## The three fields you actually write
 
@@ -61,19 +66,44 @@ And one that did not work — equally valuable:
 | field | meaning |
 |---|---|
 | `experiment_id` | `exp-NNNN`, sequential within the contract's ledger |
-| `scorecard` | every metric, plus the reliability bins |
+| `scorecard` | every metric and the reliability bins; and, for a Phase 1 card, `feature_digest`, `feature_columns` and `feature_audit` (below) |
 | `verdict` | per-clause contract result, naming the contract |
 | `canary` | leakage screen findings |
-| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range |
+| `data_snapshot` | contract name and digest, data version, panel digest, hazard, scope, period, region count, year range, the manifest keys the panel was built from, `harness_digest`, and `model_kwargs`; and, only when feature sources were loaded, `feature_version` and `feature_inputs` (below) |
 | `contract_digest` | which contract this was judged under |
 | `prev_hash` / `card_hash` | the chain |
+
+## Kwargs and the feature audit on a Phase 1 card
+
+Nothing was added to the card's fields — the hashes of the committed cards
+are untouched — so the Phase 1 provenance lives inside `data_snapshot` and
+the `scorecard`, split by which one already carries the matching shape:
+
+- **`data_snapshot.model_kwargs`** — the constructor arguments the candidate
+  was built with (`feature_sets`, `history`, `l2`, `rounds`, …). `readiness
+  promote` matches the validate PASS it requires on exactly these, and
+  `verify --phase 1 --replay` rebuilds the model from them.
+- **`data_snapshot.feature_version`** and **`data_snapshot.feature_inputs`**
+  — the manifest digest over the loaded sources' manifest keys, and the keys
+  themselves. Present only when feature sources were loaded; a Phase 0 card,
+  or a Phase 1 card for a model with no features, has neither.
+- **`scorecard.feature_columns`** — the columns of the frame the harness
+  actually handed the model. Empty when the run built no feature frame.
+- **`scorecard.feature_audit`** — the harness's findings before the fit: each
+  source's admission verdict, the poisoned-cutoff bound, coverage per
+  column, and `clean`. A test card whose audit is not clean fails `verify
+  --phase 1`, whatever its scores say.
+
+The scorecard also carries the frame's `feature_digest`, and the canary's
+fifth finding records whether the model's declared digest matched it (that
+check is skipped when the run built no feature frame at all).
 
 ## Reading the ledger
 
 ```bash
 readiness ledger -c <contract>              # summary table + chain verification
 readiness ledger -c <contract> --show       # full cards
-readiness ledger -c <contract> --id exp-0002
+readiness ledger -c <contract> --id exp-0002  # one card; --id implies --show
 ```
 
 If `verify()` reports a broken chain, stop. Every score above the break is

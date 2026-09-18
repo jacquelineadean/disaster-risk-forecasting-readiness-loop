@@ -28,13 +28,13 @@ import json
 import sys
 from typing import Any, Callable
 
-from readiness import contracts, data as data_mod
+from readiness import __version__, contracts, data as data_mod
 from readiness.connectors.base import Manifest
 from readiness.contracts import Contract
 from readiness.harness.ledger import Ledger
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "readiness-data", "version": "0.2.0"}
+SERVER_INFO = {"name": "readiness-data", "version": __version__}
 
 _state: dict[str, Any] = {"contract": None, "dataset": None}
 
@@ -94,25 +94,38 @@ def tool_panel_summary(_args: dict) -> str:
 
 
 def tool_region_history(args: dict) -> str:
-    """Training-split label history for one region. Never returns holdout years."""
+    """Training-split label history for one region. Never returns holdout years.
+
+    An optional `year` narrows the rows to one year; a year outside the
+    training split is refused before any row is read, so the refusal carries
+    no label and does not say which holdout split the year belongs to.
+    """
     region = str(args.get("region_id", "")).strip()
     if not region:
         return "error: region_id is required"
     ds = _dataset()
     contract = ds.contract
     train_years = set(contract.train_years)
+    unavailable = (
+        f"only train years ({min(train_years)}-{max(train_years)}) are exposed "
+        "through this tool; validate and test labels are not available through "
+        "any tool on this server."
+    )
+    year = args.get("year")
+    if year is not None:
+        try:
+            year = int(year)
+        except (TypeError, ValueError):
+            return f"error: year must be an integer, got {year!r}"
+        if year not in train_years:
+            return f"refused: year {year} is outside the training split. {unavailable}"
     rows = [
         (u, y)
         for u, y in zip(ds.panel.units, ds.panel.labels)
-        if u[0] == region and u[1] in train_years
+        if u[0] == region and u[1] in train_years and (year is None or u[1] == year)
     ]
     if not rows:
-        return (
-            f"no training-split rows for region {region}. "
-            f"Note: only train years ({min(train_years)}-{max(train_years)}) are "
-            "exposed through this tool; validate and test labels are not "
-            "available through any tool on this server."
-        )
+        return f"no training-split rows for region {region}. Note: {unavailable}"
     lines = [f"region {region}: {len(rows)} training region-{contract.period}s, "
              f"{sum(y for _, y in rows)} positive"]
     by_period: dict[int, list[int]] = {}
@@ -132,9 +145,7 @@ def tool_ledger(args: dict) -> str:
     if args.get("experiment_id"):
         for card in ledger.read():
             if card.experiment_id == args["experiment_id"]:
-                return json.dumps(
-                    card.payload() | {"card_hash": card.card_hash}, indent=2
-                )
+                return json.dumps(card.record(), indent=2)
         return f"no experiment {args['experiment_id']!r}"
     return ledger.summary()
 
@@ -201,7 +212,14 @@ TOOLS: dict[str, tuple[dict, Callable[[dict], str]]] = {
                         "description": (
                             "region identifier; a 5-digit county FIPS for US contracts"
                         ),
-                    }
+                    },
+                    "year": {
+                        "type": "integer",
+                        "description": (
+                            "optional: one training year only; any other year is "
+                            "refused"
+                        ),
+                    },
                 },
                 "required": ["region_id"],
             },
@@ -253,11 +271,27 @@ def _error(request_id: Any, code: int, message: str) -> dict:
     }
 
 
-def handle(message: dict) -> dict | None:
+def handle(message: object) -> dict | None:
     """Dispatch one JSON-RPC message. Returns None for notifications."""
+    if not isinstance(message, dict):
+        # Valid JSON that is not an object: a bare list, number or string. Such
+        # a message has no id to answer to, but it must be answered rather than
+        # allowed to raise, or one stray line would take the server down.
+        return _error(
+            None,
+            -32600,
+            f"invalid request: a JSON-RPC message is an object, got "
+            f"{type(message).__name__} (batches are not supported)",
+        )
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
+    if not isinstance(params, dict):
+        return _error(
+            request_id,
+            -32602,
+            f"invalid params: expected an object, got {type(params).__name__}",
+        )
 
     if method == "initialize":
         return _result(
@@ -324,7 +358,14 @@ def serve(stdin=None, stdout=None, *, contract: Contract | None = None) -> None:
             stdout.write(json.dumps(_error(None, -32700, f"parse error: {exc}")) + "\n")
             stdout.flush()
             continue
-        response = handle(message)
+        try:
+            response = handle(message)
+        except Exception as exc:  # a bad request must not take the server down
+            response = _error(
+                message.get("id") if isinstance(message, dict) else None,
+                -32603,
+                f"internal error: {type(exc).__name__}: {exc}",
+            )
         if response is not None:
             stdout.write(json.dumps(response) + "\n")
             stdout.flush()

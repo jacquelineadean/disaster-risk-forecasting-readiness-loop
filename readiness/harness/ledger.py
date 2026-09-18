@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import json
+import os
 import pathlib
 from dataclasses import asdict, dataclass, field
 from typing import Iterator
@@ -61,6 +62,33 @@ class ExperimentCard:
         self.card_hash = self.compute_hash()
         return self
 
+    def record(self) -> dict:
+        """Exactly the JSON object one ledger line holds: the payload plus its seal.
+
+        A method rather than a field so that `asdict`, and therefore the hash,
+        is untouched; every writer and reader of a card line goes through here
+        so the line's shape is defined once.
+        """
+        return self.payload() | {"card_hash": self.card_hash}
+
+    @property
+    def status(self) -> str:
+        """`REJECTED`, `PASS` or `FAIL` — the one word every view of a card prints.
+
+        A canary rejection wins over the verdict: a rejected model's scores are
+        not believed, so whether they cleared the thresholds is beside the point.
+        """
+        if self.canary and self.canary.get("rejected"):
+            return "REJECTED"
+        return "PASS" if (self.verdict or {}).get("passed") else "FAIL"
+
+
+#: What a broken chain means unless `verify()` can say something more precise.
+TAMPERED = (
+    "history has been edited or reordered; the scores above this point cannot "
+    "be trusted"
+)
+
 
 @dataclass(frozen=True)
 class ChainStatus:
@@ -68,14 +96,15 @@ class ChainStatus:
     n_cards: int
     broken_at: int | None = None
     reason: str = ""
+    #: The second line of `format()`: what to make of `reason`.
+    hint: str = TAMPERED
 
     def format(self) -> str:
         if self.valid:
             return f"ledger chain intact: {self.n_cards} card(s)"
         return (
             f"ledger chain BROKEN at card index {self.broken_at}: {self.reason}\n"
-            f"  history has been edited or reordered; the scores above this "
-            f"point cannot be trusted"
+            f"  {self.hint}"
         )
 
 
@@ -108,10 +137,19 @@ class Ledger:
             return {"corrupt": True}
 
     def _write_anchor(self, n_cards: int, head: str) -> None:
+        """Replace the anchor atomically: a reader sees the old one or the new one.
+
+        Written to a sibling temp file and renamed over the anchor, so a crash
+        mid-write cannot leave a half-written (unparseable) anchor behind.
+        """
         self.anchor_path.parent.mkdir(parents=True, exist_ok=True)
-        self.anchor_path.write_text(
-            json.dumps({"n_cards": n_cards, "head": head}, indent=2) + "\n"
-        )
+        tmp = self.anchor_path.with_name(self.anchor_path.name + ".tmp")
+        try:
+            _write_durably(tmp, json.dumps({"n_cards": n_cards, "head": head}, indent=2))
+            os.replace(tmp, self.anchor_path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def __len__(self) -> int:
         return sum(1 for _ in self.read())
@@ -142,9 +180,13 @@ class Ledger:
         card.prev_hash = self.head()
         card.seal()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # The line is on disk before the anchor names it, so a crash between the
+        # two leaves an anchor one card behind — a state `verify()` recognises —
+        # and never an anchor that promises a card the ledger does not hold.
         with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(card.payload() | {"card_hash": card.card_hash},
-                                sort_keys=True, separators=(",", ":")) + "\n")
+            fh.write(card_line(card))
+            fh.flush()
+            os.fsync(fh.fileno())
         self._write_anchor(self._count_lines(), card.card_hash)
         return card
 
@@ -158,8 +200,10 @@ class Ledger:
         """Walk the chain, check each link and hash, then check the anchor."""
         prev = GENESIS
         n = 0
+        tail_prev = GENESIS
         for i, card in enumerate(self.read()):
             n = i + 1
+            tail_prev = prev
             if card.prev_hash != prev:
                 return ChainStatus(
                     False,
@@ -193,14 +237,7 @@ class Ledger:
         if anchor.get("corrupt"):
             return ChainStatus(False, n, n, "anchor file is not valid JSON")
         if anchor.get("n_cards") != n or anchor.get("head") != prev:
-            return ChainStatus(
-                False,
-                n,
-                n,
-                f"anchor expects {anchor.get('n_cards')} card(s) ending at "
-                f"{str(anchor.get('head'))[:12]}..., but the ledger holds {n} "
-                f"ending at {prev[:12]}... — cards have been removed from the end",
-            )
+            return _anchor_disagrees(anchor, n, prev, tail_prev)
         return ChainStatus(True, n)
 
     def summary(self) -> str:
@@ -217,18 +254,62 @@ class Ledger:
         ]
         for c in rows:
             sc = c.scorecard or {}
-            passed = (c.verdict or {}).get("passed")
-            mark = "PASS" if passed else ("FAIL" if passed is not None else "-")
-            if c.canary and c.canary.get("rejected"):
-                mark = "REJECTED"
             lines.append(
                 f"{c.experiment_id:<10}{c.model + '@' + c.version:<{width}}"
                 f"{c.split:<10}{sc.get('brier_skill_score', float('nan')):>+9.4f}"
-                f"{sc.get('auc', float('nan')):>8.4f}  {mark}"
+                f"{sc.get('auc', float('nan')):>8.4f}  {c.status}"
             )
         lines.append("")
         lines.append(self.verify().format())
         return "\n".join(lines)
+
+
+def card_line(card: ExperimentCard) -> str:
+    """The canonical JSONL line for a card — the bytes `Ledger.append` writes.
+
+    Canonical (sorted keys, no whitespace) so that anyone can re-hash a line
+    with its `card_hash` member removed and get `card_hash` back.
+    """
+    return json.dumps(card.record(), sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def _write_durably(path: pathlib.Path, text: str) -> None:
+    """Write `text` and make sure it has reached the disk before returning."""
+    with path.open("w", encoding="utf-8") as fh:
+        fh.write(text + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _anchor_disagrees(anchor: dict, n: int, head: str, tail_prev: str) -> ChainStatus:
+    """Say what a disagreeing anchor means, without accusing an interrupted append.
+
+    An anchor exactly one card behind a ledger whose chain is intact is what a
+    crash between writing the card and updating the anchor leaves behind; it is
+    told apart from a truncated ledger, where the anchor promises *more* cards
+    than the file holds.
+    """
+    expected = anchor.get("n_cards")
+    disagreement = (
+        f"anchor expects {expected} card(s) ending at "
+        f"{str(anchor.get('head'))[:12]}..., but the ledger holds {n} ending at "
+        f"{head[:12]}..."
+    )
+    if expected == n - 1 and anchor.get("head") == tail_prev:
+        return ChainStatus(
+            False, n, n,
+            f"{disagreement} — the anchor is one card behind the ledger: the last "
+            "append was interrupted after its card was written and before the "
+            "anchor was updated",
+            hint="the chain itself is intact; the next append re-anchors it",
+        )
+    if isinstance(expected, int) and expected > n:
+        return ChainStatus(
+            False, n, n, f"{disagreement} — cards have been removed from the end"
+        )
+    return ChainStatus(
+        False, n, n, f"{disagreement} — the anchor and the ledger disagree"
+    )
 
 
 def utc_now() -> str:

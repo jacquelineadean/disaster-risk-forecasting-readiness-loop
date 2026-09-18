@@ -13,7 +13,15 @@ import pathlib
 from dataclasses import dataclass
 from typing import Sequence
 
-from readiness.connectors.base import Manifest, SourceRecord, fetch, sha256_bytes, utc_now
+from readiness.connectors.base import (
+    ConnectorError,
+    Manifest,
+    SourceRecord,
+    fetch,
+    pinned_bytes,
+    sha256_bytes,
+    utc_now,
+)
 
 COUNTY_URL = (
     "https://www2.census.gov/geo/docs/reference/codes2020/national_county2020.txt"
@@ -32,14 +40,28 @@ class County:
 
 
 def load(
-    snapshot_dir: pathlib.Path, manifest: Manifest, *, refresh: bool = False
+    snapshot_dir: pathlib.Path,
+    manifest: Manifest,
+    *,
+    refresh: bool = False,
+    allow_fetch: bool = True,
 ) -> list[County]:
-    """Fetch (or reuse) the county file and return every US county."""
+    """Fetch (or reuse) the county file and return every US county.
+
+    The cached file is reused only when its bytes hash to the manifest record
+    — the same rule `storm_events.snapshot` applies to kept raw files. Bytes
+    with no record, or that no longer match it, are unpinned and re-fetched
+    rather than used as data of unknown provenance; with `allow_fetch=False`
+    that is an error instead.
+    """
     cache = snapshot_dir / "national_county2020.txt"
-    # A cached file with no manifest record is unpinned — see the same guard in
-    # storm_events.snapshot. Re-fetch rather than use data of unknown provenance.
     key = "census/national_county2020"
-    if refresh or not cache.exists() or key not in manifest.records:
+    if refresh and not allow_fetch:
+        raise ConnectorError("refresh requested for the county file but fetching is not allowed")
+    data = None
+    if not refresh:
+        data = pinned_bytes(cache, manifest.records.get(key), allow_fetch=allow_fetch)
+    if data is None:
         data = fetch(COUNTY_URL)
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_bytes(data)
@@ -54,8 +76,6 @@ def load(
                 license=LICENSE,
             ),
         )
-    else:
-        data = cache.read_bytes()
     return parse(data)
 
 

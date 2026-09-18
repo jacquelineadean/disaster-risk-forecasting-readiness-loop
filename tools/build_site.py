@@ -7,9 +7,17 @@ committed ledgers, the blessed fingerprints, the captured transcripts, the
 hazard catalogue, the model registry — is generated here, from the same
 modules the CLI uses, into `site/generated/`:
 
-    contracts.json     every registered contract, its digest and describe() text
+    contracts.json     every registered contract, its digest and describe() text,
+                       and the path of its backtest report when one is committed
+    backtest/          experiments/<name>/backtest.html, copied when it exists
+    contract_defaults.json
+                       what a contract gets for everything it does not say
+                       (readiness.contracts.DEFAULTS); the register form reads it
     hazards.json       the hazard catalogue (readiness.config.HAZARDS)
-    models.json        the proposable models and the loop's baseline queue
+    models.json        the proposable models, each with its parameter schema
+                       and whether it needs features, and the loop's queues
+    features.json      the feature catalogue (readiness.engine.features.FEATURE_SETS):
+                       every set with its columns, sources, transforms and lags
     ledgers.json       every committed ledger: cards, raw lines, anchor, chain status
     expected.json      the blessed baseline fingerprints, one per contract
     panels.json        each contract's labelled panel: size, splits, event coverage
@@ -53,8 +61,8 @@ sys.path.insert(0, str(ROOT))
 from readiness import __version__, config, contracts as contracts_mod  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
 from readiness.agent import orchestrator  # noqa: E402
-from readiness.connectors import census  # noqa: E402
 from readiness.connectors.base import ConnectorError, Manifest  # noqa: E402
+from readiness.engine.features import FEATURE_SETS  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
 from readiness.harness.ledger import Ledger  # noqa: E402
 
@@ -89,7 +97,7 @@ def dump(path: pathlib.Path, obj: object) -> None:
 # ---------------------------------------------------------------------------
 
 
-def contract_view(c: contracts_mod.Contract) -> dict:
+def contract_view(c: contracts_mod.Contract, out: pathlib.Path) -> dict:
     return {
         "name": c.name,
         "version": c.version,
@@ -126,14 +134,46 @@ def contract_view(c: contracts_mod.Contract) -> dict:
         "hazard_coding": (
             config.HAZARDS[c.hazard].coding if c.hazard in config.HAZARDS else None
         ),
+        # Relative to site/generated/, or None: the ledgers page links the
+        # Phase 1 backtest report only for contracts that have committed one.
+        "backtest": copy_backtest(c, out),
     }
+
+
+def copy_backtest(c: contracts_mod.Contract, out: pathlib.Path) -> str | None:
+    """Copy `experiments/<name>/backtest.html` under generated/, if committed.
+
+    The report is built by `readiness backtest` from committed files only and
+    is itself committed beside the ledger; the site serves that file as is,
+    so what a visitor reads is exactly what `verify --phase 1` checked.
+    """
+    src = data_mod.paths(c).ledger.parent / "backtest.html"
+    if not src.exists():
+        return None
+    rel = f"backtest/{c.name}.html"
+    (out / "backtest").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, out / rel)
+    return rel
 
 
 def build_contracts(out: pathlib.Path) -> dict[str, contracts_mod.Contract]:
     registry = contracts_mod.registered()
-    dump(out / "contracts.json", [contract_view(c) for c in registry.values()])
-    log(f"contracts.json: {len(registry)} registered contract(s)")
+    views = [contract_view(c, out) for c in registry.values()]
+    dump(out / "contracts.json", views)
+    with_backtest = [v["name"] for v in views if v["backtest"]]
+    log(f"contracts.json: {len(registry)} registered contract(s); "
+        f"backtest reports for {with_backtest}")
+    # The defaults travel separately because contracts.json is the list the
+    # other pages iterate; the register form reads these so it never restates
+    # a default the package might change.
+    dump(out / "contract_defaults.json", dict(contracts_mod.DEFAULTS))
     return registry
+
+
+def model_params(spec) -> list[dict]:
+    """A model's parameter schema as a list, so `dump`'s key sorting keeps the
+    constructor's order."""
+    return [{"name": name, **p} for name, p in spec.params.items()]
 
 
 def build_hazards(out: pathlib.Path) -> None:
@@ -150,7 +190,20 @@ def build_hazards(out: pathlib.Path) -> None:
     )
 
 
+def candidate_view(c) -> dict:
+    return {
+        "model": c.model,
+        "changed": c.changed,
+        "hypothesis": c.hypothesis,
+        "kwargs": dict(c.kwargs),
+    }
+
+
 def build_models(out: pathlib.Path) -> None:
+    # The Phase 1 queue runs after the baselines under `loop --queue phase1`;
+    # it is exported when the orchestrator defines it so the sandbox page can
+    # list the feature candidates it will skip for want of packed sources.
+    phase1 = getattr(orchestrator, "PHASE1_QUEUE", ())
     dump(
         out / "models.json",
         {
@@ -158,15 +211,14 @@ def build_models(out: pathlib.Path) -> None:
                 {
                     "name": name,
                     "description": spec.description,
-                    "needs_panel": spec.needs_panel,
                     "is_canary_target": spec.is_canary_target,
+                    "needs_features": spec.needs_features,
+                    "params": model_params(spec),
                 }
                 for name, spec in REGISTRY.items()
             ],
-            "queue": [
-                {"model": c.model, "changed": c.changed, "hypothesis": c.hypothesis}
-                for c in orchestrator.BASELINE_QUEUE
-            ],
+            "queue": [candidate_view(c) for c in orchestrator.BASELINE_QUEUE],
+            "phase1_queue": [candidate_view(c) for c in phase1],
             "canary_candidate": {
                 "model": orchestrator.CANARY_CANDIDATE.model,
                 "changed": orchestrator.CANARY_CANDIDATE.changed,
@@ -182,6 +234,24 @@ def build_models(out: pathlib.Path) -> None:
     )
 
 
+def build_features(out: pathlib.Path) -> None:
+    """The feature catalogue as a list, in the engine's order.
+
+    Each column carries its spec verbatim (`FeatureSpec.to_dict`), so a reader
+    can see which source and transform produce it and how many months are
+    withheld before the period; the JavaScript renders a `list` parameter's
+    value against these names.
+    """
+    dump(
+        out / "features.json",
+        [
+            {"name": name, "columns": [spec.to_dict() for spec in specs]}
+            for name, specs in FEATURE_SETS.items()
+        ],
+    )
+    log(f"features.json: {len(FEATURE_SETS)} feature set(s)")
+
+
 def build_ledgers(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) -> None:
     ledgers: dict[str, dict] = {}
     for name, contract in registry.items():
@@ -194,7 +264,7 @@ def build_ledgers(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
         else:
             raw_lines = []
         for card, raw in zip(ledger.read(), raw_lines):
-            cards.append(card.payload() | {"card_hash": card.card_hash, "raw": raw})
+            cards.append(card.record() | {"raw": raw})
         status = ledger.verify()
         anchor = None
         if ledger.anchor_path.exists():
@@ -231,25 +301,6 @@ def build_expected(
     log(f"expected.json: fingerprints for {sorted(expected)}")
 
 
-def _pinned_locally(c: contracts_mod.Contract, snapshot_dir: pathlib.Path,
-                    fips_of: dict[str, str]) -> bool:
-    """True when every file `data_mod.build` would read is already on disk."""
-    if not (snapshot_dir / "census" / "national_county2020.txt").exists():
-        return False
-    if not c.states:
-        return False  # a national extract is not something the site packs
-    for state in c.states:
-        fips = fips_of.get(state)
-        if fips is None:
-            return False
-        for year in c.all_years():
-            if not (snapshot_dir / "storm_events" / f"{fips}_{year}.jsonl").exists():
-                return False
-    if c.zone_policy == "expand":
-        return (snapshot_dir / "nws" / "zone_county.dbx").exists()
-    return True
-
-
 def build_panels(
     out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
 ) -> dict[str, data_mod.Dataset]:
@@ -260,11 +311,12 @@ def build_panels(
     from readiness.harness import splits
 
     snapshot_dir = data_mod.SNAPSHOT_DIR
-    fips_of = _state_fips_map(snapshot_dir)
     panels: dict[str, dict | None] = {}
     datasets: dict[str, data_mod.Dataset] = {}
     for name, c in registry.items():
-        if not _pinned_locally(c, snapshot_dir, fips_of):
+        # `data_mod.pinned` is the package's own answer to "would build()
+        # download anything?"; the site never re-derives the layout itself.
+        if not data_mod.pinned(c, snapshot_dir):
             panels[name] = None
             log(f"panels.json: {name}: pinned data not present locally, skipped")
             continue
@@ -412,13 +464,6 @@ def _package_files() -> list[pathlib.Path]:
     )
 
 
-def _state_fips_map(snapshot_dir: pathlib.Path) -> dict[str, str]:
-    cache = snapshot_dir / "census" / "national_county2020.txt"
-    if not cache.exists():
-        return {}
-    return {c.state: c.fips[:2] for c in census.parse(cache.read_bytes())}
-
-
 def _filter_rows(text: str, keep: set[str]) -> tuple[str, int]:
     kept = []
     for line in text.splitlines():
@@ -439,7 +484,7 @@ def _generated_at(manifest_path: pathlib.Path) -> str | None:
 def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) -> None:
     snapshot_dir = data_mod.SNAPSHOT_DIR
     manifest = Manifest.load(snapshot_dir / "manifest.json")
-    fips_of = _state_fips_map(snapshot_dir)
+    fips_of = data_mod.state_fips(snapshot_dir)
 
     # Which states each contract needs, and with which event types.
     #   full         every event type: a visitor can register any hazard there
@@ -542,12 +587,8 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
             snapshot_dir / "nws" / "zone_county.dbx"
         ).exists():
             coverage = "missing"
-        used = ["census/national_county2020"]
-        used += [f"noaa/storm_events/{y}" for y in c.all_years()]
-        if needs_crosswalk:
-            used.append("nws/zone_county")
         try:
-            data_version = manifest.digest(used) if manifest else None
+            data_version = manifest.digest(data_mod.input_keys(c)) if manifest else None
         except ConnectorError:
             data_version = None
         expected_path = data_mod.paths(c).expected
@@ -606,6 +647,7 @@ def build(out: pathlib.Path, *, sandbox: bool = True) -> None:
     registry = build_contracts(out)
     build_hazards(out)
     build_models(out)
+    build_features(out)
     build_ledgers(out, registry)
     build_expected(out, registry)
     datasets = build_panels(out, registry)

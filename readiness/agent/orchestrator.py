@@ -24,17 +24,22 @@ matter of giving the agent more models to propose, not a rewrite.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import pathlib
 from dataclasses import dataclass, field
+from textwrap import indent
 from typing import Callable, Sequence
 
 from readiness import data as data_mod
+from readiness.agent import guard
 from readiness.contracts import Contract, Split
-from readiness.engine import build_model, needs_panel
+from readiness.engine import REGISTRY, build_model
+from readiness.engine.features import FEATURE_SETS
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
-from readiness.harness.ledger import ExperimentCard, Ledger, utc_now
-from readiness.harness.splits import TouchBudget, get_split
+from readiness.harness.ledger import GENESIS, ExperimentCard, Ledger, utc_now
+from readiness.harness.splits import TouchBudget, get_split, split_panel
 
 Progress = Callable[[str], None]
 
@@ -47,6 +52,49 @@ class Candidate:
     changed: str
     hypothesis: str
     kwargs: dict = field(default_factory=dict)
+
+    @property
+    def requires(self) -> tuple[str, ...]:
+        """The feature sets this candidate asks the harness for.
+
+        Read from its own `feature_sets` argument when it gives one, else
+        from the registry's default for a model that needs features, so the
+        loop can tell before fitting whether the loaded sources can serve it.
+        """
+        if "feature_sets" in self.kwargs:
+            return tuple(self.kwargs["feature_sets"])
+        spec = REGISTRY.get(self.model)
+        if spec is None or not spec.needs_features:
+            return ()
+        return tuple(spec.params["feature_sets"]["default"])
+
+    @property
+    def label(self) -> str:
+        """`model` alone, or `model[set+set]` when the candidate names its sets.
+
+        Three `logistic` entries in one queue would otherwise be told apart
+        only by reading their cards.
+        """
+        if "feature_sets" not in self.kwargs:
+            return self.model
+        sets = "+".join(self.requires) or "history-only"
+        return f"{self.model}[{sets}]"
+
+
+def sources_for(feature_sets: Sequence[str]) -> tuple[str, ...]:
+    """The source names the named feature sets draw on, from the engine's catalogue."""
+    names = {spec.source for name in feature_sets for spec in FEATURE_SETS[name]}
+    return tuple(sorted(names))
+
+
+def missing_sources(candidate: Candidate, dataset: data_mod.Dataset) -> tuple[str, ...]:
+    """Sources the candidate's feature sets need that the dataset did not load."""
+    return tuple(s for s in sources_for(candidate.requires) if s not in dataset.sources)
+
+
+def json_kwargs(kwargs: dict) -> dict:
+    """Constructor arguments as they are written on a card: JSON, tuples as lists."""
+    return json.loads(json.dumps(kwargs, sort_keys=True))
 
 
 #: The baseline queue. Deliberately short and deliberately unambitious: the
@@ -104,6 +152,129 @@ CANARY_CANDIDATE = Candidate(
 )
 
 
+#: The Phase 1 queue, run after the baselines. Each step changes one thing
+#: against the step before it, so a card's outcome can be read as evidence
+#: about that one change. Feature sets are named explicitly on every card so
+#: the same queue is legible in the ledger without the registry's defaults.
+PHASE1_QUEUE: tuple[Candidate, ...] = (
+    Candidate(
+        model="logistic",
+        kwargs={"feature_sets": []},
+        changed=(
+            "Replaced the seasonal climatology's lookup with a logistic regression "
+            "on one column: the leave-one-year-out shrunk seasonal-rate logit "
+            "computed inside fit() from training labels. No harness features yet."
+        ),
+        hypothesis=(
+            "A fitted slope and intercept on the history logit should reproduce the "
+            "seasonal climatology's ranking (AUC unchanged) and, because the "
+            "training rows see a leave-one-year-out rate, temper its over-confidence "
+            "in sparse cells: reliability no worse, BSS no lower. Falsified if the "
+            "history-only model scores below climatology-seasonal on BSS, which "
+            "would mean the LOYO shrinkage is throwing away signal, not noise."
+        ),
+    ),
+    Candidate(
+        model="logistic",
+        kwargs={"feature_sets": ["era5-antecedent"]},
+        changed=(
+            "Added the ERA5 antecedent set: trailing 1-, 3- and 12-month "
+            "precipitation, the ten-year same-period mean and the trailing "
+            "three-month temperature, every column cut one month before the period "
+            "by the harness and audited under poisoning."
+        ),
+        hypothesis=(
+            "Antecedent wetness conditions the hazard: a saturated catchment or an "
+            "anomalously wet season should raise the odds above the seasonal rate. "
+            "Expected to add resolution (BSS up, AUC up) over the history-only "
+            "model. Falsified if AUC does not move, which would say a one-month lag "
+            "leaves nothing of the antecedent signal for this period length."
+        ),
+    ),
+    Candidate(
+        model="logistic",
+        kwargs={"feature_sets": ["era5-antecedent", "terrain"]},
+        changed=(
+            "Added the terrain set on top of ERA5: elevation, water share and "
+            "latitude from the timeless geometry sources, the two static layers "
+            "the firewall admits without a vintage year."
+        ),
+        hypothesis=(
+            "Low, wet, coastal counties flood more often than high, dry inland ones, "
+            "and the history logit only knows that for cells with enough events. "
+            "Terrain should lift resolution where history is thin. Falsified if the "
+            "static columns add nothing over the antecedent model, which would mean "
+            "the history feature already carries the geography."
+        ),
+    ),
+    Candidate(
+        model="logistic+iso",
+        kwargs={"feature_sets": ["era5-antecedent", "terrain"]},
+        changed=(
+            "Wrapped the ERA5+terrain logistic in an isotonic map fitted on its own "
+            "forecasts for the last three training years (early years fit the "
+            "model, late years fit the map, then a refit on all of training)."
+        ),
+        hypothesis=(
+            "The uncalibrated logistic is expected to fail the reliability clause "
+            "while clearing AUC: a discriminating model is usually over-confident. "
+            "A monotone map fitted train-only should pull the populated bins inside "
+            "the tolerance band without changing the ranking, so AUC is unchanged "
+            "and the reliability check flips. Falsified if the map over-fits the "
+            "three late years and reliability on validate gets worse."
+        ),
+    ),
+    Candidate(
+        model="gbm",
+        kwargs={"feature_sets": ["era5-antecedent", "terrain"]},
+        changed=(
+            "Swapped the linear learner for histogram gradient boosting on the same "
+            "columns: depth-2 trees, 150 rounds, quantile bins, deterministic splits."
+        ),
+        hypothesis=(
+            "If wetness matters only above a threshold, or only in low-lying "
+            "counties, a linear model cannot say so and stumps can. Expected to "
+            "beat the logistic on AUC and to be less reliable, as boosted margins "
+            "usually are. Falsified if the trees do not beat the linear model on "
+            "AUC, which would mean the signal is additive and the extra capacity "
+            "buys nothing but variance."
+        ),
+    ),
+    Candidate(
+        model="gbm+iso",
+        kwargs={"feature_sets": ["era5-antecedent", "terrain"]},
+        changed=(
+            "Wrapped the boosted model in the same train-only isotonic map as the "
+            "logistic, so the two calibrated candidates differ only in the learner."
+        ),
+        hypothesis=(
+            "Whatever the boosted model gains in resolution it should keep under a "
+            "monotone recalibration, so this is expected to be the best-calibrated "
+            "high-AUC candidate. Falsified if it fails where logistic+iso passes, "
+            "which would say the boosted forecasts are too coarse for a map fitted "
+            "on three years to smooth."
+        ),
+    ),
+)
+
+#: The queues `readiness loop --queue` can name.
+QUEUES: dict[str, tuple[Candidate, ...]] = {
+    "baseline": BASELINE_QUEUE,
+    "phase1": BASELINE_QUEUE + PHASE1_QUEUE,
+}
+
+
+class PromotionRefused(RuntimeError):
+    """A test touch that would have no validate record behind it, or a second one.
+
+    `result` is the loop that ran before the refusal, when there was one, so a
+    caller that refuses to promote can still report the experiments it did
+    run instead of losing them to the traceback.
+    """
+
+    result: "LoopResult | None" = None
+
+
 @dataclass
 class LoopResult:
     contract: Contract
@@ -112,6 +283,10 @@ class LoopResult:
     passed: list[str]
     failed: list[str]
     rejected: list[str]
+    #: Candidates not run because the dataset lacked a source they need.
+    skipped: list[str] = field(default_factory=list)
+    #: The test card written by `promote=True`, when a candidate earned one.
+    promoted: ExperimentCard | None = None
 
     def format(self) -> str:
         lines = [
@@ -120,6 +295,15 @@ class LoopResult:
             f"  failed contract   {self.failed or '-'}",
             f"  rejected (canary) {self.rejected or '-'}",
         ]
+        if self.skipped:
+            lines.append(f"  skipped (sources) {self.skipped}")
+        if self.promoted is not None:
+            sc = self.promoted.scorecard
+            lines.append(
+                f"  promoted to test  {self.promoted.model}@{self.promoted.version} "
+                f"-> {self.promoted.status} (BSS {sc['brier_skill_score']:+.4f}, "
+                f"AUC {sc['auc']:.4f}; card {self.promoted.experiment_id})"
+            )
         return "\n".join(lines)
 
 
@@ -140,24 +324,34 @@ def run_experiment(
     """
     contract = dataset.contract
     panel = dataset.panel
-    model = build_model(
-        candidate.model,
-        panel=panel if needs_panel(candidate.model) else None,
-        **candidate.kwargs,
-    )
+    # Only a registered canary target ever receives the panel; the registry
+    # keeps a forecaster from ever being handed its own outcomes.
+    model = build_model(candidate.model, canary_panel=panel, **candidate.kwargs)
 
     if split.name == "test":
         if touch_budget is None:
             raise RuntimeError("scoring against test requires a touch budget")
-        touch_budget.check(model.name, model.version)
-
-    progress(f"  fit {model.name}@{model.version} on {contract.splits.train}")
-    card_scorecard, report = scoring.screen(model, panel, contract, split)
-    verdict = contract_mod.evaluate(card_scorecard, contract)
-
-    if split.name == "test" and touch_budget is not None:
+        # Build and audit the feature frame *before* paying. It is the same
+        # call `scoring` makes on the way to a fit, it takes units and never
+        # labels, and it is the one step that can still refuse: a missing
+        # source or an unclean audit must not burn the one touch. Everything
+        # after this point pays first and scores second, so a run interrupted
+        # after scoring cannot be re-run for free.
+        scoring._features(
+            model,
+            contract,
+            split_panel(panel, contract.splits.train),
+            split_panel(panel, split),
+            dataset.sources,
+        )
         spent = touch_budget.spend(model.name, model.version)
         progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
+
+    progress(f"  fit {model.name}@{model.version} on {contract.splits.train}")
+    card_scorecard, report = scoring.screen(
+        model, panel, contract, split, sources=dataset.sources
+    )
+    verdict = contract_mod.evaluate(card_scorecard, contract)
 
     if report.rejected:
         outcome = "REJECTED by leakage canary; contract verdict not honoured"
@@ -179,10 +373,48 @@ def run_experiment(
         scorecard=card_scorecard.to_dict(),
         verdict=verdict.to_dict(),
         canary=report.to_dict(),
-        data_snapshot=dataset.provenance(),
+        # The guarded code as it stood at scoring time, so a guarded agent run
+        # can check every card it produced against the harness it began with;
+        # and the constructor arguments, so a replay can rebuild the model.
+        data_snapshot=dataset.provenance()
+        | {
+            "harness_digest": guard.tree_digest(),
+            "model_kwargs": json_kwargs(candidate.kwargs),
+        },
         contract_digest=contract.digest(),
     )
     return ledger.append(card)
+
+
+def _same_data(built, validated: ExperimentCard, dataset: data_mod.Dataset) -> None:
+    """Refuse a touch earned on one version of the data and spent on another.
+
+    The validate pass is the evidence the touch is bought with; if the panel
+    or the feature extracts have been re-pulled since, the evidence is about
+    other numbers. Both versions are named so the difference can be looked up
+    in the manifest rather than guessed at.
+    """
+    snapshot = validated.data_snapshot or {}
+    stored = snapshot.get("data_version")
+    if stored != dataset.data_version:
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: validate card "
+            f"{validated.experiment_id} was scored on data version sha256:{stored}, and "
+            f"this dataset is sha256:{dataset.data_version}. Re-score it on validate "
+            "against the data in hand; a pass earned on other bytes does not buy the "
+            "touch."
+        )
+    card_features = snapshot.get("feature_version")
+    if card_features is None and not dataset.feature_version:
+        return
+    if (card_features or "") != (dataset.feature_version or ""):
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: validate card "
+            f"{validated.experiment_id} was scored on feature version "
+            f"sha256:{card_features or 'none'}, and this dataset is "
+            f"sha256:{dataset.feature_version or 'none'}. The features a model is "
+            "judged on are part of what earned the pass."
+        )
 
 
 def run_local(
@@ -194,9 +426,19 @@ def run_local(
     snapshot_dir: pathlib.Path = data_mod.SNAPSHOT_DIR,
     experiments_dir: pathlib.Path | None = None,
     dataset: data_mod.Dataset | None = None,
+    features: Sequence[str] = (),
+    promote: bool = False,
     progress: Progress = print,
 ) -> LoopResult:
-    """Run the loop for one contract with no language model in the control flow."""
+    """Run the loop for one contract with no language model in the control flow.
+
+    `features` names the feature connectors to load when the dataset is built
+    here. A candidate whose feature sets need a source that was not loaded is
+    skipped with a progress line rather than a card: a card records an
+    experiment, and "could not be run" is not one. With `promote`, the first
+    candidate in queue order whose card passed the contract with a clear
+    canary is then promoted to the test split, once.
+    """
     split = get_split(contract, split_name)
     where = data_mod.paths(contract, experiments_dir=experiments_dir)
 
@@ -204,10 +446,15 @@ def run_local(
     progress(f"  contract: {contract.name} (sha256:{contract.digest()})")
     if dataset is None:
         dataset = data_mod.build(
-            contract, snapshot_dir=snapshot_dir, progress=lambda m: progress("  " + m)
+            contract,
+            snapshot_dir=snapshot_dir,
+            features=features,
+            progress=lambda m: progress("  " + m),
         )
     progress(f"  panel: {dataset.panel.summary()}")
     progress(f"  data version: sha256:{dataset.data_version}")
+    if dataset.sources:
+        progress(f"  feature sources: {', '.join(sorted(dataset.sources))}")
 
     ledger = Ledger(where.ledger)
     budget = TouchBudget(where.touch_budget, contract.test_touch_budget)
@@ -217,16 +464,27 @@ def run_local(
         work.append(CANARY_CANDIDATE)
 
     cards: list[ExperimentCard] = []
-    passed: list[str] = []
-    failed: list[str] = []
-    rejected: list[str] = []
+    ran: list[tuple[Candidate, ExperimentCard]] = []
+    skipped: list[str] = []
+    # Tallied by the card's own status, so the loop's summary cannot disagree
+    # with the ledger's summary or the dashboard about what a card was.
+    tallies: dict[str, list[str]] = {"PASS": [], "FAIL": [], "REJECTED": []}
 
     for candidate in work:
-        progress(f"take action  [{candidate.model}]")
+        missing = missing_sources(candidate, dataset)
+        if missing:
+            progress(
+                f"skip         [{candidate.label}] needs source(s) {list(missing)} "
+                f"for feature set(s) {list(candidate.requires)}; not loaded"
+            )
+            skipped.append(candidate.label)
+            continue
+        progress(f"take action  [{candidate.label}]")
         card = run_experiment(
             candidate, dataset, split, ledger, touch_budget=budget, progress=progress
         )
         cards.append(card)
+        ran.append((candidate, card))
 
         progress("verify work")
         sc = card.scorecard
@@ -236,24 +494,223 @@ def run_local(
         )
         progress(f"  -> {card.outcome}")
 
-        if card.canary and card.canary["rejected"]:
-            rejected.append(card.model)
-        elif card.verdict["passed"]:
-            passed.append(card.model)
-        else:
-            failed.append(card.model)
+        tallies[card.status].append(candidate.label)
 
     progress("repeat  (queue exhausted)")
-    return LoopResult(contract, cards, dataset, passed, failed, rejected)
+    result = LoopResult(
+        contract, cards, dataset, tallies["PASS"], tallies["FAIL"], tallies["REJECTED"],
+        skipped=skipped,
+    )
+    if promote:
+        try:
+            result.promoted = _promote_first_pass(
+                ran, dataset, experiments_dir=experiments_dir, progress=progress
+            )
+        except PromotionRefused as exc:
+            # The queue ran and its cards are written; only the promotion was
+            # refused. Carry the result on the refusal so the caller can still
+            # report what the loop found before it says why nothing moved to
+            # the test split.
+            exc.result = result
+            raise
+    return result
+
+
+def _promote_first_pass(
+    ran: Sequence[tuple[Candidate, ExperimentCard]],
+    dataset: data_mod.Dataset,
+    *,
+    experiments_dir: pathlib.Path | None,
+    progress: Progress,
+) -> ExperimentCard | None:
+    """Promote the first candidate whose validate card is a PASS, or nobody."""
+    for candidate, card in ran:
+        if card.status == "PASS" and card.split == "validate":
+            progress(
+                f"promote      [{candidate.label}] first validate pass in queue order"
+            )
+            return promote(
+                dataset.contract, candidate.model, candidate.kwargs, dataset,
+                experiments_dir=experiments_dir, progress=progress,
+            )
+    progress("promote      nothing to promote: no candidate passed on validate")
+    return None
+
+
+def _validated(
+    ledger: Ledger, name: str, version: str, kwargs: dict, digest: str
+) -> ExperimentCard | None:
+    """The latest validate PASS card for exactly this model, version and arguments."""
+    found = None
+    for card in ledger.read():
+        if (
+            card.split == "validate"
+            and card.model == name
+            and card.version == version
+            and card.contract_digest == digest
+            and card.data_snapshot.get("model_kwargs") == kwargs
+            and card.status == "PASS"
+        ):
+            found = card
+    return found
+
+
+def _latest_validated(
+    ledger: Ledger, name: str, version: str, digest: str
+) -> ExperimentCard | None:
+    """The latest validate PASS card for this model and version, whatever its arguments."""
+    found = None
+    for card in ledger.read():
+        if (
+            card.split == "validate"
+            and card.model == name
+            and card.version == version
+            and card.contract_digest == digest
+            and card.status == "PASS"
+        ):
+            found = card
+    return found
+
+
+def promote(
+    contract: Contract,
+    model: str,
+    kwargs: dict | None,
+    dataset: data_mod.Dataset,
+    *,
+    experiments_dir: pathlib.Path | None = None,
+    progress: Progress = lambda _m: None,
+) -> ExperimentCard:
+    """The one atomic test touch: spend the budget and write the test card together.
+
+    `kwargs` None means "the arguments that earned the pass": the latest
+    validate PASS card for this model and version under the current digest is
+    read and its own constructor arguments are adopted and printed, so
+    `readiness promote logistic` promotes what was actually validated rather
+    than the registry's defaults. Given explicitly, they must still match a
+    validate card exactly.
+
+    Refused, in order, when: the dataset has not loaded a source the candidate
+    needs (a touch spent on a run that cannot build its features is a touch
+    spent on nothing); the ledger already holds *any* test card; no validate
+    card for exactly this model, version and arguments passed with a clear
+    canary; or the data the pass was earned on is not the data in hand.
+    Everything else is `run_experiment` as usual, with the budget it needs for
+    the test split.
+    """
+    where = data_mod.paths(contract, experiments_dir=experiments_dir)
+    ledger = Ledger(where.ledger)
+    digest = contract.digest()
+    identity = build_model(model)
+    name, version = identity.name, identity.version
+
+    if kwargs is None:
+        adopted = _latest_validated(ledger, name, version, digest)
+        if adopted is None:
+            raise PromotionRefused(
+                f"refusing to promote {name}@{version}: no validate card for it passed "
+                f"the contract (sha256:{digest}) with a clear canary, so there are no "
+                "arguments to adopt. Score it on validate first, or name the arguments "
+                "with --param."
+            )
+        kwargs = adopted.data_snapshot.get("model_kwargs") or {}
+        progress(
+            f"  arguments        {json.dumps(kwargs, sort_keys=True)} "
+            f"(adopted from validate card {adopted.experiment_id})"
+        )
+    built = build_model(model, **kwargs)
+    wanted = json_kwargs(kwargs)
+
+    # What the candidate would ask the harness for, before anything is spent.
+    probe = Candidate(model=model, changed="", hypothesis="", kwargs=dict(kwargs))
+    missing = missing_sources(probe, dataset)
+    if missing:
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: it needs source(s) "
+            f"{list(missing)} for feature set(s) {list(probe.requires)}; load them with "
+            "--features and promote again. The touch pays for a scored model, and a run "
+            "that cannot build its features scores nothing."
+        )
+
+    prior = [c for c in ledger.read() if c.split == "test"]
+    if prior:
+        first = prior[0]
+        under = (
+            "this contract"
+            if first.contract_digest == digest
+            else f"contract sha256:{first.contract_digest}"
+        )
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: the ledger already "
+            f"holds a test card ({first.experiment_id}, {first.model}@{first.version}, "
+            f"{first.status}, under {under}). The test years are spent once per ledger, "
+            "not once per contract version — re-registering the criteria does not make "
+            "them untouched again. A new contract name, not a second touch, is the "
+            "sanctioned next move."
+        )
+    validated = _validated(ledger, built.name, built.version, wanted, digest)
+    if validated is None:
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version} with arguments "
+            f"{json.dumps(wanted, sort_keys=True)}: no validate card for exactly this "
+            f"model, version and arguments passed the contract (sha256:{digest}) "
+            "with a clear canary. Score it on validate first; the test touch is "
+            "spent only on a result that was earned there."
+        )
+    _same_data(built, validated, dataset)
+
+    candidate = Candidate(
+        model=model,
+        kwargs=dict(kwargs),
+        changed=(
+            f"Promoted to the test split: the same model, version and arguments as "
+            f"validate card {validated.experiment_id}, which passed the contract with "
+            "a clear canary. Nothing about the model changed."
+        ),
+        hypothesis=(
+            "The validate result generalises to the untouched test years: BSS above "
+            "the contract's minimum, every populated bin within tolerance, AUC at or "
+            "above the floor. This is the one touch; whatever it says is the result, "
+            "and a failure here is a published card, not a reason to try again."
+        ),
+    )
+    budget = TouchBudget(where.touch_budget, contract.test_touch_budget)
+    return run_experiment(
+        candidate, dataset, contract.splits.test, ledger,
+        touch_budget=budget, progress=progress,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Claude Agent SDK backend
 # ---------------------------------------------------------------------------
 
+#: What the agent is told it may not edit. The first entries are what the
+#: guard hashes; the rest are the data and (from Phase 1) feature channels,
+#: which decide what the models see rather than how they are judged.
+FORBIDDEN_EDITS: tuple[str, ...] = (
+    "readiness/harness/",
+    "readiness/contracts.py",
+    "readiness/config.py",
+    "readiness/verify.py",
+    "readiness/data.py",
+    "readiness/agent/guard.py",
+    "readiness/connectors/",
+    "contracts/",
+    "snapshots/ (the data is pinned before the run; do not pull or edit it)",
+    "any module named `features` (the feature channel, Phase 1)",
+)
+
 
 def system_prompt(contract: Contract) -> str:
+    """The orchestrator's standing brief, built from the contract itself.
+
+    The vocabulary (hazard, geography, period, sources) comes from the
+    contract's own `describe()` rather than being written here, so the same
+    prompt serves a non-US contract the day one is registered.
+    """
     c = contract
+    forbidden = "\n".join(f"    {path}" for path in FORBIDDEN_EDITS)
     return f"""\
 You are the orchestrator of an open-source disaster-risk forecasting loop.
 
@@ -262,13 +719,21 @@ Your cycle is: gather context -> take action -> verify work -> repeat.
 You are running against the registered contract `{c.name}`
 (sha256:{c.digest()}). Its forecast unit is: at least one damaging {c.hazard}
 event in a given region during a given {c.period}, in {c.scope_label}.
+The contract, as the harness reads it:
+
+{indent(c.describe(), "    ")}
+
 Read it in full with `readiness contract -c {c.name}` before doing anything.
 
 RULES YOU CANNOT NEGOTIATE:
   * You may propose any model in readiness.engine. You may not modify anything
-    under readiness/harness/, readiness/contracts.py, readiness/config.py or
-    contracts/. Those files define how you are judged; editing them is not
-    iteration, it is cheating.
+    under
+{forbidden}
+    Those files define how you are judged and where your data comes from;
+    editing them is not iteration, it is cheating. An integrity guard hashes
+    those paths before and after the run, and every card you write is stamped
+    with the digest of the harness it was scored under; any change, even one
+    restored before the run ends, fails the run and discards its cards.
   * You never see holdout labels. Ask for them and the answer is no.
   * The validate split ({c.validate_years[0]}-{c.validate_years[-1]})
     is yours to iterate against. The test split
@@ -293,7 +758,9 @@ def run_claude(
 
     Requires `pip install 'readiness-loop[agent]'` and an ANTHROPIC_API_KEY.
     The harness is unchanged: the agent's tools call the very same functions the
-    local backend calls.
+    local backend calls. Because the agent holds Bash, `readiness.agent.guard`
+    hashes the guarded paths before the run and again after; any change raises
+    `HarnessTampered` and the run's cards are to be discarded.
     """
     try:
         from claude_agent_sdk import ClaudeAgentOptions, query  # type: ignore
@@ -324,10 +791,50 @@ def run_claude(
         "the ledger at the end."
     )
 
-    import asyncio
-
     async def _go() -> None:
         async for message in query(prompt=prompt, options=options):
             progress(str(message))
 
-    asyncio.run(_go())
+    ledger = Ledger(data_mod.paths(contract).ledger)
+    _run_guarded(lambda: asyncio.run(_go()), ledger=ledger)
+
+
+def _run_guarded(
+    run: Callable[[], None],
+    root: pathlib.Path = guard.REPO_ROOT,
+    ledger: Ledger | None = None,
+) -> None:
+    """Run the agent between two integrity snapshots of the guarded paths.
+
+    The check also runs when the agent raises: a run that crashed halfway can
+    still have edited the harness first, and that is the finding that matters
+    most, so `HarnessTampered` takes precedence over the agent's own error.
+
+    With a `ledger`, every card appended during the run must carry the digest
+    of the guarded code taken before it started; a card scored under an edited
+    and then restored harness carries a different one and fails the run.
+    """
+    before = guard.snapshot(root)
+    expected = guard.tree_digest(root)
+    n_before = len(ledger) if ledger is not None else 0
+    head_before = ledger.head() if ledger is not None else None
+    try:
+        run()
+    finally:
+        guard.check(before, root)
+        if ledger is not None:
+            cards = list(ledger.read())
+            # The cards that existed before the run must still be there,
+            # unchanged and in place: a run that emptied the ledger and wrote
+            # a fresh one would otherwise slip past the positional slice.
+            intact = (
+                len(cards) >= n_before
+                and (cards[n_before - 1].card_hash if n_before else GENESIS) == head_before
+                and ledger.verify().valid
+            )
+            if not intact:
+                raise guard.HarnessTampered(
+                    ["ledger: the cards that existed before the run were rewritten, "
+                     "reordered or removed"]
+                )
+            guard.check_cards(cards[n_before:], expected)

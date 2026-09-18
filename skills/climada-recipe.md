@@ -1,8 +1,15 @@
 # Skill: the CLIMADA recipe
 
-**Status: Phase 1, not yet implemented.** `readiness/engine/` ships climatologies
-only. This runbook exists so that when CLIMADA is wired in, the decisions that
-are expensive to reverse have already been made.
+**Status: Phase 1 ships the pinned-layer seam; the subprocess model is
+deferred.** CLIMADA itself is never imported by the package. A tool outside
+it, [`tools/climada/run_event_set.py`](../tools/climada/run_event_set.py),
+runs the event set with the `climada` extra and writes one file,
+`snapshots/climada/<hazard>_<scope_key>.jsonl`; the connector
+[`readiness/connectors/climada_layer.py`](../readiness/connectors/climada_layer.py)
+reads it, pins its bytes in the manifest, and hands the harness a static
+feature source. That file is the whole integration in Phase 1. The rest of
+this runbook records the decisions that were expensive to reverse, and
+[the seam](#the-pinned-layer-seam) says how the file is admitted.
 
 Report §3E and takeaway 3:
 
@@ -48,7 +55,41 @@ in `readiness/engine/`. It receives a `TrainingView` and returns probabilities
 like anything else. It gets no special standing because it is a physical model —
 it clears the same contract or it does not ship.
 
-## The integration shape
+## The pinned-layer seam
+
+```
+tools/climada/run_event_set.py --hazard inland_flood --scope US:LA --years 1996 2015 --seed N --out snapshots/climada/
+        │  (GPL-3.0 tool, `pip install climada`, never imported by the package)
+        ▼
+snapshots/climada/inland_flood_US:LA.jsonl
+  {"event_set_years": [1996, 2015], "seed": N, "climada_version": "...", "hazard": "inland_flood"}
+  {"region": "22001", "rp10": 0.8, "rp50": 1.6, "rp100": 2.1}
+  ...
+        │  readiness snapshot -c inland-flood-la --features climada   (pins the bytes)
+        ▼
+readiness.connectors.climada_layer.source(...)   static source "climada", derived_through = event_set_years[1]
+        │  readiness features -c inland-flood-la --features climada   (admission verdict)
+        ▼
+feature set "climada-prior": climada_rp10, climada_rp50, climada_rp100
+```
+
+The layer is **admissible only when the event set ends before the
+contract's first validate year**: `derived_through` is `event_set_years[1]`,
+and the harness refuses a static source whose year is at or after the first
+validate year (see [`docs/features.md`](../docs/features.md)). Under the
+current contracts, which validate from 2016, a set built from tracks or
+gauges through 2015 is admitted and one built through 2020 is refused — not
+silently dropped, refused, with the reason printed by `readiness features`.
+Build the set from inputs that end before the holdout, and record the seed,
+the year range and the CLIMADA version in the header; the tool writes them
+and the connector reads `derived_through` from the header, so the tool is
+the reviewed constant.
+
+The values in the file are the layer's own output and carry CC BY 4.0; the
+tool that produced them is GPL-3.0, which is why it lives in `tools/` and
+not in the package (`DATA-LICENSES.md`).
+
+## The integration shape (deferred: the subprocess model)
 
 ```
 readiness/engine/climada_glue.py

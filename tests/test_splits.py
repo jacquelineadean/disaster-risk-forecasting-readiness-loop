@@ -148,3 +148,39 @@ class TestTouchBudget(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFeaturesInTheView(unittest.TestCase):
+    def setUp(self):
+        from readiness.harness import features as F
+        from tests.test_features import FakeSeries
+
+        self.contract = make_contract()
+        self.panel = make_panel(contract=self.contract, n_regions=3)
+        self.train = self.contract.splits.train
+        self.train_panel = split_panel(self.panel, self.train)
+        specs = (F.FeatureSpec("p1", "era5", "precip_mm", "trailing_sum", 1),)
+        self.frame = F.build_frame(
+            specs, {"era5": FakeSeries()}, self.panel.units, self.contract.periods_per_year
+        )
+
+    def test_a_frame_with_holdout_units_is_refused(self):
+        with self.assertRaises(SplitViolation):
+            TrainingView(self.train_panel, self.train, self.frame)
+
+    def test_a_frame_restricted_to_training_units_is_exposed_with_a_digest(self):
+        frame = self.frame.restrict(self.train_panel.units)
+        view = TrainingView(self.train_panel, self.train, frame)
+        self.assertIs(view.features, frame)
+        self.assertEqual(view.feature_digest, frame.digest())
+        self.assertEqual(TrainingView(self.train_panel, self.train).feature_digest, "")
+
+    def test_restrict_narrows_years_and_slices_the_frame(self):
+        frame = self.frame.restrict(self.train_panel.units)
+        view = TrainingView(self.train_panel, self.train, frame)
+        sub = view.restrict(self.train.years[:5])
+        self.assertEqual(sorted({u[1] for u in sub.units()}), list(self.train.years[:5]))
+        self.assertEqual(set(sub.features.rows), set(sub.units()))
+        # Cannot widen: years outside the training split are simply ignored.
+        wide = view.restrict(self.contract.validate_years)
+        self.assertEqual(len(wide), 0)

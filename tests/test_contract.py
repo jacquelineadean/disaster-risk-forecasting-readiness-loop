@@ -91,14 +91,38 @@ class TestVerdict(unittest.TestCase):
         # A bin with 3 observations cannot fail a 5-point tolerance meaningfully.
         bins = list(card().reliability_bins)
         bins[3] = dict(
-            bins[3], count=3, observed_frequency=bins[3]["mean_forecast"] + 0.40
+            bins[3],
+            count=3,
+            populated=False,
+            observed_frequency=bins[3]["mean_forecast"] + 0.40,
         )
         self.assertTrue(
             contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT).passed
         )
 
+    def test_populated_is_read_from_the_card_not_recomputed(self):
+        # The flag is written at scoring time from the contract's minimum bin
+        # count. The verdict must judge the card it was handed: a bin the card
+        # calls thin is not judged whatever its count says, and a bin the card
+        # calls populated is judged even at n=3.
+        bins = list(card().reliability_bins)
+        bins[3] = dict(
+            bins[3],
+            count=1000,
+            populated=False,
+            observed_frequency=bins[3]["mean_forecast"] + 0.40,
+        )
+        self.assertTrue(
+            contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT).passed
+        )
+        bins[3] = dict(bins[3], count=3, populated=True)
+        verdict = contract_mod.evaluate(card(reliability_bins=tuple(bins)), CONTRACT)
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertFalse(rel.passed)
+        self.assertIn("n=3", rel.detail)
+
     def test_no_populated_bins_fails_rather_than_vacuously_passing(self):
-        bins = tuple(dict(b, count=1) for b in card().reliability_bins)
+        bins = tuple(dict(b, count=1, populated=False) for b in card().reliability_bins)
         verdict = contract_mod.evaluate(card(reliability_bins=bins), CONTRACT)
         self.assertFalse(verdict.passed)
         rel = next(c for c in verdict.checks if c.name == "reliability")
@@ -117,6 +141,111 @@ class TestVerdict(unittest.TestCase):
         prov = next(c for c in verdict.checks if c.name == "contract provenance")
         self.assertFalse(prov.passed)
         self.assertIn("contract changed", prov.detail)
+
+
+class TestCheckAndVerdictShapes(unittest.TestCase):
+    """format() and to_dict(): the printed and the serialised shape of a verdict."""
+
+    def test_check_format_marks_pass_and_fail(self):
+        passed = contract_mod.Check("auc", True, "0.9 vs required >= 0.7")
+        failed = contract_mod.Check("auc", False, "0.5 vs required >= 0.7")
+        self.assertEqual(
+            passed.format(), "  [PASS] auc                      0.9 vs required >= 0.7"
+        )
+        self.assertIn("[FAIL]", failed.format())
+        self.assertIn("auc", failed.format())
+        self.assertIn(failed.detail, failed.format())
+
+    def test_verdict_format_leads_with_the_contract_and_the_pass_fail_head(self):
+        verdict = contract_mod.evaluate(card(), CONTRACT)
+        text = verdict.format()
+        lines = text.splitlines()
+        self.assertIn(CONTRACT.name, lines[0])
+        self.assertIn(f"sha256:{CONTRACT.digest()}", lines[0])
+        self.assertTrue(lines[0].endswith("PASS"))
+        # One line per check, in the same order as verdict.checks.
+        self.assertEqual(len(lines), 1 + len(verdict.checks))
+        for line, check in zip(lines[1:], verdict.checks):
+            self.assertEqual(line, check.format())
+
+    def test_verdict_format_head_says_fail_when_any_check_fails(self):
+        verdict = contract_mod.evaluate(card(auc=0.0), CONTRACT)
+        self.assertTrue(verdict.format().splitlines()[0].endswith("FAIL"))
+
+    def test_verdict_to_dict_round_trips_every_field_including_nested_checks(self):
+        verdict = contract_mod.evaluate(card(), CONTRACT)
+        d = verdict.to_dict()
+        self.assertEqual(
+            set(d),
+            {"passed", "checks", "contract", "contract_version", "contract_digest"},
+        )
+        self.assertEqual(d["passed"], verdict.passed)
+        self.assertEqual(d["contract"], CONTRACT.name)
+        self.assertEqual(d["contract_version"], CONTRACT.version)
+        self.assertEqual(d["contract_digest"], CONTRACT.digest())
+        self.assertIsInstance(d["checks"], tuple)
+        self.assertEqual(len(d["checks"]), len(verdict.checks))
+        for entry, check in zip(d["checks"], verdict.checks):
+            self.assertEqual(entry, {
+                "name": check.name, "passed": check.passed, "detail": check.detail
+            })
+
+
+class TestReliabilityToleranceBoundary(unittest.TestCase):
+    """The reliability clause is `dev <= tolerance`: the tolerance value itself passes."""
+
+    def _card_with_deviation(self, dev: float) -> scoring.Scorecard:
+        bins = list(card().reliability_bins)
+        bins[3] = dict(bins[3], observed_frequency=bins[3]["mean_forecast"] + dev)
+        return card(reliability_bins=tuple(bins))
+
+    def test_deviation_exactly_at_tolerance_passes(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(self._card_with_deviation(tolerance), CONTRACT)
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertTrue(rel.passed, rel.detail)
+
+    def test_deviation_just_above_tolerance_fails(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(
+            self._card_with_deviation(tolerance + 1e-9), CONTRACT
+        )
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertFalse(rel.passed, rel.detail)
+
+    def test_deviation_just_below_tolerance_passes(self):
+        tolerance = CONTRACT.reliability_tolerance_pp
+        verdict = contract_mod.evaluate(
+            self._card_with_deviation(tolerance - 1e-9), CONTRACT
+        )
+        rel = next(c for c in verdict.checks if c.name == "reliability")
+        self.assertTrue(rel.passed, rel.detail)
+
+
+class TestHoldoutSplit(unittest.TestCase):
+    """A card scored on the training years may be printed but never PASS."""
+
+    def test_a_train_card_fails_on_the_holdout_check_alone(self):
+        verdict = contract_mod.evaluate(card(split="train"), CONTRACT)
+        self.assertFalse(verdict.passed)
+        failed = [c.name for c in verdict.checks if not c.passed]
+        self.assertEqual(failed, ["holdout split"])
+        self.assertIn("not a holdout", verdict.checks[-1].detail)
+
+    def test_validate_and_test_cards_pass(self):
+        for split in contract_mod.HOLDOUT_SPLITS:
+            with self.subTest(split=split):
+                self.assertTrue(contract_mod.evaluate(card(split=split), CONTRACT).passed)
+
+    def test_the_check_is_appended_after_the_original_four(self):
+        # Committed cards print their checks in this order; the new clause
+        # must not reorder them.
+        names = [c.name for c in contract_mod.evaluate(card(), CONTRACT).checks]
+        self.assertEqual(
+            names,
+            ["brier skill score", "reliability", "auc", "contract provenance",
+             "holdout split"],
+        )
 
 
 class TestAgainstRealModels(unittest.TestCase):
@@ -148,6 +277,13 @@ class TestAgainstRealModels(unittest.TestCase):
         self.assertEqual(card.contract, self.c.name)
         self.assertEqual(card.contract_digest, self.c.digest())
         self.assertIn(self.c.name, card.format())
+
+    def test_a_model_scored_on_its_own_training_years_cannot_pass(self):
+        card = scoring.score(ClimatologySeasonal(), self.panel, self.c, "train")
+        verdict = contract_mod.evaluate(card, self.c)
+        self.assertFalse(verdict.passed)
+        holdout = next(ch for ch in verdict.checks if ch.name == "holdout split")
+        self.assertFalse(holdout.passed)
 
     def test_the_same_model_scores_under_a_monthly_contract(self):
         monthly = make_contract(period="month")
