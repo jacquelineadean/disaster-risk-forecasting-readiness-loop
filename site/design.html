@@ -121,10 +121,10 @@
         <tbody>
           <tr><td><code>readiness/contracts.py</code></td><td>the contract</td><td>schema, validation, digest and registry. Not edited while iterating.</td></tr>
           <tr><td><code>readiness/config.py</code></td><td>harness policy</td><td>the hazard catalogue, the record start year, the canary ceilings — the few things that apply to every contract.</td></tr>
-          <tr><td><code>readiness/connectors/</code></td><td>data plane</td><td>base (pinning, HTTP), Census counties, Storm Events, NWS zones, the read-only MCP server.</td></tr>
-          <tr><td><code>readiness/engine/</code></td><td>the models</td><td>climatologies, persistence, and the leaky oracle the canary exists to reject.</td></tr>
-          <tr><td><code>readiness/agent/</code></td><td>agent plane</td><td>the orchestrator (both backends) and the subagent definitions.</td></tr>
-          <tr><td><code>readiness/harness/</code></td><td>eval plane</td><td>metrics, splits, labels, scoring, contract verdict, canary, ledger. No LLM. No agent writes.</td></tr>
+          <tr><td><code>readiness/connectors/</code></td><td>data plane</td><td>base (pinning, HTTP), Census counties, Storm Events, NWS zones, the read-only MCP server, and the Phase 1 feature sources — Gazetteer, Open-Meteo (ERA5), NRI, the pinned CLIMADA layer.</td></tr>
+          <tr><td><code>readiness/engine/</code></td><td>the models</td><td>climatologies, persistence, the leaky oracle the canary exists to reject, and the Phase 1 candidates — <code>logistic</code>, <code>gbm</code>, an isotonic calibrator — plus <code>features.py</code>, the proposable feature-set catalogue.</td></tr>
+          <tr><td><code>readiness/agent/</code></td><td>agent plane</td><td>the orchestrator (both backends), the subagent definitions, and <code>guard.py</code>, the integrity guard around <code>--backend claude</code>.</td></tr>
+          <tr><td><code>readiness/harness/</code></td><td>eval plane</td><td>metrics, splits, labels, scoring, contract verdict, canary, ledger, and <code>features.py</code> — the feature channel and its temporal firewall. No LLM. No agent writes.</td></tr>
         </tbody>
       </table></div>
     </div>
@@ -237,16 +237,16 @@ if leaked:
 
 <section class="section" id="engine"><div class="col">
   <p class="eyebrow">06 · The models</p>
-  <h2>Phase 0 ships climatologies only, on purpose.</h2>
+  <h2>Climatology baselines, then real candidates on harness-built features.</h2>
   <div class="cols">
     <div class="main">
-      <p>Models are hazard- and geography-agnostic by construction: they receive units of the form (region, year, period) and nothing else, so the same model can be proposed against any contract. Construction goes through a registry, so neither an agent nor a CLI user imports engine classes directly or passes a panel into a constructor — which is exactly how the leaky oracle cheats, and why building it requires naming it and handing it the panel explicitly.</p>
+      <p>Models are hazard- and geography-agnostic by construction: they receive units of the form (region, year, period), and a Phase 1 model additionally receives the harness-built, audited feature rows for those same units — never a panel, never a label. Construction goes through a registry, so neither an agent nor a CLI user imports engine classes directly or passes a panel into a constructor — which is exactly how the leaky oracle cheats, and why building it requires naming it and handing it the panel explicitly.</p>
       <div id="models"></div>
       <h3>The baseline queue</h3>
-      <p>The <code>local</code> backend walks the same short queue for every contract. Each candidate carries the two fields a human writes on an experiment card — what changed and why it should help, stated so it could be wrong.</p>
+      <p>The <code>local</code> backend walks the same short baseline queue for every contract by default; <code>--queue phase1</code> runs it and then the feature candidates (<code>logistic</code>, <code>logistic+iso</code>, <code>gbm</code>, <code>gbm+iso</code>), skipping any that need a source that was not loaded. Each candidate carries the two fields a human writes on an experiment card — what changed and why it should help, stated so it could be wrong.</p>
       <div id="queue"></div>
     </div>
-    <aside class="aside"><strong>Phase 1</strong><br>adds real candidate models, ERA5 features and CLIMADA integration here — the engine the agent should drive, extend and calibrate rather than reinvent. <em>Exit: BSS &gt; 0 on untouched test years with reliability within ±5 pts, published with the ledger.</em></aside>
+    <aside class="aside"><strong>Phase 1</strong><br><em>Built:</em> the harness-owned feature channel and its firewall, the ERA5/Gazetteer/NRI/pinned-CLIMADA connectors, the <code>logistic</code>/<code>gbm</code> candidates with an isotonic calibrator, <code>loop --queue phase1</code>, <code>promote</code> as the one atomic test touch, the backtest report and <code>verify --phase 1</code>. <em>Remaining:</em> the real-data run that spends the touch. <em>Exit: BSS &gt; 0 on untouched test years with reliability within ±5 pts, published with the ledger.</em></aside>
   </div>
 </div></section>
 
@@ -279,7 +279,7 @@ if leaked:
   <h2>A smoke alarm, not a proof.</h2>
   <div class="cols">
     <div class="main">
-      <p>The primary defence against a model scoring itself on data it should not have is structural — the two invariants above. The canary is the tripwire for when that structure is breached: an accidental join that carries the label column, a feature computed over the full panel, an agent that read a file it should not have. It is four heuristics over a model's <em>output</em>, and every one errs toward rejection: on this task, a forecast that separates outcomes almost perfectly is far more likely to be leaking than to be brilliant, whatever the hazard.</p>
+      <p>The primary defence against a model scoring itself on data it should not have is structural — the two invariants above. The canary is the tripwire for when that structure is breached: an accidental join that carries the label column, a feature computed over the full panel, an agent that read a file it should not have. It is five heuristics over a model's <em>output</em> — the fifth, feature provenance, is skipped for a model that declares no features, so a Phase 0 verdict is unchanged — and every one errs toward rejection: on this task, a forecast that separates outcomes almost perfectly is far more likely to be leaking than to be brilliant, whatever the hazard.</p>
       <div id="canary-checks"></div>
       <p class="mt16">The ceilings are harness policy, not contract terms: no contract may raise them. A sufficiently subtle leak that produces merely-excellent rather than impossible scores will pass — documented rather than papered over. Running the canary across base rates from 8% down to 0.66% is what exposed a check that had been implicitly calibrated to one hazard: judged as a pooled rate, near-zero forecasts on a rare hazard "agree" with the outcomes almost always and looked like a leak. The check is now per outcome class.</p>
     </div>
@@ -356,12 +356,14 @@ readiness hazards           list the hazard catalogue
 readiness models            list proposable models
 readiness snapshot          pull and pin the data, print the manifest   [-c NAME]
 readiness panel             build the labelled panel, print coverage   [-c NAME]
-readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features, --param]
-readiness promote MODEL     the one test touch: score on test and write the card  [-c NAME] --spend-test-touch
-readiness loop              run the full experimental loop  [-c NAME] [--backend local|claude]
+readiness features          load the feature sources, print admission verdicts and the audit  [-c NAME] [--features era5,terrain,nri,climada]
+readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features ...] [--param k=v]*
+readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1] [--features ...] [--promote] [--backend local|claude]
+readiness promote MODEL     the one atomic test touch: spend the budget and write the test card  [-c NAME] --spend-test-touch
+readiness backtest          write experiments/&lt;name&gt;/backtest.html from committed files only  [-c NAME] [-o PATH]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
-readiness ledger            show and verify the experiment ledger  [-c NAME]
-readiness verify            check the Phase 0 exit criteria  [-c NAME] [--bless]
+readiness ledger            show and verify the experiment ledger  [-c NAME] [--show] [--id ID]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1] [--replay] [--bless]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]</code></pre>
@@ -369,24 +371,30 @@ readiness mcp               run the read-only MCP data server on stdio  [-c NAME
     </div>
     <div>
 <pre class="code"><code>readiness/
-  contracts.py       the contract schema, validation, digest and registry
+  contracts.py       the contract schema, validation, digest and registry. Not edited while iterating.
   config.py          harness-wide policy: hazard catalogue, record start, canary ceilings
-  connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server
-  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger
-  engine/            proposable models: climatologies, persistence, the canary target
-  agent/             orchestrator + subagent definitions
+  data.py            builds a contract's dataset: snapshot, panel, provenance
+  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only)
+  backtest.py        the Phase 1 report, rendered from committed files only
+  connectors/        data plane: base (pinning, HTTP), census, storm_events, nws_zones, mcp_server,
+                     gazetteer, open_meteo, nri, climada_layer (the Phase 1 feature sources)
+  harness/           eval plane: metrics, splits, labels, scoring, contract, canary, ledger,
+                     features.py (the feature channel and its temporal firewall)
+  engine/            proposable models: climatologies, persistence, the canary target,
+                     features.py (the catalogue), history.py, linear.py, boosting.py, calibrate.py
+  agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
 contracts/           registered contracts, one JSON file each; three examples ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
-docs/                how-it-works.md, contracts.md, media/
-skills/              agent runbooks: verification protocol, experiment-card format
-tools/               build_report.py, build_site.py, demo/capture.py
+docs/                how-it-works.md, contracts.md, features.md, backtest.md, media/
+skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
+tools/               build_report.py, build_site.py, demo/capture.py, climada/ (the GPL tool, never imported)
 plans/               scenario library — the Phase 3 seed
 site/                this website
-tests/               260+ tests, no network required</code></pre>
+tests/               unittest suite, no network required</code></pre>
     </div>
   </div>
 </div></section>
@@ -438,6 +446,7 @@ tests/               260+ tests, no network required</code></pre>
       <tr><td><strong>implausible AUC</strong></td><td>discrimination is near-perfect</td><td class="num">AUC &gt; ${ceil.max_plausible_auc}</td></tr>
       <tr><td><strong>outcome agreement</strong></td><td>near-one forecasts capture the occurrences <em>and</em> near-zero forecasts capture the non-occurrences — judged per outcome class, so an honest rare-event climatology with no near-one group cannot trip it</td><td class="num">both shares &gt; ${(100 * ceil.max_agreement).toFixed(1)}%</td></tr>
       <tr><td><strong>train provenance</strong></td><td>the training digest the model declares does not match the one the harness exposed through its <code>TrainingView</code></td><td class="num">mismatch</td></tr>
+      <tr><td><strong>feature provenance</strong></td><td>the feature-frame digest a model declares does not match the one the harness built and audited for it; skipped when the run built no feature frame at all, so a model with no features is unaffected</td><td class="num">mismatch</td></tr>
     </tbody></table></div>`;
   const led = ledgers["tornado-ok"] || Object.values(ledgers)[0];
   if (led) {

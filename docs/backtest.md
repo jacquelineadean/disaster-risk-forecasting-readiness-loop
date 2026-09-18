@@ -42,8 +42,11 @@ the last card, or edited after it, is stale and the check fails.
   (`dashboard.reliability_svg`), the Murphy terms, the bin table, the
   verdict per clause, its `card_hash`, and the **total number of test touches
   in the ledger**.
-- **Deliberately not tried**: the candidates the queue names and the run
-  skipped, with the reason (sources not loaded; set inadmissible).
+- **Deliberately not tried**: not the candidates a particular run happened to
+  skip — this is a fixed list of three inputs deferred by design (the CLIMADA
+  subprocess model, AIWP reforecasts, in-period nowcasts), with the reason
+  each is out of scope for this phase. It renders the same regardless of
+  which contract or ledger the report is built from.
 - **Attribution**, from [`DATA-LICENSES.md`](../DATA-LICENSES.md): the
   Open-Meteo CC BY line for the ERA5 extract, the public-domain lines for
   Storm Events, the Census and FEMA, the CLIMADA line if a layer was used —
@@ -56,11 +59,16 @@ The test card is the only card on the page that says anything about the
 future the contract was written for. Read it in this order:
 
 1. **The touch count.** The report prints how many cards in the ledger have
-   `split == "test"` under the current contract digest. The number to expect
-   is **one**. `verify --phase 1` further requires the passing test card to
-   be the *first* test card in the ledger: a pass that follows an earlier
-   failed touch is not a pass, it is test-shopping, whatever version number
-   the second model carried.
+   `split == "test"` — every one ever written under this contract's name,
+   under any contract digest, not only the current one. It is not the same
+   count as "the test card" shown next to it, which is looked up under the
+   current digest specifically and requires there to be exactly one. A touch
+   count greater than one is not itself a failure: it means an earlier
+   version of this contract was touched too, and the ledger shows both.
+   `verify --phase 1` further requires the passing test card to be the
+   *first* test card in the ledger, whatever digest it was written under: a
+   pass that follows an earlier failed touch is not a pass, it is
+   test-shopping, whatever version number the second model carried.
 2. **The verdict, re-derived.** The verdict shown is the one on the card;
    `verify --phase 1` recomputes it from the stored scorecard with the same
    `evaluate()` the loop used (BSS > 0, every populated bin within tolerance,

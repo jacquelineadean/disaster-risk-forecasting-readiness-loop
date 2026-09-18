@@ -124,7 +124,9 @@ calibration: in the 0.2–0.3 bin it forecast 0.245 and 0.322 was observed, a
 7.7-point miss where the contract allows 5. The reliability table is the
 diagram in numbers; the [dashboard](#7-read-the-ledger) draws it.
 
-The canary is clear on all four checks, and says why in each case.
+The canary is clear on every check, and says why in each case — including
+the fifth, feature provenance, which is skipped here and says so: this model
+declares no features, so there is no frame digest to compare.
 
 ## 6. Run the loop
 
@@ -272,9 +274,11 @@ The command still exits 0; the refusal is the firewall working, not a fault.
 **Run the Phase 1 queue.** `--queue phase1` runs the baselines and then the
 feature candidates — `logistic` history-only, `logistic` with ERA5, with ERA5
 and terrain, `logistic+iso`, `gbm`, `gbm+iso` — each on `validate`, each
-writing a card whose `data_snapshot` records the constructor arguments, the
-feature columns and the audit. A candidate whose sets need a source that was
-not loaded is skipped with a progress line, not a card.
+writing a card whose `data_snapshot` records the constructor arguments
+(`model_kwargs`) and, when a source was loaded, the feature manifest digest
+and keys, while its `scorecard` records the feature columns and the audit.
+A candidate whose sets need a source that was not loaded is skipped with a
+progress line, not a card.
 
 ```bash
 readiness loop -c tornado-ok --queue phase1 --features era5,terrain

@@ -21,7 +21,15 @@ marks every prior experiment as incomparable — that is the intended cost.
 | | |
 |---|---|
 | **May** | propose any model in `readiness/engine/`, choose feature *sets* from the catalogue (`readiness/engine/features.py`, `FEATURE_SETS`) by name, change hyperparameters, iterate on `validate` as often as you like |
-| **May not** | edit anything under `readiness/harness/`, `readiness/connectors/` or `snapshots/`, edit `readiness/contracts.py`, `readiness/config.py`, `readiness/data.py`, `readiness/verify.py`, `readiness/agent/guard.py`, any module named `features` or any file in `contracts/` (the integrity guard hashes all of these and every card records the digest it was scored under), read holdout labels, score `test` more than the contract's budget allows per model version |
+| **May not** | edit anything under `readiness/harness/` (including its `features.py`, the harness's audited feature channel), `readiness/connectors/` or `snapshots/`, edit `readiness/contracts.py`, `readiness/config.py`, `readiness/data.py`, `readiness/verify.py`, `readiness/agent/guard.py`, or any file in `contracts/` (the integrity guard hashes every path above and every card records the digest it was scored under — see `readiness/agent/guard.py`'s `GUARDED_CODE`); read holdout labels; score `test` more than the contract's budget allows per model version |
+
+`readiness/engine/features.py`, the proposable feature-set catalogue, is
+deliberately **not** on the guarded list: the agent is meant to propose
+feature sets from it by name, and the closed transform vocabulary it draws
+from is what keeps a proposal safe, not a hash on the catalogue file. Every
+row it produces is still built and audited by the guarded harness
+(`readiness/harness/features.py`) before any fit, whatever the catalogue
+says.
 
 If you find yourself wanting to change a threshold because a model is close,
 that is the moment the protocol exists for. Write the experiment card saying the

@@ -284,10 +284,11 @@ Two invariants hold everywhere, and most of the design follows from them:
 
 **No model ever receives a holdout label.** `splits.TrainingView` is the only
 channel a model gets data through, and it raises if handed a panel containing a
-validate or test year. `predict()` receives bare units. Labels are fetched in
-`scoring._fit_predict()` *after* `predict()` has returned — one function, readable
-in one sitting, which is the point; `score()`, `predictions_for()` and `screen()`
-all go through it.
+validate or test year. `predict()` receives units and — for a Phase 1 model —
+the harness-built and audited feature rows for exactly those units; never a
+label. Labels are fetched in `scoring._fit_predict()` *after* `predict()` has
+returned — one function, readable in one sitting, which is the point;
+`score()`, `predictions_for()` and `screen()` all go through it.
 
 **Nothing in the harness calls a language model.** Verification has to be
 rules-based to be worth anything. If an LLM wants these numbers it reads them

@@ -120,9 +120,12 @@ on every scoring call and before any fit:
    mostly-missing column is a finding about the data, not a refusal.
 
 An unclean audit raises before `fit()`; the model never sees the frame. The
-audit's findings are recorded on the card (`data_snapshot.feature_audit`),
-and the canary's fifth check compares the feature digest the model declares
-against the digest of the frame the harness actually handed it.
+audit's findings are recorded on the card's scorecard (`scorecard.feature_audit`,
+alongside `scorecard.feature_columns` and `scorecard.feature_digest`; the
+constructor arguments and, when sources were loaded, the feature manifest
+digest and keys live separately under `data_snapshot`), and the canary's
+fifth check compares the feature digest the model declares against the
+digest of the frame the harness actually handed it.
 
 ## What the harness proves, and what it trusts
 

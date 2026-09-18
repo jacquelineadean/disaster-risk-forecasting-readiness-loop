@@ -20,8 +20,6 @@ The "manifest key" column is the prefix the connector pins under in
 `snapshots/manifest.json`; `readiness.connectors.CONNECTORS` is the registry
 and `tests/test_connectors.py` checks that every entry has a row here.
 
-None of these layers imposes a share-alike obligation, so **the Phase 0 derived panel
-carries no inherited licence constraint**. This project's own code is Apache-2.0.
 | layer | source | manifest key | licence | share-alike? | obligations |
 |---|---|---|---|---|---|
 | Hazard ground truth | NOAA NCEI Storm Events Database | `noaa/storm_events/` | US Government work, public domain (17 U.S.C. §105) | no | cite NOAA NCEI; **never a feature** (label origin) |
