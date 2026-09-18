@@ -16,13 +16,21 @@ on:
         required: false
         default: "tornado-ok"
       phase:
-        description: "Exit criteria to verify: 0 (baselines reproduce) or 1 (the promoted test card)"
+        description: "Exit criteria to verify: 0 (baselines reproduce), 1 (the promoted test card) or 2 (the fleet, the exposure join, the brief)"
         required: false
         default: "0"
       features:
         description: "Feature connectors to pull and load, comma-separated (era5,terrain,nri,climada)"
         required: false
         default: "era5,terrain"
+      period:
+        description: "Phase 2 only: the period to issue, in the contract's shape (2026-Q4, 2026-M11, 2026)"
+        required: false
+        default: ""
+      states:
+        description: "Phase 2 only: states to pin USA Structures counts for, comma-separated; empty pulls every state"
+        required: false
+        default: ""
       extra_args:
         description: "Extra arguments appended to `readiness verify`"
         required: false
@@ -49,6 +57,7 @@ jobs:
             snapshots/storm_events
             snapshots/fema
             snapshots/climada
+            snapshots/usa_structures
           key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
       - name: Pull and pin the contract's data
         run: >
@@ -67,14 +76,57 @@ jobs:
       - name: Write the backtest report
         if: ${{ inputs.phase == '1' }}
         run: python -m readiness.cli backtest -c ${{ inputs.contract }}
-      - name: Verify the exit criteria
+      # Phase 2 runs the fleet rather than one contract: every national contract
+      # through the Phase 2 queue with promotion, then the exposure pull and its
+      # spot-check, then one issued file and one brief per passing contract. The
+      # spot-check and the per-contract refusals do not fail the job on their
+      # own; `verify --phase 2` at the end is the gate.
+      - name: Run the fleet over every national contract
+        if: ${{ inputs.phase == '2' }}
+        continue-on-error: true
         run: >
-          python -m readiness.cli verify -c ${{ inputs.contract }}
-          --phase ${{ inputs.phase }}
-          ${{ inputs.extra_args }}
+          python -m readiness.cli fleet --national --queue phase2 --promote
+          --features "${{ inputs.features }}"
+      - name: Write every contract's backtest report
+        if: ${{ inputs.phase == '2' }}
+        run: |
+          for c in $(python -m readiness.cli contracts --names); do
+            python -m readiness.cli backtest -c "$c" || exit 1
+          done
+      - name: Pull and pin the USA Structures county counts
+        if: ${{ inputs.phase == '2' }}
+        run: |
+          if [ -n "${{ inputs.states }}" ]; then
+            python -m readiness.cli exposure snapshot --states "${{ inputs.states }}"
+          else
+            python -m readiness.cli exposure snapshot --all-states
+          fi
+      - name: Spot-check the exposure join against the assessor counts
+        if: ${{ inputs.phase == '2' }}
+        continue-on-error: true
+        run: python -m readiness.cli exposure spot-check
+      - name: Issue the promoted model for every passing contract
+        if: ${{ inputs.phase == '2' && inputs.period != '' }}
+        run: >
+          make issue-all PERIOD="${{ inputs.period }}"
+          FEATURES="${{ inputs.features }}"
+      - name: Write a brief per county of every spot-checked state
+        if: ${{ inputs.phase == '2' && inputs.period != '' }}
+        run: make brief-all PERIOD="${{ inputs.period }}"
+      # Phase 2 takes no contract: its criteria are about the whole registry.
+      - name: Verify the exit criteria
+        run: |
+          if [ "${{ inputs.phase }}" = "2" ]; then
+            python -m readiness.cli verify --phase 2 ${{ inputs.extra_args }}
+          else
+            python -m readiness.cli verify -c "${{ inputs.contract }}" \
+              --phase "${{ inputs.phase }}" ${{ inputs.extra_args }}
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: real-data-${{ inputs.contract }}
           path: |
-            experiments/${{ inputs.contract }}
+            experiments
+            issued
+            briefs
             snapshots/manifest.json

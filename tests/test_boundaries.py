@@ -44,6 +44,37 @@ RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         "the backtest report is built from committed files; it never scores, "
         "never calls an agent and never an LLM",
     ),
+    (
+        "readiness/exposure",
+        ("readiness.harness.labels", "readiness.harness.scoring", "readiness.agent",
+         "claude_agent_sdk", "anthropic"),
+        "exposure is a join, never a covariate: it never sees labels, scores, "
+        "the agent plane or an LLM client",
+    ),
+    (
+        "readiness/issue.py",
+        ("claude_agent_sdk", "anthropic", "readiness.agent.orchestrator",
+         "readiness.agent.subagents", "readiness.harness.scoring"),
+        "issuance refits a model the ledger already validated and forecasts a "
+        "period nobody scored: no LLM client, no agent control flow, and no "
+        "scoring, because there is nothing yet to score it against "
+        "(`readiness.agent.guard` is the hashing utility that stamps the "
+        "harness digest, and is not the agent plane)",
+    ),
+    (
+        "readiness/brief.py",
+        ("readiness.harness.labels", "readiness.harness.scoring", "readiness.agent",
+         "claude_agent_sdk", "anthropic"),
+        "the brief is prose about numbers computed elsewhere: it sees neither "
+        "labels, scores, the agent plane nor an LLM client",
+    ),
+    (
+        "readiness/cite.py",
+        ("readiness.harness.labels", "readiness.harness.scoring", "readiness.agent",
+         "claude_agent_sdk", "anthropic"),
+        "the citation validator checks model prose; it must see neither labels, "
+        "scores, the agent plane nor an LLM client",
+    ),
 )
 
 #: Non-stdlib, non-package modules tolerated anywhere, and where. Each must be

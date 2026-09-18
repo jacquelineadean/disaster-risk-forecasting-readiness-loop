@@ -15,7 +15,7 @@ from readiness.agent.subagents import (
     hazard_analyst,
     subagents_for,
 )
-from readiness.config import HAZARDS
+from readiness import contracts
 from tests.fixtures import make_contract
 
 WRITE_TOOLS = {"Write", "Edit"}
@@ -59,7 +59,7 @@ class TestSubagentsFor(unittest.TestCase):
 
 
 class TestNoSubagentEverHasWriteOrEdit(unittest.TestCase):
-    """The invariant holds for every catalogued hazard, not just the fixture's."""
+    """The invariant holds for every registered contract, not just the fixture's."""
 
     def test_all_hazard_analysts(self):
         for name, spec in all_hazard_analysts().items():
@@ -72,11 +72,27 @@ class TestNoSubagentEverHasWriteOrEdit(unittest.TestCase):
     def test_data_steward(self):
         self.assertFalse(WRITE_TOOLS & set(data_steward()["tools"]))
 
-    def test_every_catalogued_hazard_has_an_analyst(self):
+    def test_every_registered_contract_has_an_analyst_keyed_by_its_name(self):
+        registry = contracts.registered()
         analysts = all_hazard_analysts()
-        self.assertEqual(
-            set(analysts), {f"hazard-analyst-{h.replace('_', '-')}" for h in HAZARDS}
-        )
+        self.assertEqual(list(analysts), sorted(registry))
+        for name, c in registry.items():
+            with self.subTest(contract=name):
+                self.assertIn(f"contract `{name}`", analysts[name]["prompt"])
+                self.assertIn(c.hazard, analysts[name]["prompt"])
+                self.assertIn(c.scope_label, analysts[name]["prompt"])
+
+    def test_an_injected_registry_replaces_the_registered_set(self):
+        registry = {
+            "heat-yy": make_contract(name="heat-yy", hazard="heat", period="month",
+                                     scope={"states": ["YY"]}),
+            "flood-zz": make_contract(name="flood-zz"),
+        }
+        analysts = all_hazard_analysts(registry)
+        self.assertEqual(list(analysts), ["flood-zz", "heat-yy"])
+        self.assertIn("month", analysts["heat-yy"]["prompt"])
+        self.assertIn("US, YY", analysts["heat-yy"]["prompt"])
+        self.assertEqual(all_hazard_analysts({}), {})
 
 
 class TestHazardAnalystWithoutAContract(unittest.TestCase):

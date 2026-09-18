@@ -8,7 +8,7 @@ records what was decided, what was built, and what each phase still owes.
 |---|---|---|
 | R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
 | 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
-| 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | pending |
+| 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
 | 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | pending |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
 
@@ -319,11 +319,14 @@ backtest.
 spot-validated against county assessor counts in ten sampled counties.
 
 - Six national contracts registered as data; `readiness fleet` runs them
-  sequentially through the Phase 1 queue; per-contract ledgers and budgets.
+  sequentially through the Phase 1 queue (delivered as the Phase 2 queue,
+  §3.1); per-contract ledgers and budgets.
 - Exposure: FEMA/ORNL USA Structures counts per county and occupancy class,
   pinned per state; `ExposureTable` has no sub-county field by construction.
   Spot-check against a committed `assessor_counts.csv` with ratio bounds; rows
-  outside the bounds do not count toward the ten.
+  outside the bounds do not count toward the ten, and the ten must come from
+  at least three states, so one state's assessor convention cannot carry the
+  criterion.
 - Issuance: `readiness issue` refits the validated model through TrainingView,
   requires the training and feature digests to match the test card, builds the
   target period's features under the same firewall, and writes a probability
@@ -336,6 +339,108 @@ spot-validated against county assessor counts in ten sampled counties.
 
 **Needs the data run:** which four hazards pass; the USA Structures layer
 vocabulary; the ten assessor counts (collected by a person, with URLs).
+
+### 3.1. Phase 2 status
+
+Built, on the branch stacked above Phase 1, green with the guard (886 tests,
+no skips):
+
+- Six national contracts registered as data through the CLI, no hand edits
+  (`inland-flood-us`, `tornado-us`, `hail-us`, `severe-wind-us` quarterly;
+  `winter-storm-us`, `heat-us` monthly with the zone crosswalk); their
+  digests are pinned by a test; none has a ledger yet.
+- `readiness fleet`: sequential loops per contract with the Phase 2 queue
+  (logistic, calibrated logistic, a capped boosted model and its calibrated
+  form), continuing past a contract whose data is missing, promoting where a
+  validate pass exists, and a ledger-only `--status` table; every card now
+  records its wall-clock cost.
+- Exposure: USA Structures county counts pulled per state through paged
+  statistics queries and pinned, an occupancy mapping marked to confirm on
+  the first real pull, a county table with no sub-county field by
+  construction, and the assessor spot-check over a header-only committed CSV
+  with a declared ratio band; rows outside the band never count toward the
+  ten.
+- `readiness/cite.py`: the six citation rules every human-facing document
+  passes (uncited sentence, unknown claim, unresolved source, a cited value
+  the artefact does not hold, number without a claim, forbidden phrasing),
+  with identifier exemptions the document names and the fixed alerts
+  disclaimer; `plans/guidance.json` registers the guidance documents.
+- `readiness issue`: refits the validated model through the training view,
+  requires the training and feature digests to match the test card, builds
+  and audits the target period's frame under the firewall, refuses a period
+  inside the years the contract spans and one the series data does not yet
+  reach, refuses to overwrite an issued file without `--reissue`, and has no
+  parameter through which a label could arrive (a test flips every holdout
+  label and gets a byte-identical file).
+- `readiness brief`: one paragraph per contract covering the county, every
+  number a cited claim, exposure stated or its absence stated (never
+  substituted), the alerts disclaimer citing its guidance entry, written only
+  when validation is clean; never below the county, never "would touch".
+- `readiness verify --phase 2`, the briefs page on the site, `docs/brief.md`.
+
+Four decisions taken while building: the fleet's default queue is the Phase
+2 queue, not Phase 1's, so `readiness fleet` and `make loop-all` run the four
+national candidates without being told to; the exposure spot-check needs its
+ten in-band counties to come from at least three states, so one state's
+assessor convention or layer vintage cannot carry the criterion on its own;
+the "issued" check accepts the period label the most passing contracts
+issued (quarterly and monthly contracts cannot share one label) and requires
+at least four of them to name their first test card; and the
+missing-exposure sentence cites a computed claim derived from the
+paragraph's own probability claim, because an absence has no artefact to
+point at.
+
+What Phase 2 still owes is the data run: which four hazards pass nationally,
+the USA Structures layer's vocabulary confirmed on the first pull, and the
+ten assessor counts collected by a person with their URLs.
+
+### 3.2. Phase 2 review outcome
+
+Three lenses (leakage and the county floor, correctness of the numbers and
+the guards, tests and documentation) over the whole Phase 2 diff; sixteen
+findings confirmed with reproductions, all fixed on the same branch (925
+tests, no skips). Fixed:
+
+- **A citation that only checked existence (high).** `cite.validate` resolved
+  a claim's source and stopped; a brief could cite the right row and print
+  the wrong number. New code `VALUE_MISMATCH`: the resolver returns the leaf
+  a reference lands on and the artefact's value must equal it (floats at
+  1e-9, integers and strings exactly); computed claims must bottom out in a
+  non-computed source, and mutually computed claims are unresolved. The bare
+  five-digit exemption that let any FIPS-shaped number through is gone: a
+  document names its own identifiers, and the brief passes its county.
+- **Issuance without bounds (high).** `readiness issue` accepted a period
+  inside the years the contract spans, which would have issued a probability
+  for a period whose labels exist; it now refuses anything before the first
+  period after the contract's last year, names that period, and a model with
+  no feature series may issue exactly that one period. An issued file is
+  never overwritten without `--reissue`, which records what it replaced.
+- **The brief's card guard (high).** `brief.build` accepted any card as
+  `validated_by`; it now requires a passing, canary-clear test card whose
+  contract digest matches the issued file's, cites the issued probability by
+  county so the value check applies, reads the tolerance off the card and
+  carries the reading caveat in its footer; `verify`'s brief check requires
+  the document's own kind, county and period before it validates, and the
+  site validates briefs through `brief.check` and publishes the page rendered
+  from the validated document, not a committed sibling.
+- **USA Structures paging (medium).** Paging ended on a page as full as we
+  asked for rather than on the server's transfer-limit flag, so a layer with a
+  smaller page size pinned one page as a whole state; a FIPS longer than five
+  digits could be truncated into a county by `int()`. Both refused now, and
+  `ExposureTable` checks every key is five digits of its own state.
+- The fleet reports a promotion refusal as a reason beside the loop that ran
+  rather than as a failed dataset; the browser refuses `fleet --promote` and
+  every argparse abbreviation of it; the spot-check's detail leads with its
+  verdict; the Makefile's `phase2` continues past a contract without data and
+  `issue` takes the period flag; the fleet step of the real-data workflow is
+  continue-on-error; the documentation says `wall_clock_s` is inside the
+  hashed payload, names the Phase 2 queue as the fleet's default, and states
+  the four guards and the three-state spot-check clause.
+
+Two findings closed only as far as the artefacts allow: no card records the
+test years it applied, so the brief reads them from the contract the card,
+the issued file and the brief already share by digest; and the Makefile and
+the workflow have no automated test, only `make -n` and inspection.
 
 ## 4. Phase 3: the planning thought-partner
 

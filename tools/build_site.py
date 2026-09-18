@@ -24,6 +24,13 @@ modules the CLI uses, into `site/generated/`:
                        (only for contracts whose pinned data is present locally)
     tapes.json         the same panels as bit strings, period-major, for the tile
                        maps and the animated hero (only with the pinned data)
+    fleet.json         `readiness fleet --status`, one row per registered contract,
+                       read from the ledgers alone (national contracts are marked)
+    briefs.json        every county brief under briefs/ that passes readiness.cite
+                       (the rest are logged and left out), with its HTML copied to
+                       generated/briefs/<fips>/<period>.html; [] when none ship
+    exposure.json      per state with a pinned USA Structures extract: counties,
+                       structures, layer vintage; [] when nothing is pinned
     transcripts.json   the walkthrough transcripts captured by tools/demo/capture.py
     media/             the recordings and screenshots the walkthrough embeds
     report/index.html  the research briefing, so the site is self-contained
@@ -46,6 +53,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dataclasses
 import datetime as _dt
 import io
 import json
@@ -58,16 +66,24 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from readiness import __version__, config, contracts as contracts_mod  # noqa: E402
+from readiness import __version__, cite, config, contracts as contracts_mod  # noqa: E402
+from readiness import brief as brief_mod  # noqa: E402
 from readiness import data as data_mod  # noqa: E402
+from readiness import fleet as fleet_mod  # noqa: E402
 from readiness.agent import orchestrator  # noqa: E402
+from readiness.connectors import usa_structures  # noqa: E402
 from readiness.connectors.base import ConnectorError, Manifest  # noqa: E402
 from readiness.engine.features import FEATURE_SETS  # noqa: E402
 from readiness.engine.registry import REGISTRY  # noqa: E402
+from readiness.exposure.table import ExposureError, ExposureTable  # noqa: E402
 from readiness.harness.ledger import Ledger  # noqa: E402
 
 SITE = ROOT / "site"
 DEFAULT_OUT = SITE / "generated"
+#: Where `readiness brief` writes: briefs/<fips>/<period>.html and .json.
+BRIEFS_DIR = ROOT / "briefs"
+#: Where `readiness issue` writes: issued/<contract>/<period>.json.
+ISSUED_DIR = ROOT / "issued"
 
 MEDIA = ("loop.gif", "dashboard.gif", "report-top.png", "report-section-2.png",
          "dashboard-index.png")
@@ -108,6 +124,9 @@ def contract_view(c: contracts_mod.Contract, out: pathlib.Path) -> dict:
         "states": list(c.states),
         "scope_key": c.scope_key,
         "scope_label": c.scope_label,
+        # Plan §3: "six national contracts registered as data"; the fleet and
+        # `verify --phase 2` count only these, so the pages tell them apart.
+        "national": not c.states,
         "period": c.period,
         "periods_per_year": c.periods_per_year,
         "damage_property_usd_min": c.damage_property_usd_min,
@@ -454,6 +473,215 @@ def copy_media(out: pathlib.Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 2: the fleet, the briefs and the exposure pins
+# ---------------------------------------------------------------------------
+
+
+def build_fleet(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) -> None:
+    """`readiness fleet --status` as rows, from the ledgers and touch files alone.
+
+    Nothing is fitted: `fleet.status` reads what `verify --phase 1` reads, so a
+    row on the site is the same evidence the exit check would accept.
+    """
+    rows = []
+    for row in fleet_mod.status(registry):
+        rows.append(dataclasses.asdict(row) | {"national": not registry[row.name].states})
+    dump(out / "fleet.json", rows)
+    passing = [r["name"] for r in rows if r["phase1_ok"]]
+    log(f"fleet.json: {len(rows)} contract(s); phase 1 met for {passing}")
+
+
+def _ledger_refs(registry: dict[str, contracts_mod.Contract]) -> dict[str, dict]:
+    """Card records a brief may cite, by `exp-NNNN` and by `<contract>/exp-NNNN`.
+
+    Card ids restart per ledger, so a bare id resolves to the last contract
+    that has it; the qualified spelling is unambiguous.
+    """
+    refs: dict[str, dict] = {}
+    for name, contract in registry.items():
+        for card in Ledger(data_mod.paths(contract).ledger).read():
+            record = card.record()
+            refs[card.experiment_id] = record
+            refs[f"{name}/{card.experiment_id}"] = record
+    return refs
+
+
+def _issued_periods(path: pathlib.Path) -> dict[str, dict]:
+    """What an issued file covers: its periods, and the probability per county.
+
+    The same shape `readiness.brief.issued_refs` builds, so a brief written by
+    the command and re-validated here resolves `#<period>.<county>` to the same
+    number both times.
+    """
+    periods: dict[str, dict] = {path.stem: {}}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return periods
+    if not isinstance(raw, dict):
+        return periods
+    probabilities = raw.get("probabilities")
+    per_county = (
+        {str(k): v for k, v in probabilities.items()}
+        if isinstance(probabilities, dict) else {}
+    )
+    for key in ("period", "period_label"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            periods[value] = dict(per_county)
+    return periods
+
+
+def _issued_refs(issued_dir: pathlib.Path) -> dict[str, dict[str, dict]]:
+    """Issued files by every spelling of their path a brief may use."""
+    refs: dict[str, dict[str, dict]] = {}
+    for path in sorted(issued_dir.glob("*/*.json")):
+        periods = _issued_periods(path)
+        rel = path.relative_to(issued_dir).as_posix()
+        for spelling in (f"issued/{rel}", rel, rel[: -len(".json")]):
+            refs[spelling] = periods
+    return refs
+
+
+def brief_resolver(
+    registry: dict[str, contracts_mod.Contract], *, issued_dir: pathlib.Path = ISSUED_DIR,
+) -> cite.DictResolver:
+    """What a committed brief may lean on: the ledgers, the issued files, the
+    manifest and the guidance registry. Nothing else exists to a brief."""
+    manifest_path = data_mod.SNAPSHOT_DIR / "manifest.json"
+    manifest = Manifest.load(manifest_path) if manifest_path.exists() else None
+    return cite.DictResolver({
+        "ledger": _ledger_refs(registry),
+        "issued": _issued_refs(issued_dir),
+        "manifest": set(manifest.records) if manifest else set(),
+    })
+
+
+def _cited_contracts(doc: cite.Document) -> list[str]:
+    """The contracts whose issued files the brief cites: issued/<contract>/<period>."""
+    names: list[str] = []
+    for claim in doc.claims:
+        if claim.source.kind != "issued":
+            continue
+        parts = claim.source.ref.partition("#")[0].split("/")
+        if len(parts) >= 2 and parts[-2] not in names:
+            names.append(parts[-2])
+    return names
+
+
+def _brief_contracts(
+    doc: cite.Document, registry: dict[str, contracts_mod.Contract]
+) -> list[contracts_mod.Contract]:
+    """The registered contracts this brief cites, for its attribution lines."""
+    return [registry[name] for name in _cited_contracts(doc) if name in registry]
+
+
+def _exposure_joined(doc: cite.Document) -> bool:
+    """Whether the brief reports structure counts from a pinned extract."""
+    return any(
+        claim.id.startswith("exposure-") and claim.source.kind == "manifest"
+        for claim in doc.claims
+    )
+
+
+def brief_view(
+    path: pathlib.Path,
+    doc: cite.Document,
+    out: pathlib.Path,
+    registry: dict[str, contracts_mod.Contract],
+) -> dict:
+    """One listed brief, with its page rendered from the document that validated.
+
+    Not the committed sibling `.html`: that file is bytes nobody re-checked,
+    and the whole point of re-validating here is that what is published is
+    the document the rules were run against. The page is `brief.render_html`,
+    the same renderer `readiness brief` uses, so it carries the caveat and the
+    attribution the command writes.
+    """
+    fips, period = path.parent.name, path.stem
+    rel = f"briefs/{fips}/{period}.html"
+    (out / "briefs" / fips).mkdir(parents=True, exist_ok=True)
+    lines = brief_mod.attribution(
+        _brief_contracts(doc, registry), exposure_joined=_exposure_joined(doc)
+    )
+    (out / rel).write_text(brief_mod.render_html(doc, lines), encoding="utf-8")
+    return {
+        "fips": fips,
+        "period": period,
+        "title": doc.title,
+        "contracts": _cited_contracts(doc),
+        "html": rel,
+        "generated_at": doc.generated_at,
+        "inputs": dict(doc.inputs),
+    }
+
+
+def build_briefs(
+    out: pathlib.Path, registry: dict[str, contracts_mod.Contract],
+    *, briefs_dir: pathlib.Path = BRIEFS_DIR, resolver: cite.Resolver | None = None,
+) -> None:
+    """Every brief under briefs/ that validates today, and only those.
+
+    `readiness brief` already refused to write a brief with a violation; the
+    site re-runs `readiness.brief.check` — the citation rules *and* the
+    county-only rule, the same call the command made — against the repository
+    as it stands, so a brief whose card or issued file has since gone, or
+    whose JSON has grown a sub-county key since it was written, is dropped
+    from the list rather than shown.
+    """
+    resolver = resolver or brief_resolver(registry)
+    listed: list[dict] = []
+    for path in sorted(briefs_dir.glob("*/*.json")) if briefs_dir.exists() else []:
+        try:
+            doc = cite.from_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log(f"briefs.json: {data_mod.relative(path)}: unreadable ({exc}), skipped")
+            continue
+        violations = brief_mod.check(doc, resolver)
+        if violations:
+            log(f"briefs.json: {data_mod.relative(path)}: {len(violations)} violation(s), "
+                f"first: {violations[0]}; not listed")
+            continue
+        listed.append(brief_view(path, doc, out, registry))
+    dump(out / "briefs.json", listed)
+    log(f"briefs.json: {len(listed)} validated brief(s)")
+
+
+def build_exposure(out: pathlib.Path, snapshot_dir: pathlib.Path = data_mod.SNAPSHOT_DIR) -> None:
+    """One row per state whose USA Structures counts are pinned and intact.
+
+    The table is county-only by construction (`readiness.exposure.table`), and
+    the site goes coarser still: a state's county count, its structures and
+    the layer vintage, so a visitor can see what `readiness exposure snapshot`
+    has pulled without the site carrying any exposure row itself.
+    """
+    manifest_path = snapshot_dir / "manifest.json"
+    manifest = Manifest.load(manifest_path) if manifest_path.exists() else None
+    state_of = {v: k for k, v in data_mod.state_fips(snapshot_dir).items()}
+    rows: list[dict] = []
+    for key in sorted(manifest.records) if manifest else []:
+        if not key.startswith(usa_structures.KEY_PREFIX):
+            continue
+        st = key[len(usa_structures.KEY_PREFIX):]
+        try:
+            table = ExposureTable.load(snapshot_dir, manifest, [st])
+        except (ExposureError, ConnectorError, OSError, ValueError) as exc:
+            log(f"exposure.json: {key}: not loadable ({exc}), skipped")
+            continue
+        rows.append({
+            "state_fips": st,
+            "state": state_of.get(st),
+            "n_counties": len(table),
+            "total_structures": sum(r.total for r in table.rows.values()),
+            "vintage": table.vintage,
+            "manifest_key": key,
+            "digest": table.digest(),
+        })
+    dump(out / "exposure.json", rows)
+    log(f"exposure.json: {len(rows)} state(s) with pinned USA Structures counts")
+
+
+# ---------------------------------------------------------------------------
 # The sandbox archive
 # ---------------------------------------------------------------------------
 
@@ -652,6 +880,9 @@ def build(out: pathlib.Path, *, sandbox: bool = True) -> None:
     build_expected(out, registry)
     datasets = build_panels(out, registry)
     build_tapes(out, registry, datasets)
+    build_fleet(out, registry)
+    build_briefs(out, registry)
+    build_exposure(out)
     build_transcripts(out)
     copy_media(out)
     if sandbox:

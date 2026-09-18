@@ -130,3 +130,20 @@ def describe_hazards() -> str:
 CANARY_MAX_PLAUSIBLE_BSS = 0.99   # above this, skill is not credible on any hazard
 CANARY_MAX_PLAUSIBLE_AUC = 0.999
 CANARY_MAX_AGREEMENT = 0.995      # fraction of near-binary predictions matching truth
+
+# --------------------------------------------------------------------------
+# Exposure spot-check
+# --------------------------------------------------------------------------
+# Plan §3: the USA Structures join is spot-validated against county assessor
+# counts in ten sampled counties. The band is wide on purpose. Assessors
+# mostly publish *improved parcels*, and a parcel is not a structure: one
+# parcel carries a house plus a garage, a barn and two sheds (USA Structures
+# counts each footprint), while one apartment parcel carries a dozen
+# buildings and a condominium tower is many parcels on one footprint. So a
+# ratio of 1.5 or 0.67 between an honest structure count and an honest parcel
+# count is ordinary, and a band tight enough to flatter one convention would
+# fail the other. It is a declared judgement, printed beside every row's
+# ratio by `readiness.exposure.spotcheck`; it is never tuned to make a row
+# pass, and a row outside it does not count toward the ten.
+
+EXPOSURE_SPOTCHECK_RATIO = (0.67, 1.5)   # (ours / assessor) low, high

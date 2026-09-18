@@ -58,6 +58,7 @@ jobs:
             snapshots/open_meteo
             snapshots/fema
             snapshots/climada
+            snapshots/usa_structures
           key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
       - name: Pull and pin the example contracts' data (no-op when cached)
         continue-on-error: true

@@ -23,6 +23,7 @@
       <a data-page="design" href="design.html">System design</a>
       <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
       <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="briefs" href="briefs.html">Briefs</a>
       <a data-page="playground" href="playground.html">Sandbox</a>
       <a data-report href="generated/report/index.html">Research briefing</a>
       <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
@@ -116,6 +117,7 @@
     <aside class="aside"><strong>Two invariants</strong><br>No model ever receives a holdout label: <code>TrainingView</code> is the only channel a model gets data through. And nothing in the harness calls a language model: verification is rules-based or it is worth nothing. Most of the <a href="design.html">design</a> follows from these two.</aside>
   </div>
   <p><strong>Phase 1 is built; its exit needs the real-data run.</strong> The harness now owns a feature channel with a temporal firewall (<a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/features.md">docs/features.md</a>): sources hand over raw series and static tables, the harness computes every cutoff, and a static layer that has seen the holdout years — FEMA's National Risk Index, published through 2023 — is refused as a finding. Four feature models (<code>logistic</code>, <code>logistic+iso</code>, <code>gbm</code>, <code>gbm+iso</code>) run through <code>readiness loop --queue phase1</code>; <code>readiness promote</code> is the one atomic test touch, and <code>readiness backtest</code> publishes the report (<a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/backtest.md">docs/backtest.md</a>) beside the ledger. The criterion is met only when a test card passes and is published, which this repository's own CI does with the pinned data.</p>
+  <p><strong>Phase 2 is built too; its exit needs the same run.</strong> Six national contracts are registered as data beside the three examples, and <code>readiness fleet</code> runs them through the Phase 2 queue in turn — the logistic pair, a capped boosted model and its calibrated form — one ledger and one touch budget each. <code>readiness exposure snapshot</code> pins FEMA / ORNL USA Structures counts per county — the table has no sub-county field by construction — and <code>readiness exposure spot-check</code> compares ten sampled counties against assessor counts a person collected. <code>readiness issue</code> refits a promoted model and writes a probability per county for a period the data has reached; <code>readiness brief</code> turns those into a county paragraph that <code>readiness.cite</code> validates before it is written (<a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/brief.md">docs/brief.md</a>). Which four hazards pass is not knowable offline; the <a href="briefs.html">briefs page</a> shows where each contract stands.</p>
 </div></section>
 
 <section class="section" id="demos"><div class="col">
@@ -129,6 +131,7 @@
     <a class="card" href="playground.html#demo-tamper"><p class="eyebrow">Demo 04</p><h3>Tamper with a ledger</h3><p class="mb0">Edit a card, delete one from the middle, truncate the tail. Then run <code>readiness ledger</code> and read where the chain breaks.</p></a>
     <a class="card" href="playground.html#demo-verify"><p class="eyebrow">Demo 05</p><h3>Bit-for-bit</h3><p class="mb0">Recompute the baseline fingerprints in WebAssembly and compare them, field by field, to the ones blessed from a clean clone.</p></a>
     <a class="card" href="ledgers.html"><p class="eyebrow">Demo 06</p><h3>Read the ledgers</h3><p class="mb0">Every committed experiment card, its reliability diagram, its verdict and its canary findings — and the hash chain, verified in your browser.</p></a>
+    <a class="card" href="briefs.html"><p class="eyebrow">Demo 07</p><h3>The fleet and the briefs</h3><p class="mb0">Where each of the nine contracts stands, from the ledgers alone; every validated county brief, once one is committed; and which USA Structures extracts are pinned.</p></a>
   </div>
 </div></section>
 

@@ -1,0 +1,68 @@
+{
+  "note": "The registry of named guidance documents a sentence may cite (readiness/cite.py, load_guidance). URLs point at the publishers' pages as best known when this file was written and none has been verified offline; a citation resolves to an id here, never to a URL. Aliases are the spellings prose uses for the document, and the digits inside them are identifiers, not quantities, so the citation validator exempts them.",
+  "documents": [
+    {
+      "id": "fema-cpg-101",
+      "title": "Developing and Maintaining Emergency Operations Plans: Comprehensive Preparedness Guide (CPG) 101, Version 3.0",
+      "publisher": "FEMA",
+      "year": 2021,
+      "url": "https://www.fema.gov/emergency-managers/national-preparedness/plan",
+      "section": "Planning process and plan content; the template baseline for draft plan sections",
+      "aliases": ["CPG 101", "CPG-101", "Comprehensive Preparedness Guide 101"]
+    },
+    {
+      "id": "cms-482-15",
+      "title": "42 CFR 482.15, Condition of Participation: Emergency Preparedness",
+      "publisher": "Centers for Medicare & Medicaid Services",
+      "year": 2016,
+      "url": "https://www.ecfr.gov/current/title-42/chapter-IV/subchapter-G/part-482/subpart-B/section-482.15",
+      "section": "(a) emergency plan and risk assessment; (b) policies and procedures, including subsistence needs, evacuation and sheltering in place; (c) communication plan; (d) training and testing; (e) emergency and standby power",
+      "aliases": ["42 CFR 482.15", "42 C.F.R. § 482.15", "§ 482.15", "482.15"]
+    },
+    {
+      "id": "aspr-tracie-evac",
+      "title": "Hospital Evacuation Toolkit",
+      "publisher": "ASPR TRACIE (HHS Administration for Strategic Preparedness and Response)",
+      "year": 2021,
+      "url": "https://asprtracie.hhs.gov/technical-resources/57/healthcare-facility-evacuation-sheltering/",
+      "section": "Evacuation decision-making, triggers, patient prioritisation and transport lead times",
+      "aliases": ["ASPR TRACIE Hospital Evacuation Toolkit", "Hospital Evacuation Toolkit"]
+    },
+    {
+      "id": "nfpa-110",
+      "title": "NFPA 110, Standard for Emergency and Standby Power Systems",
+      "publisher": "National Fire Protection Association",
+      "year": 2022,
+      "url": "https://www.nfpa.org/codes-and-standards/nfpa-110-standard-development/110",
+      "section": "Chapter 7 installation (fuel supply, location of equipment) and Chapter 8 routine maintenance and operational testing",
+      "aliases": ["NFPA 110", "NFPA-110"]
+    },
+    {
+      "id": "nfpa-99",
+      "title": "NFPA 99, Health Care Facilities Code",
+      "publisher": "National Fire Protection Association",
+      "year": 2024,
+      "url": "https://www.nfpa.org/codes-and-standards/nfpa-99-standard-development/99",
+      "section": "Chapter 6 electrical systems (essential electrical system) and Chapter 12 emergency management",
+      "aliases": ["NFPA 99", "NFPA-99"]
+    },
+    {
+      "id": "fema-elevation-certificate",
+      "title": "Elevation Certificate (FEMA Form FF-206-FY-22-152) and the Flood Insurance Rate Map",
+      "publisher": "FEMA",
+      "year": 2022,
+      "url": "https://www.fema.gov/glossary/elevation-certificate",
+      "section": "Section C building elevation information; the FIRM panel's base flood elevation for the building's location",
+      "aliases": ["Elevation Certificate", "FF-206-FY-22-152", "FIRM", "Flood Insurance Rate Map"]
+    },
+    {
+      "id": "nws-ipaws",
+      "title": "Official alerting: National Weather Service watches and warnings and the Integrated Public Alert and Warning System",
+      "publisher": "National Weather Service and FEMA",
+      "year": null,
+      "url": "https://www.fema.gov/emergency-managers/practitioners/integrated-public-alert-warning-system",
+      "section": "The only warning channel; every surface of this product says so",
+      "aliases": ["NWS", "IPAWS", "National Weather Service"]
+    }
+  ]
+}

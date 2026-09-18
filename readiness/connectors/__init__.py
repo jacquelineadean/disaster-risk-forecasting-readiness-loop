@@ -103,6 +103,14 @@ CONNECTORS: dict[str, ConnectorInfo] = {
         network=False,
         is_label_source=False,
     ),
+    "usa_structures": ConnectorInfo(
+        key_prefix="fema/usa_structures/",
+        source="FEMA / ORNL USA Structures, county counts by occupancy",
+        license="US Government work, public domain (FEMA / ORNL USA Structures)",
+        global_coverage=False,
+        network=True,
+        is_label_source=False,
+    ),
 }
 
 

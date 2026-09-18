@@ -6,7 +6,7 @@ works). If the flag is omitted, `READINESS_CONTRACT` is consulted, then the
 sole registered contract if there is exactly one; otherwise the command
 refuses and lists the choices.
 
-    readiness contracts         list the registered contracts
+    readiness contracts         list the registered contracts (--names: one per line)
     readiness contract          print one contract and its hash
     readiness register NAME     pre-register a new contract from options
     readiness hazards           list the hazard catalogue
@@ -16,10 +16,14 @@ refuses and lists the choices.
     readiness features          load the feature sources, print admission and audit
     readiness score MODEL       fit and score one model on train or validate
     readiness loop              run the full experimental loop
+    readiness fleet             run the loop over many contracts in turn, or --status
     readiness promote MODEL     the one test touch, after a validate pass
     readiness canary            demonstrate the harness rejecting a leaked model
     readiness ledger            show and verify the experiment ledger
-    readiness verify            check the Phase 0 or Phase 1 exit criteria
+    readiness exposure          pull, show and spot-check the USA Structures counts
+    readiness issue MODEL       refit the promoted model and write one period's file
+    readiness brief             one cited, validated brief per county
+    readiness verify            check the Phase 0, 1 or 2 exit criteria
     readiness backtest          write the backtest report from committed files
     readiness dashboard         render a contract's ledger as a static HTML page
     readiness report            rebuild the static research report
@@ -35,6 +39,7 @@ import subprocess
 import sys
 
 from readiness import config, contracts, data as data_mod, verify
+from readiness.connectors import usa_structures
 from readiness.connectors.base import ConnectorError
 from readiness.contracts import Contract, ContractError
 from readiness.engine import REGISTRY, build_model, describe_registry
@@ -155,9 +160,40 @@ def parse_params(model: str, pairs) -> dict:
 
 
 def cmd_contracts(args) -> int:
+    if args.names:
+        # One name per line and nothing else, so a shell loop can read it:
+        #     for c in $(readiness contracts --names); do ...; done
+        for name in sorted(_registry(args)):
+            _p(name)
+        return 0
     _rule(f"registered contracts  ({data_mod.relative(contracts.contracts_dir())})")
     _p(contracts.describe_registry())
     return 0
+
+
+def _registry(args) -> dict[str, Contract]:
+    """The registered contracts a fleet command runs over, after its filters.
+
+    `--national` keeps the contracts whose scope is the whole country;
+    `--contracts a,b` keeps the named ones and refuses an unknown name rather
+    than running the rest, because a fleet that silently dropped a contract
+    would report a status for a set nobody asked for.
+    """
+    from readiness import fleet
+
+    known = contracts.registered()
+    if getattr(args, "national", False):
+        return fleet.national(known)
+    named = getattr(args, "contracts", None)
+    if named:
+        wanted = [n.strip() for n in named.split(",") if n.strip()]
+        unknown = sorted(set(wanted) - set(known))
+        if unknown:
+            raise UsageError(
+                f"no registered contract named {unknown}; registered: {sorted(known)}"
+            )
+        return {n: known[n] for n in wanted}
+    return known
 
 
 def cmd_contract(args) -> int:
@@ -423,6 +459,40 @@ def cmd_loop(args) -> int:
     return 0
 
 
+def cmd_fleet(args) -> int:
+    """Run the loop over a set of contracts in turn, then show where each stands.
+
+    `--status` alone reads the ledgers and prints the table without running
+    anything. Without it the fleet runs first; a contract whose data could
+    not be built is reported and the exit status is 1, but the other
+    contracts still run and still appear in the table. A contract whose
+    promotion was refused ran: its summary is printed with the refusal under
+    it, and the exit status is 0, because the fleet did what it could — the
+    gate on a phase is `readiness verify`, not this command's exit code.
+    """
+    from readiness import fleet
+
+    registry = _registry(args)
+    if args.status:
+        _rule(f"fleet status  ({len(registry)} contract(s))")
+        _p(fleet.format_status(fleet.status(registry)))
+        return 0
+    progress = (lambda _m: None) if args.quiet else _p
+    _rule(f"fleet  ({len(registry)} contract(s), queue={args.queue})")
+    results = fleet.run_fleet(
+        list(registry.values()),
+        queue=args.queue,
+        features=lambda c: _features(args, c),
+        promote=args.promote,
+        progress=progress,
+    )
+    _p()
+    _p(fleet.format_results(results))
+    _rule(f"fleet status  ({len(registry)} contract(s))")
+    _p(fleet.format_status(fleet.status(registry)))
+    return 1 if any(isinstance(r, Exception) for r in results.values()) else 0
+
+
 def cmd_promote(args) -> int:
     """The one test touch, refused unless it is earned and unless it is asked for.
 
@@ -545,6 +615,10 @@ def cmd_verify(args) -> int:
     to be rebuilt from its card and rescored on test, which spends no touch.
     The checks are `readiness.verify`'s; this prints them.
     """
+    if args.phase == 2:
+        # Phase 2 is a statement about the whole registry ("at least four
+        # hazards pass nationally"), so it takes no contract at all.
+        return _verify_phase2(args)
     c = _contract(args)
     where = data_mod.paths(c)
     if args.phase == 1:
@@ -558,20 +632,23 @@ def cmd_verify(args) -> int:
         expected_path=where.expected,
         bless=args.bless,
     )
-    return _print_phase(0, c, result.checks)
+    return _print_phase(0, c.name, result.checks)
 
 
-def _print_phase(phase: int, contract: Contract, checks) -> int:
+def _print_phase(phase: int, label: str, checks) -> int:
+    """Every check, then the verdict. `label` is a contract name, or empty for
+    Phase 2, whose criteria are about the registry rather than one contract."""
     for check in checks:
         _print_check(check)
     _p()
+    where = f" for {label}" if label else ""
     failures = [c.detail.splitlines()[0] for c in checks if not c.passed]
     if failures:
-        _p(f"Phase {phase} NOT met for {contract.name} — {len(failures)} failure(s):")
+        _p(f"Phase {phase} NOT met{where} — {len(failures)} failure(s):")
         for f in failures:
             _p(f"  - {f}")
         return 1
-    _p(f"Phase {phase} exit criteria met for {contract.name}.")
+    _p(f"Phase {phase} exit criteria met{where}.")
     return 0
 
 
@@ -592,7 +669,335 @@ def _verify_phase1(args, c: Contract, where: data_mod.Paths) -> int:
             )
     elif args.replay:
         checks.append(Check("replay", False, "replay: no test card to replay"))
-    return _print_phase(1, c, checks)
+    return _print_phase(1, c.name, checks)
+
+
+def _verify_phase2(args) -> int:
+    """The registry-wide Phase 2 criteria: the fleet, the exposure join, the brief."""
+    if getattr(args, "contract", None):
+        # An ignored option is a lie: Phase 2 asks whether four hazards pass
+        # nationally, which no single contract can answer.
+        raise UsageError(
+            f"`verify --phase 2` takes no contract (got -c {args.contract}): its "
+            "criteria are about the whole registry — four national contracts "
+            "passing, the exposure spot-check, an issued file each and one brief."
+        )
+    _rule("Phase 2 exit criteria  (the registry)")
+    result = verify.phase2(registry=contracts.registered())
+    return _print_phase(2, "", result.checks)
+
+
+# ---------------------------------------------------------------------------
+# exposure
+# ---------------------------------------------------------------------------
+
+
+def _state_fips_of(name: str) -> str:
+    """A two-digit state FIPS from a postal code or a FIPS, or a usage error."""
+    text = str(name).strip().upper()
+    if text.isdigit() and len(text) == 2:
+        return text
+    fips_of = data_mod.state_fips()
+    if not fips_of:
+        raise UsageError(
+            "no pinned Census county file, so state codes cannot be resolved; run "
+            "`readiness snapshot` first, or name states by two-digit FIPS"
+        )
+    if text not in fips_of:
+        raise UsageError(f"{text!r} is not a state in the Census county file")
+    return fips_of[text]
+
+
+def _exposure_states(args) -> list[str]:
+    """The state FIPS an exposure command works over, in a stable order."""
+    if getattr(args, "all_states", False):
+        fips_of = data_mod.state_fips()
+        if not fips_of:
+            raise UsageError(
+                "--all-states needs the pinned Census county file; run "
+                "`readiness snapshot` first"
+            )
+        return sorted(set(fips_of.values()))
+    given = getattr(args, "states", None)
+    if not given:
+        raise UsageError("name the states with --states A,B or ask for --all-states")
+    return sorted({_state_fips_of(s) for s in given.split(",") if s.strip()})
+
+
+def _pinned_exposure_states(manifest) -> list[str]:
+    """Every state whose USA Structures counts are recorded in the manifest."""
+    prefix = usa_structures.KEY_PREFIX
+    return sorted(k[len(prefix):] for k in manifest.records if k.startswith(prefix))
+
+
+def _exposure_table(states, manifest, *, what: str):
+    """Load the pinned counts for `states`, or refuse naming what is not pinned."""
+    from readiness.exposure.table import ExposureError, ExposureTable
+
+    try:
+        return ExposureTable.load(data_mod.SNAPSHOT_DIR, manifest, list(states))
+    except ExposureError as exc:
+        raise UsageError(
+            f"{exc}\n{what}: `readiness exposure snapshot --states "
+            f"{','.join(states) or 'XX'}` pins the counts this needs."
+        ) from None
+
+
+def cmd_exposure_snapshot(args) -> int:
+    """Pull and pin one counts extract per state. Counts only: no footprint is fetched."""
+    from readiness.connectors.base import Manifest
+
+    states = _exposure_states(args)
+    _rule(f"USA Structures county counts  ({len(states)} state(s))")
+    manifest = Manifest.load(data_mod.MANIFEST_PATH)
+    usa_structures.snapshot(
+        states,
+        data_mod.SNAPSHOT_DIR,
+        manifest,
+        layer_url=args.layer_url or usa_structures.LAYER_URL,
+        refresh=args.refresh,
+        progress=_p if not args.quiet else (lambda _m: None),
+    )
+    manifest.save()
+    _p()
+    _p(_exposure_table(states, manifest, what="exposure snapshot").summary())
+    _p()
+    _p(f"pinned under {usa_structures.KEY_PREFIX}<st> in "
+       f"{data_mod.relative(data_mod.MANIFEST_PATH)}")
+    return 0
+
+
+def cmd_exposure_show(args) -> int:
+    """Print the county rows the pinned extracts hold. The county is the finest key."""
+    from readiness.connectors.base import Manifest
+
+    manifest = Manifest.load(data_mod.MANIFEST_PATH)
+    if args.county:
+        states, wanted = [args.county[:2]], [args.county]
+    elif args.state:
+        states, wanted = [_state_fips_of(args.state)], None
+    else:
+        states, wanted = _pinned_exposure_states(manifest), None
+    if not states:
+        _p("no USA Structures counts are pinned; run `readiness exposure snapshot`")
+        return 1
+    table = _exposure_table(states, manifest, what="exposure show")
+    rows = [table.rows[f] for f in sorted(table.rows) if wanted is None or f in wanted]
+    _rule(f"county exposure  ({len(rows)} county/counties from state(s) "
+          f"{', '.join(states)})")
+    if not rows:
+        _p(f"no row for {args.county}; the pinned extract for state "
+           f"{states[0]} does not hold it")
+        return 1
+    _p(f"  {'fips':<8}{'total':>12}{'unclass.':>10}{'school':>9}{'hospital':>10}"
+       f"{'medical':>9}  vintage  source")
+    for row in rows:
+        _p(f"  {row.fips:<8}{row.total:>12,}{row.unclassified_share:>10.1%}"
+           f"{row.by_class.get('school', 0):>9,}{row.by_class.get('hospital', 0):>10,}"
+           f"{row.by_class.get('medical', 0):>9,}  {row.vintage}     {row.source_key}")
+    _p()
+    _p(table.summary())
+    return 0
+
+
+def cmd_exposure_spot_check(args) -> int:
+    """Our county totals over a person's assessor counts, every ratio printed."""
+    from readiness.connectors.base import Manifest
+    from readiness.exposure import spotcheck
+
+    path = pathlib.Path(args.counts) if args.counts else verify.COUNTS_PATH
+    if not path.exists():
+        raise UsageError(f"no assessor counts file at {data_mod.relative(path)}")
+    try:
+        counts = spotcheck.load(path)
+    except spotcheck.SpotCheckError as exc:
+        # A malformed counts file is a refusal with the row that broke it, not
+        # a traceback: the file is written by a person, by hand.
+        raise UsageError(str(exc)) from None
+    manifest = Manifest.load(data_mod.MANIFEST_PATH)
+    states = sorted({row.fips[:2] for row in counts})
+    _rule(f"exposure spot-check  ({data_mod.relative(path)}: {len(counts)} county/counties)")
+    table = _exposure_table(states, manifest, what="exposure spot-check")
+    checks = spotcheck.run(table, counts)
+    _p(spotcheck.format(checks))
+    return 0 if spotcheck.summary(checks).within_bounds else 1
+
+
+def cmd_exposure(args) -> int:
+    return args.exposure_func(args)
+
+
+# ---------------------------------------------------------------------------
+# issuance and the brief
+# ---------------------------------------------------------------------------
+
+
+def cmd_issue(args) -> int:
+    """Refit the promoted model and write one period's probabilities, or refuse.
+
+    There is no flag here through which a label could arrive, and none through
+    which a guard could be skipped: the ledger's test card, the digests, the
+    audit and the data's reach decide whether anything is written. `--reissue`
+    is not such a flag either — it replaces a published file on purpose, and
+    every guard still runs.
+    """
+    from readiness import issue as issue_mod
+
+    c = _contract(args)
+    kwargs = parse_params(args.model, args.param)
+    try:
+        year, period = issue_mod.parse_period(args.period, c)
+    except issue_mod.IssueRefused as exc:
+        _p()
+        _p(str(exc))
+        return 2
+    label = issue_mod.period_label(year, period, c)
+    _rule(f"issue  {args.model}  for {label}  ({c.name})")
+    if kwargs:
+        _p(f"  arguments        {json.dumps(kwargs, sort_keys=True)}")
+    ds = _dataset(args, c, _features(args, c))
+    try:
+        issued = issue_mod.issue(
+            c, ds, args.model, kwargs, (year, period),
+            reissue=args.reissue,
+            progress=_p if not args.quiet else (lambda _m: None),
+        )
+    except issue_mod.IssueRefused as exc:
+        _p()
+        _p(str(exc))
+        return 2
+    _p()
+    _p(f"  {issued.summary()}")
+    _p(f"  data version     sha256:{issued.data_version}")
+    if issued.feature_version:
+        _p(f"  feature version  sha256:{issued.feature_version}")
+    _p()
+    _p(f"next: readiness brief --county {sorted(issued.probabilities)[0]} "
+       f"--period {label}")
+    return 0
+
+
+def _counties_for(args, label: str, issued) -> list[str]:
+    """The counties a brief run covers: one, or every one the state issued."""
+    if args.county:
+        return [args.county]
+    state = _state_fips_of(args.state)
+    return sorted({
+        fips
+        for one in issued
+        if one.period_label == label
+        for fips in one.probabilities
+        if fips.startswith(state)
+    })
+
+
+def _county_names() -> dict[str, tuple[str, str]]:
+    """FIPS -> (county name, postal code) from the pinned county file, if there is one."""
+    from readiness.connectors import census
+    from readiness.connectors.base import Manifest
+
+    cache = data_mod.SNAPSHOT_DIR / "census" / "national_county2020.txt"
+    if not cache.exists():
+        return {}
+    manifest = Manifest.load(data_mod.MANIFEST_PATH)
+    try:
+        counties = census.load(
+            data_mod.SNAPSHOT_DIR / "census", manifest, allow_fetch=False
+        )
+    except (ConnectorError, OSError):
+        return {}
+    return {c.fips: (c.name, c.state) for c in counties}
+
+
+def _brief_inputs(label: str, issued_dir=None):
+    """Everything a brief run reads once: issued files, the registry, the cards."""
+    from readiness import issue as issue_mod
+    from readiness.harness.ledger import Ledger
+
+    registry = contracts.registered()
+    issued = [i for i in issue_mod.read_issued(None, issued_dir) if i.period_label == label]
+    cards = {}
+    for one in issued:
+        contract = registry.get(one.contract)
+        if contract is None:
+            continue
+        where = data_mod.paths(contract)
+        for card in Ledger(where.ledger).read():
+            if card.experiment_id == one.validated_by:
+                cards[one.contract] = card
+    return registry, issued, cards
+
+
+def cmd_brief(args) -> int:
+    """One cited, validated brief per county — written only when it validates."""
+    from readiness import brief as brief_mod
+    from readiness.connectors.base import Manifest
+    from readiness.exposure.table import ExposureError, ExposureTable
+
+    label = args.period
+    registry, issued, cards = _brief_inputs(label)
+    if not issued:
+        _p()
+        _p(f"nothing is issued for period {label}; run `readiness issue MODEL -c NAME "
+           f"--period {label}` first")
+        return 1
+    counties = _counties_for(args, label, issued)
+    if not counties:
+        _p()
+        _p(f"no issued file for {label} covers a county in that scope")
+        return 1
+
+    names = _county_names()
+    manifest = Manifest.load(data_mod.MANIFEST_PATH)
+    pinned = set(_pinned_exposure_states(manifest))
+    tables: dict[str, object] = {}
+    out = pathlib.Path(args.out) if args.out else None
+    _rule(f"county brief  ({len(counties)} county/counties, {label})")
+
+    written, refused = 0, []
+    resolver = brief_mod.resolver(registry)
+    for fips in counties:
+        state = fips[:2]
+        if state in pinned and state not in tables:
+            try:
+                tables[state] = ExposureTable.load(
+                    data_mod.SNAPSHOT_DIR, manifest, [state]
+                )
+            except (ExposureError, ConnectorError) as exc:
+                _p(f"  {state}: exposure counts unusable ({exc}); briefs for this "
+                   "state will say no layer is pinned")
+                tables[state] = None
+        table = tables.get(state)
+        name, postal = names.get(fips, ("", ""))
+        try:
+            doc = brief_mod.build(
+                fips, label, issued,
+                table.for_county(fips) if table is not None else None,
+                cards, brief_mod.county_label(name, postal, fips), registry,
+            )
+            html_path, json_path = brief_mod.write_validated(
+                doc, resolver, out,
+                contracts=[registry[i.contract] for i in issued
+                           if i.covers(fips) and i.contract in registry],
+                exposure_joined=table is not None and table.for_county(fips) is not None,
+            )
+        except brief_mod.BriefError as exc:
+            refused.append((fips, [str(exc)]))
+            continue
+        except brief_mod.BriefRefused as exc:
+            refused.append((fips, [str(v) for v in exc.violations]))
+            continue
+        written += 1
+        _p(f"  wrote {data_mod.relative(html_path)}")
+        _p(f"  wrote {data_mod.relative(json_path)}")
+    _p()
+    _p(f"{written} brief(s) written, {len(refused)} refused")
+    for fips, violations in refused:
+        _p()
+        _p(f"{fips}: not written")
+        for violation in violations:
+            _p(f"  {violation}")
+    return 1 if refused else 0
 
 
 def _replay_detail(field: str, expected, observed, ok: bool) -> str:
@@ -700,9 +1105,12 @@ def build_parser() -> argparse.ArgumentParser:
         )
         return sp
 
-    sub.add_parser("contracts", help="list the registered contracts").set_defaults(
-        func=cmd_contracts
-    )
+    sp = sub.add_parser("contracts", help="list the registered contracts")
+    sp.add_argument("--names", action="store_true",
+                    help="print one name per line and nothing else, for shell loops")
+    sp.add_argument("--national", action="store_true",
+                    help="with --names: only contracts whose scope is the whole country")
+    sp.set_defaults(func=cmd_contracts)
 
     sp = contract_flag(sub.add_parser("contract", help="print one contract and its hash"))
     sp.add_argument("--json", action="store_true", help="also print the JSON spec")
@@ -792,13 +1200,17 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test is refused: use `readiness promote`")
     sp.set_defaults(func=cmd_score)
 
+    from readiness.agent.orchestrator import QUEUES
+
+    queue_names = list(QUEUES)
     sp = features_flag(
         contract_flag(sub.add_parser("loop", help="run the experimental loop"))
     )
     sp.add_argument("--backend", default="local", choices=["local", "claude"])
     sp.add_argument("--split", default="validate", choices=["train", "validate"])
-    sp.add_argument("--queue", default="baseline", choices=["baseline", "phase1"],
-                    help="phase1 runs the baselines and then the Phase 1 candidates")
+    sp.add_argument("--queue", default="baseline", choices=queue_names,
+                    help="phase1 runs the baselines and then the Phase 1 candidates; "
+                         "phase2 the baselines and the capped national candidates")
     sp.add_argument("--promote", action="store_true",
                     help="after the queue, spend the test touch on the first validate "
                          "pass in queue order")
@@ -806,6 +1218,24 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip the leaked-model demonstration")
     sp.add_argument("--quiet", action="store_true", help="suppress data-plane chatter")
     sp.set_defaults(func=cmd_loop)
+
+    sp = features_flag(sub.add_parser(
+        "fleet", help="run the loop over many contracts in turn, or show their status"
+    ))
+    which = sp.add_mutually_exclusive_group()
+    which.add_argument("--national", action="store_true",
+                       help="every registered contract whose scope is the whole country")
+    which.add_argument("--contracts", metavar="A,B",
+                       help="these registered contracts, comma-separated "
+                            "(default: every registered contract)")
+    sp.add_argument("--queue", default="phase2", choices=queue_names,
+                    help="the queue each contract runs (default phase2)")
+    sp.add_argument("--promote", action="store_true",
+                    help="per contract, spend the test touch on the first validate pass")
+    sp.add_argument("--status", action="store_true",
+                    help="print the status table from the ledgers and exit; run nothing")
+    sp.add_argument("--quiet", action="store_true", help="suppress the loops' chatter")
+    sp.set_defaults(func=cmd_fleet)
 
     sp = param_flag(features_flag(data_flags(sub.add_parser(
         "promote", help="spend the one test touch on a model that passed on validate"
@@ -826,12 +1256,90 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--id", help="only this experiment id, as JSON (implies --show)")
     sp.set_defaults(func=cmd_ledger)
 
+    sp = sub.add_parser(
+        "exposure",
+        help="pull, show and spot-check the USA Structures county counts",
+        description=(
+            "County counts by occupancy class, pinned per state. The connector asks "
+            "the FeatureServer for counts grouped by county FIPS and never downloads "
+            "a footprint, so nothing finer than a county exists to print."
+        ),
+    )
+    esub = sp.add_subparsers(dest="exposure_command", required=True)
+    sp.set_defaults(func=cmd_exposure)
+
+    e = esub.add_parser("snapshot", help="pull and pin the counts for some states")
+    which = e.add_mutually_exclusive_group()
+    which.add_argument("--states", metavar="A,B",
+                       help="two-letter codes or two-digit FIPS, comma-separated")
+    which.add_argument("--all-states", action="store_true",
+                       help="every state in the pinned Census county file")
+    e.add_argument("--layer-url", help=f"override the layer URL "
+                                       f"(default {usa_structures.LAYER_URL})")
+    e.add_argument("--refresh", action="store_true",
+                   help="re-pull even where an extract is already pinned")
+    e.add_argument("--quiet", action="store_true")
+    e.set_defaults(exposure_func=cmd_exposure_snapshot)
+
+    e = esub.add_parser("show", help="print the county rows from the pinned extracts")
+    which = e.add_mutually_exclusive_group()
+    which.add_argument("--county", metavar="FIPS", help="one five-digit county")
+    which.add_argument("--state", metavar="XX", help="every county of one state")
+    e.set_defaults(exposure_func=cmd_exposure_show)
+
+    e = esub.add_parser(
+        "spot-check",
+        help="our county totals over the committed assessor counts; every ratio printed",
+    )
+    e.add_argument("--counts", metavar="PATH",
+                   help="assessor counts CSV (default "
+                        f"{data_mod.relative(verify.COUNTS_PATH)})")
+    e.set_defaults(exposure_func=cmd_exposure_spot_check)
+
+    sp = param_flag(features_flag(data_flags(sub.add_parser(
+        "issue",
+        help="refit the promoted model and write issued/<contract>/<period>.json",
+        description=(
+            "Refits the model a passing test card names, through TrainingView on the "
+            "training years only, and forecasts one future period under the same "
+            "firewall the backtest used. There is no parameter through which a label "
+            "could arrive, and no flag that skips a guard."
+        ),
+    ))))
+    sp.add_argument("model")
+    sp.add_argument("--period", required=True, metavar="YYYY-Qn|YYYY-Mnn|YYYY",
+                    help="the period to issue, in the contract's own shape")
+    sp.add_argument("--reissue", action="store_true",
+                    help="replace an issued file that already exists for this period")
+    sp.set_defaults(func=cmd_issue)
+
+    sp = sub.add_parser(
+        "brief",
+        help="one cited, validated brief per county from the issued files",
+        description=(
+            "Builds briefs/<fips>/<period>.html and .json from every issued file "
+            "covering the county, the pinned USA Structures counts and the ledgers. "
+            "Every sentence cites a claim that resolves; a document with a violation "
+            "is not written, and the violations are printed."
+        ),
+    )
+    which = sp.add_mutually_exclusive_group(required=True)
+    which.add_argument("--county", metavar="FIPS", help="one five-digit county")
+    which.add_argument("--state", metavar="XX",
+                       help="every county of one state that the issued files cover")
+    sp.add_argument("--period", required=True, metavar="YYYY-Qn",
+                    help="the period label the issued files carry")
+    sp.add_argument("--out", metavar="DIR",
+                    help="write under this directory instead of briefs/")
+    sp.set_defaults(func=cmd_brief)
+
     sp = features_flag(data_flags(
-        sub.add_parser("verify", help="check the Phase 0 or Phase 1 exit criteria")
+        sub.add_parser("verify", help="check the Phase 0, 1 or 2 exit criteria")
     ))
-    sp.add_argument("--phase", type=int, default=0, choices=[0, 1],
-                    help="0 scores the baselines against the pinned data; 1 reads the "
-                         "ledger only (default 0)")
+    sp.add_argument("--phase", type=int, default=0, choices=[0, 1, 2],
+                    help="0 scores the baselines against the pinned data; 1 reads one "
+                         "contract's ledger; 2 reads the whole registry and takes no "
+                         "-c (default 0)")
     sp.add_argument("--replay", action="store_true",
                     help="with --phase 1: rebuild the promoted model from its card and "
                          "rescore it on test without spending a touch")

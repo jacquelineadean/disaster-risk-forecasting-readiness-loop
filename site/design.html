@@ -23,6 +23,7 @@
       <a data-page="design" href="design.html">System design</a>
       <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
       <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="briefs" href="briefs.html">Briefs</a>
       <a data-page="playground" href="playground.html">Sandbox</a>
       <a data-report href="generated/report/index.html">Research briefing</a>
       <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
@@ -340,7 +341,7 @@ if leaked:
       <h3>MCP</h3>
       <p><code>readiness mcp -c NAME</code> serves the pinned data and the contract's ledger over MCP — stdio, standard-library JSON-RPC, no dependencies. Every tool is a read. <code>get_region_history</code> exposes training years only; there is no tool that returns a holdout outcome, and a test asserts it.</p>
     </div>
-    <aside class="aside"><strong>Phase 2</strong><br>"parallelise with subagents: hurricane wind, wildfire, tornado, heat" is a loop over registered contracts with one hazard analyst each, not a redesign.</aside>
+    <aside class="aside"><strong>Phase 2</strong><br>"parallelise with subagents: hurricane wind, wildfire, tornado, heat" is a loop over registered contracts, not a redesign: <code>readiness fleet --national --promote</code> runs the six national contracts through the same queue in turn, one ledger and one touch budget each. Sequential on purpose — the manifest the data plane writes is not safe to share between two runs.</aside>
   </div>
 </div></section>
 
@@ -358,12 +359,16 @@ readiness snapshot          pull and pin the data, print the manifest   [-c NAME
 readiness panel             build the labelled panel, print coverage   [-c NAME]
 readiness features          load the feature sources, print admission verdicts and the audit  [-c NAME] [--features era5,terrain,nri,climada]
 readiness score MODEL       fit and score one model  [-c NAME] [--split train|validate] [--features ...] [--param k=v]*
-readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1] [--features ...] [--promote] [--backend local|claude]
+readiness loop              run the full experimental loop  [-c NAME] [--queue baseline|phase1|phase2] [--features ...] [--promote] [--backend local|claude]
+readiness fleet             the loop over many contracts in turn, or --status  [--national | --contracts A,B] [--queue baseline|phase1|phase2] [--promote]
 readiness promote MODEL     the one atomic test touch: spend the budget and write the test card  [-c NAME] --spend-test-touch
 readiness backtest          write experiments/&lt;name&gt;/backtest.html from committed files only  [-c NAME] [-o PATH]
 readiness canary            demonstrate the harness rejecting a leaked model  [-c NAME]
 readiness ledger            show and verify the experiment ledger  [-c NAME] [--show] [--id ID]
-readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1] [--replay] [--bless]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2] [--replay] [--bless]
+readiness exposure          snapshot | show | spot-check: USA Structures county counts, pinned per state
+readiness issue MODEL       refit the promoted model, write a probability per county  -c NAME --period 2026-Q4 [--reissue]
+readiness brief             one cited, validated brief per county  (--county FIPS | --state XX) --period 2026-Q4
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]</code></pre>
@@ -383,9 +388,14 @@ readiness mcp               run the read-only MCP data server on stdio  [-c NAME
   engine/            proposable models: climatologies, persistence, the canary target,
                      features.py (the catalogue), history.py, linear.py, boosting.py, calibrate.py
   agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
+  fleet.py           the loop over every registered contract, and --status from the ledgers
+  exposure/          USA Structures county counts: occupancy classes, the county-only table, the spot-check
+  issue.py           refit the promoted model, write issued/&lt;contract&gt;/&lt;period&gt;.json
+  cite.py            the citation rules every human-facing document passes
+  brief.py           the county brief, validated before it is written
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
-contracts/           registered contracts, one JSON file each; three examples ship
+contracts/           registered contracts, one JSON file each; three examples and six national ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
@@ -394,7 +404,7 @@ skills/              agent runbooks: verification-protocol.md, experiment-card.m
 tools/               build_report.py, build_site.py, demo/capture.py, climada/ (the GPL tool, never imported)
 plans/               scenario library — the Phase 3 seed
 site/                this website
-tests/               unittest suite, no network required</code></pre>
+tests/               the unittest suite, no network required</code></pre>
     </div>
   </div>
 </div></section>
@@ -405,7 +415,7 @@ tests/               unittest suite, no network required</code></pre>
   <div class="cards cards--2 wide">
     <div class="card"><h4 class="mt0">Phase 0 — harness before model · complete</h4><p class="mb0">The eval plane, pinned data and the experiment ledger, for any hazard. <em>Exit:</em> the climatology baselines reproduce bit-for-bit from a clean clone, and the harness rejects a deliberately leaked model.</p></div>
     <div class="card"><h4 class="mt0">Phase 1 — the loop, on one hazard</h4><p class="mb0">Real candidate models, ERA5 features, CLIMADA integration. <em>Exit:</em> BSS &gt; 0 on untouched test years with reliability within ±5 pts, published with the ledger.</p></div>
-    <div class="card"><h4 class="mt0">Phase 2 — multi-hazard, national, with exposure</h4><p class="mb0">One registered contract per peril against the same harness; join to USA Structures so outputs become human.</p></div>
+    <div class="card"><h4 class="mt0">Phase 2 — multi-hazard, national, with exposure</h4><p class="mb0">One registered contract per peril against the same harness; join to USA Structures so outputs become human. Built: the fleet, the county-only exposure table and its spot-check, issuance and the cited brief. <em>Exit:</em> four hazards pass nationally; ten spot-checked counties from three states.</p></div>
     <div class="card"><h4 class="mt0">Phase 3 — the planning thought-partner</h4><p class="mb0">Scenario stress-tests of a facility's emergency plan against the validated risk layer. Case studies become regression tests. Seeded in <code>plans/</code>.</p></div>
     <div class="card"><h4 class="mt0">Phase 4 — global scale-out</h4><p class="mb0">Swap US layers for Open Buildings, Flood Hub, EM-DAT. The architecture does not change; the connectors do.</p></div>
   </div>
