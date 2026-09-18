@@ -10,7 +10,10 @@ real relationship to learn and the tests can ask for skill, not just for
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import pathlib
 import random
 import unittest
 
@@ -24,7 +27,7 @@ from readiness.harness import features as F
 from readiness.harness import scoring
 from readiness.harness.splits import PredictionRequest, TrainingView, split_panel
 from tests.fixtures import make_contract, make_panel, make_signal_panel
-from tests.test_features import FakeStatic
+from tests.test_features import FakeSeries, FakeStatic
 
 
 class SignalSeries:
@@ -87,6 +90,94 @@ def sources(series: SignalSeries | None = None) -> dict:
 QUICK = {"iters": 60}
 QUICK_GBM = {"rounds": 40}
 
+# ---------------------------------------------------------------------------
+# The cross-interpreter fingerprint
+# ---------------------------------------------------------------------------
+
+#: The blessed probabilities and feature digests of the four Phase 1 models.
+#: Written by `phase1_fingerprints()` under CPython 3.12 *and* 3.10, which
+#: produced identical JSON: that is the whole point of the file. Every float
+#: reduction in the feature channel and in the models is `math.fsum`, so a
+#: probability is a function of the data and not of which interpreter added
+#: up a twelve-month window (the builtin `sum` over floats compensates on
+#: 3.12 and folds left on 3.10). A diff here means either the arithmetic
+#: moved or it stopped being interpreter-independent; both are findings.
+FINGERPRINTS = pathlib.Path(__file__).resolve().parent / "expected" / "phase1_fingerprints.json"
+
+#: Reduced iteration counts, so the whole comparison fits in a few seconds.
+FINGERPRINT_MODELS: dict[str, dict] = {
+    "logistic": {"iters": 40},
+    "logistic+iso": {"iters": 40},
+    "gbm": {"rounds": 20},
+    "gbm+iso": {"rounds": 20},
+}
+FINGERPRINT_REGIONS = 8
+
+
+def fingerprint_sources() -> dict:
+    """The fixture sources: one series source and two static ones, no real data."""
+    return {
+        "era5": FakeSeries(),
+        "gazetteer": FakeStatic(),
+        "elevation": FakeStatic("elevation"),
+    }
+
+
+def probs_hash(probs, figures: int = 12) -> str:
+    """The forecast vector at `figures` significant figures, hashed."""
+    blob = ",".join(f"{p:.{figures}g}" for p in probs)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def phase1_fingerprints() -> dict:
+    """Probabilities and feature digest per Phase 1 model, on the fixture panel.
+
+    Run under two interpreters this is the proof that the models are
+    interpreter-independent; run under one it is the guard that keeps them so.
+
+    A calibrated model also records its isotonic map. On this fixture the
+    planted signal is a time trend, so within the three late training years
+    the logistic has nothing left to rank by and pool-adjacent-violators
+    collapses its map to one block: the forecasts come out constant. The
+    block's centre is still the mean of the inner model's forecasts, so the
+    map — unlike the constant it produces — moves with the inner arithmetic,
+    which is what makes this entry worth blessing.
+    """
+    contract = make_contract()
+    sources = fingerprint_sources()
+    panel = make_signal_panel(contract, sources["era5"], n_regions=FINGERPRINT_REGIONS)
+    out: dict = {
+        "_note": (
+            "Blessed from identical output under CPython 3.10 and 3.12. Hashes "
+            "are over probabilities rendered at 12 significant figures; the "
+            "feature digest is exact."
+        ),
+        "_contract": contract.digest(),
+        "_panel_digest": panel.digest(),
+        "_n_regions": FINGERPRINT_REGIONS,
+        "_sources": sorted(sources),
+    }
+    for name, kwargs in FINGERPRINT_MODELS.items():
+        model = build_model(name, **kwargs)
+        _units, probs, _outcomes = scoring.predictions_for(
+            model, panel, contract, "validate", sources=sources
+        )
+        entry = {
+            "kwargs": dict(kwargs),
+            "n_probs": len(probs),
+            "n_distinct": len(set(probs)),
+            "probs_sha256_12sf": probs_hash(probs),
+            "feature_digest": model.feature_digest,
+        }
+        fitted_map = getattr(model, "map", None)
+        if fitted_map is not None:
+            entry["map_blocks"] = len(fitted_map.centres)
+            entry["map_sha256_12sf"] = probs_hash(
+                list(fitted_map.centres) + list(fitted_map.values)
+            )
+        out[name] = entry
+    return out
+
 
 class TestFeatureSets(unittest.TestCase):
     def test_specs_for_concatenates_in_order_and_rejects_unknown_names(self):
@@ -148,6 +239,22 @@ class TestHistory(unittest.TestCase):
         # A row the history never saw cannot be treated as in-sample.
         with self.assertRaises(ValueError):
             history.logit(("A", 2016, 1), in_sample=True)
+
+    def test_leave_one_year_out_drops_the_whole_year_from_every_level(self):
+        # Region B never has an event; region A has one, in 2005. B's own 2005
+        # row must not be able to see it — not through the pooled rate and not
+        # through the seasonal one. Leaving out only the row itself let the
+        # year's event in through both, which is the optimism the rule exists
+        # to stop.
+        history = HistoryFeatures(10.0).fit(self.rows())
+        same_year = history.rate(("B", 2005, 1), in_sample=True)
+        other_year = history.rate(("B", 2001, 1), in_sample=True)
+        self.assertEqual(same_year, 0.0)
+        self.assertGreater(other_year, 0.0)
+        # A's own year is gone from its cell as well, and the holdout path
+        # still sees every training year.
+        self.assertEqual(history.rate(("A", 2005, 1), in_sample=True), 0.0)
+        self.assertGreater(history.rate(("B", 2016, 1), in_sample=False), 0.0)
 
     def test_logits_are_finite_even_for_all_negative_cells(self):
         history = HistoryFeatures(10.0).fit([(("A", y, 1), 0) for y in range(2000, 2010)])
@@ -364,6 +471,41 @@ class TestCalibrated(unittest.TestCase):
         card = scoring.score(model, panel, self.c, "validate", sources=sources(series))
         self.assertEqual(card.model, "logistic+iso")
         self.assertEqual(card.feature_columns, tuple(s.column for s in model.feature_specs))
+
+
+class TestPhase1Fingerprints(unittest.TestCase):
+    """The blessed file is the same under CPython 3.10 and 3.12, and stays so."""
+
+    def test_probabilities_and_feature_digests_reproduce(self):
+        blessed = json.loads(FINGERPRINTS.read_text())
+        observed = phase1_fingerprints()
+        self.assertEqual(set(observed), set(blessed))
+        for key in sorted(blessed):
+            with self.subTest(entry=key):
+                self.assertEqual(
+                    observed[key], blessed[key],
+                    f"{key} moved: rebless only with a reason, and only after "
+                    "running the generator under 3.10 and 3.12",
+                )
+
+    def test_the_uncalibrated_entries_are_not_vacuous(self):
+        # A fingerprint over a constant vector would pass whatever the
+        # arithmetic did; the two uncalibrated models must spread out.
+        blessed = json.loads(FINGERPRINTS.read_text())
+        for name in ("logistic", "gbm"):
+            with self.subTest(model=name):
+                self.assertGreater(blessed[name]["n_distinct"], 5)
+        for name in ("logistic+iso", "gbm+iso"):
+            with self.subTest(model=name):
+                self.assertGreaterEqual(blessed[name]["map_blocks"], 1)
+
+    def test_every_model_asked_the_harness_for_the_same_frame(self):
+        # One frame, four models: a feature digest that differs between them
+        # would mean a model is being handed rows the others are not.
+        blessed = json.loads(FINGERPRINTS.read_text())
+        digests = {blessed[name]["feature_digest"] for name in FINGERPRINT_MODELS}
+        self.assertEqual(len(digests), 1, digests)
+        self.assertEqual(len(digests.pop()), 16)
 
 
 class TestRegistryEntries(unittest.TestCase):

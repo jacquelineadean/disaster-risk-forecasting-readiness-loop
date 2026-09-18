@@ -65,9 +65,10 @@ def _fail(exc: BaseException) -> str:
 #: Commands the browser refuses outright, and why. `promote` is the one
 #: atomic test touch and writes a card the repository is meant to commit; a
 #: touch spent in a tab is a spent budget with no record, so it is refused
-#: here rather than budgeted. `backtest` reads only committed files, but its
-#: report is the published record of that touch and belongs beside the ledger
-#: in git, not in a browser's memory.
+#: here rather than budgeted — and so is `loop --promote`, which ends in the
+#: same touch by another route (see `_promotes`). `backtest` reads only
+#: committed files, but its report is the published record of that touch and
+#: belongs beside the ledger in git, not in a browser's memory.
 NOT_IN_BROWSER = {
     "snapshot": "a network connection",
     "mcp": "a process",
@@ -79,10 +80,23 @@ NOT_IN_BROWSER = {
 }
 
 
-def _refuse(command: str) -> int:
+def _refuse(command: str, needs: str | None = None) -> int:
     print(f"`readiness {command}` is not available in the browser sandbox: "
-          f"it needs {NOT_IN_BROWSER[command]}.")
+          f"it needs {needs or NOT_IN_BROWSER[command]}.")
     return 2
+
+
+def _promotes(argv: list[str]) -> bool:
+    """True when this `loop` would spend the test touch.
+
+    `loop --promote` ends in the very same atomic touch as `promote` — one
+    test card, one line in the committed budget file — so the browser has to
+    refuse it for the same reason, and has to do so for every spelling
+    argparse would accept, abbreviations included.
+    """
+    return argv[:1] == ["loop"] and any(
+        len(arg) > 2 and "--promote".startswith(arg) for arg in argv
+    )
 
 
 def _requested_features(argv: list[str]) -> list[str]:
@@ -132,6 +146,8 @@ def run_cli(argv_json: str) -> int:
     argv = json.loads(argv_json)
     if argv and argv[0] in NOT_IN_BROWSER:
         return _refuse(argv[0])
+    if _promotes(argv):
+        return _refuse("loop --promote", NOT_IN_BROWSER["promote"])
     if argv and argv[0] == "features":
         return _features_in_browser(argv)
     try:

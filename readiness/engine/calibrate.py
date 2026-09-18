@@ -28,6 +28,7 @@ inner's, so the harness treats the pair as one candidate.
 from __future__ import annotations
 
 import bisect
+import math
 from typing import Sequence
 
 from readiness.engine.base import FittedModel
@@ -44,7 +45,10 @@ class IsotonicMap:
     """Non-decreasing step function from pool-adjacent-violators.
 
     Fitting sorts the pairs by forecast, pools identical forecasts, then merges
-    adjacent blocks whose means decrease until the sequence is monotone. Each
+    adjacent blocks whose means decrease until the sequence is monotone. A
+    block carries running totals rather than the values it pooled: a running
+    total is a fixed sequence of float additions, which every interpreter does
+    identically, unlike the builtin `sum` this module otherwise avoids. Each
     block keeps the mean forecast of the rows it pooled, so at predict time a
     forecast is mapped by linear interpolation between neighbouring block
     means (a step function would jump at arbitrary points between blocks);
@@ -115,18 +119,18 @@ class PlattMap:
         zs = [logit(clip(p, PROB_EPS, 1.0 - PROB_EPS)) for p in forecasts]
         a, b = 1.0, 0.0
         for _ in range(self.STEPS):
-            ga = gb = 0.0
-            haa = hab = hbb = 0.0
-            for z, y in zip(zs, labels):
-                p = sigmoid(a * z + b)
-                r, w = p - y, p * (1.0 - p)
-                ga += r * z
-                gb += r
-                haa += w * z * z
-                hab += w * z
-                hbb += w
-            haa += self.RIDGE
-            hbb += self.RIDGE
+            # Each gradient and Hessian entry is one exactly-rounded reduction
+            # over the rows (`math.fsum`, not the builtin `sum`, whose float
+            # behaviour differs between CPython 3.10 and 3.12), so the Newton
+            # step is a function of the data and the step count alone.
+            ps = [sigmoid(a * z + b) for z in zs]
+            rs = [p - y for p, y in zip(ps, labels)]
+            ws = [p * (1.0 - p) for p in ps]
+            ga = math.fsum(r * z for r, z in zip(rs, zs))
+            gb = math.fsum(rs)
+            haa = math.fsum(w * z * z for w, z in zip(ws, zs)) + self.RIDGE
+            hab = math.fsum(w * z for w, z in zip(ws, zs))
+            hbb = math.fsum(ws) + self.RIDGE
             det = haa * hbb - hab * hab
             a -= (hbb * ga - hab * gb) / det
             b -= (haa * gb - hab * ga) / det

@@ -1,4 +1,4 @@
-.PHONY: help install snapshot panel features loop promote backtest phase1 canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
+.PHONY: help install snapshot panel features score loop promote backtest phase1 canary verify test report serve ledger contracts dashboard docs-capture site serve-site clean-derived
 
 PY ?= python3
 # Which registered contract to run against. Leave empty to let the CLI resolve
@@ -12,14 +12,25 @@ PHASE ?= 0
 # load every connector whose pinned data is present.
 FEATURES ?=
 FFLAG = $(if $(FEATURES),--features $(FEATURES),)
-# The model `make promote` spends the test touch on.
+# The model `make score` and `make promote` run: the one `make promote` spends
+# the test touch on.
 MODEL ?= logistic
+# Constructor arguments for that model, space-separated `key=value` pairs, each
+# expanded into a --param flag: PARAMS='iters=800 feature_sets=era5-antecedent,terrain'.
+# A value may hold commas, which is why the separator here is a space. Left
+# empty, `promote` adopts the arguments of the validate card that passed.
+PARAMS ?=
+PFLAG = $(foreach p,$(PARAMS),--param $(p))
+# Which split `make score` fits against. Never test: `promote` is the only way
+# onto the test split, because the touch and the card are one step.
+SPLIT ?= validate
 
 help:            ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[1m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "  pass CONTRACT=<name> to pick a registered contract, e.g. make loop CONTRACT=flood-xx"
+	@echo "  pass PARAMS='key=value key=value' to score or promote with model arguments"
 
 install:         ## install the package (editable). No runtime dependencies.
 	$(PY) -m pip install -e .
@@ -36,11 +47,14 @@ panel:           ## build the labelled region-period panel, show split and event
 features:        ## load the feature sources; print admission verdicts, columns and the audit
 	$(PY) -m readiness.cli features $(CFLAG) $(FFLAG)
 
+score:           ## fit and score MODEL on SPLIT (default validate) with PARAMS
+	$(PY) -m readiness.cli score $(MODEL) $(CFLAG) $(FFLAG) $(PFLAG) --split $(SPLIT)
+
 loop:            ## run the experimental loop end to end (baseline queue)
 	$(PY) -m readiness.cli loop $(CFLAG)
 
 promote:         ## spend the one test touch on MODEL (default logistic) after its validate pass
-	$(PY) -m readiness.cli promote $(MODEL) $(CFLAG) $(FFLAG) --spend-test-touch
+	$(PY) -m readiness.cli promote $(MODEL) $(CFLAG) $(FFLAG) $(PFLAG) --spend-test-touch
 
 backtest:        ## write experiments/<name>/backtest.html and .json from committed files only
 	$(PY) -m readiness.cli backtest $(CFLAG)

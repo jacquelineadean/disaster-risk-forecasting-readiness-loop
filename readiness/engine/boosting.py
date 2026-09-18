@@ -26,6 +26,12 @@ building, no early stopping on a validation fold. What remains:
   so the tree is a function of the histograms alone. Leaves take the Newton
   value −Σg / (Σh + 1).
 * Predict sums the leaf values and passes the total through the sigmoid.
+* Every total over floats — a node's gradient and Hessian sums, a histogram
+  bin's, and the leaf values a prediction adds up — is `math.fsum`, so the
+  same rows give the same split, the same leaf and the same probability on
+  CPython 3.10 and 3.12 (whose builtin `sum` over floats differ). The gain
+  reads the bin totals the histogram built, so the split a node takes and the
+  value its leaves carry are two views of one reduction, not two.
 
 Speed is not the goal; a few thousand rows fit in seconds, and the
 orchestrator caps national-scale runs elsewhere.
@@ -134,6 +140,7 @@ class GradientBoosting(FittedModel):
         self.columns, raw, labels = training_matrix(view, self.feature_specs, None)
         self._binner.fit(raw)
         binned = [self._binner.transform(row) for row in raw]
+        # Labels are integers, so this one builtin sum is exact everywhere.
         rate = clip(sum(labels) / len(labels), PROB_EPS, 1.0 - PROB_EPS)
         self.base_score = logit(rate)
         scores = self._offsets(view.units(), in_sample=True)
@@ -149,8 +156,8 @@ class GradientBoosting(FittedModel):
 
     def _grow(self, binned, grad, hess, rows: list[int], depth: int):
         """A node: a leaf value, or (column, bin, left, right) with bins <= bin left."""
-        g = sum(grad[i] for i in rows)
-        h = sum(hess[i] for i in rows)
+        g = math.fsum(grad[i] for i in rows)
+        h = math.fsum(hess[i] for i in rows)
         leaf = -g / (h + LAMBDA)
         if depth == 0 or len(rows) < 2 * self.min_leaf:
             return leaf
@@ -177,21 +184,23 @@ class GradientBoosting(FittedModel):
         best, best_gain = None, 0.0
         for j in range(len(self.columns)):
             n_bins = self._binner.n_bins(j)
-            g_bin, h_bin, n_bin = [0.0] * n_bins, [0.0] * n_bins, [0] * n_bins
+            buckets: list[list[int]] = [[] for _ in range(n_bins)]
             for i in rows:
-                b = binned[i][j]
-                g_bin[b] += grad[i]
-                h_bin[b] += hess[i]
-                n_bin[b] += 1
-            g_left = h_left = 0.0
+                buckets[binned[i][j]].append(i)
+            # The same arithmetic as the node totals above: one exactly-rounded
+            # reduction over the rows a bin holds, and then over the bins on
+            # each side of the candidate split. Nothing accumulates across
+            # iterations, so no side of the gain depends on a running order.
+            g_bin = [math.fsum(grad[i] for i in bucket) for bucket in buckets]
+            h_bin = [math.fsum(hess[i] for i in bucket) for bucket in buckets]
             n_left = 0
             for b in range(n_bins - 1):
-                g_left += g_bin[b]
-                h_left += h_bin[b]
-                n_left += n_bin[b]
+                n_left += len(buckets[b])
                 if n_left < self.min_leaf or len(rows) - n_left < self.min_leaf:
                     continue
-                g_right, h_right = g_total - g_left, h_total - h_left
+                g_left, h_left = math.fsum(g_bin[: b + 1]), math.fsum(h_bin[: b + 1])
+                g_right = math.fsum(g_bin[b + 1 :])
+                h_right = math.fsum(h_bin[b + 1 :])
                 gain = (
                     g_left * g_left / (h_left + LAMBDA)
                     + g_right * g_right / (h_right + LAMBDA)
@@ -209,7 +218,9 @@ class GradientBoosting(FittedModel):
 
     def _score(self, offset: float, row: Sequence[float]) -> float:
         binned = self._binner.transform(row)
-        return offset + self.lr * sum(_leaf_value(t, binned) for t in self.trees)
+        return offset + self.lr * math.fsum(
+            _leaf_value(t, binned) for t in self.trees
+        )
 
     def _predict(self, request: PredictionRequest) -> Sequence[float]:
         raw = request_matrix(request, self.feature_specs, None)

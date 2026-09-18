@@ -90,12 +90,22 @@ class Manifest:
         return True
 
     def add(self, key: str, record: SourceRecord) -> None:
+        """Pin a record, noting an upstream change rather than hiding it.
+
+        The notice is *appended* to whatever the connector wrote. Its notes
+        are load-bearing — `backtest` reads `derived_through=YYYY` out of them
+        to decide whether a static layer may be a feature at all — and
+        replacing them turned a re-pull of the National Risk Index into a
+        layer with no declared vintage, which is a layer the firewall can no
+        longer refuse for the right reason.
+        """
         prior = self.records.get(key)
         if prior and prior.sha256 != record.sha256:
-            record.notes = (
+            notice = (
                 f"upstream content changed (was sha256:{prior.sha256[:12]}...); "
                 "prior experiments were run against the old bytes"
-            ).strip()
+            )
+            record.notes = f"{record.notes}; {notice}" if record.notes else notice
         self.records[key] = record
         self.dirty = True
 

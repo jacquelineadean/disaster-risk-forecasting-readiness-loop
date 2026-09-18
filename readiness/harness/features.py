@@ -26,6 +26,12 @@ to leak into a forecast. So the harness owns the channel:
   caught; one that does not is bit-identical. The audit is mechanical and runs
   on every scoring call.
 
+Every reduction over floats in this module is `math.fsum`, never the builtin
+`sum`: CPython 3.12 sums floats with Neumaier compensation where 3.10 folds
+left, so a twelve-month window would give two different values — and the frame
+two different digests — on two interpreters this package supports. `fsum` is
+exactly rounded, so it is the same number everywhere.
+
 What the harness proves: temporal precedence (from cutoffs it computed) and
 label origin (from manifest keys). What it trusts: the `derived_through` year a
 static connector declares, which is a reviewed constant pinned into the
@@ -177,12 +183,12 @@ def _clean(values: Iterable[float]) -> list[float]:
 
 def _trailing_sum(series: Series, cutoff: MonthIndex, spec: "FeatureSpec", ppy: int) -> float:
     xs = _clean(series.window(cutoff, spec.window_months))
-    return sum(xs) if len(xs) == spec.window_months else NAN
+    return math.fsum(xs) if len(xs) == spec.window_months else NAN
 
 
 def _trailing_mean(series: Series, cutoff: MonthIndex, spec: "FeatureSpec", ppy: int) -> float:
     xs = _clean(series.window(cutoff, spec.window_months))
-    return sum(xs) / len(xs) if len(xs) == spec.window_months else NAN
+    return math.fsum(xs) / len(xs) if len(xs) == spec.window_months else NAN
 
 
 def _trailing_max(series: Series, cutoff: MonthIndex, spec: "FeatureSpec", ppy: int) -> float:
@@ -208,8 +214,8 @@ def _same_period_mean(
         months = [series.value(m) for m in range(start - 12 * back, start - 12 * back + length)]
         if start - 12 * back + length > cutoff or any(math.isnan(m) for m in months):
             continue
-        totals.append(sum(months))
-    return sum(totals) / len(totals) if len(totals) == years else NAN
+        totals.append(math.fsum(months))
+    return math.fsum(totals) / len(totals) if len(totals) == years else NAN
 
 
 Transform = Callable[[Series, MonthIndex, "FeatureSpec", int], float]

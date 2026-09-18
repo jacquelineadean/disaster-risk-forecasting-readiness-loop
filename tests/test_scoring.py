@@ -196,10 +196,6 @@ class TestScorecardShape(unittest.TestCase):
         self.assertEqual(card.n_units, len(scored))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class Windowed(ClimatologySeasonal):
     """A seasonal climatology that also asks for one feature column."""
 
@@ -292,3 +288,33 @@ class TestFeatureChannel(unittest.TestCase):
         self.assertTrue(report.rejected)
         provenance = [f for f in report.findings if f.check == "feature provenance"][0]
         self.assertTrue(provenance.tripped)
+        self.assertIn("undeclared", provenance.detail)
+
+    def test_a_model_that_claims_another_frame_is_tripped_as_a_mismatch(self):
+        # The louder failure than silence: a model that declares a feature
+        # digest which is not the frame the harness built was fitted on
+        # something else, and the canary has to say so with both digests.
+        class Substituted(Windowed):
+            def fit(self, view):
+                super().fit(view)
+                self.feature_digest = "f" * 16
+
+        card, report = scoring.screen(
+            Substituted(), self.panel, self.contract, "validate", sources=self.sources
+        )
+        self.assertTrue(report.rejected)
+        provenance = [f for f in report.findings if f.check == "feature provenance"][0]
+        self.assertTrue(provenance.tripped)
+        self.assertIn("<- mismatch", provenance.detail)
+        self.assertIn("f" * 16, provenance.detail)
+        # The harness's own digest is on the card and in the finding.
+        honest = scoring.score(
+            Windowed(), self.panel, self.contract, "validate", sources=self.sources
+        )
+        self.assertIn(honest.feature_digest, provenance.detail)
+        self.assertEqual(card.feature_digest, honest.feature_digest)
+        self.assertNotEqual(card.feature_digest, "f" * 16)
+
+
+if __name__ == "__main__":
+    unittest.main()

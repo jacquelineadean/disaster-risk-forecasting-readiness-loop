@@ -19,7 +19,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from readiness import cli, contracts, data as data_mod
+from readiness import cli, contracts, data as data_mod, verify
 from readiness.agent import orchestrator
 from readiness.connectors.base import Manifest
 from readiness.connectors.census import County
@@ -546,6 +546,23 @@ class TestPhase1Loop(FeatureCase):
         self.assertIn("gbm+iso[era5-antecedent+terrain]", out)
         self.assertFalse(self.where.touch_budget.exists())
 
+    def test_a_refused_promotion_prints_the_loop_and_exits_two(self):
+        # The second run's queue is fine; it is the promotion that cannot
+        # happen, because the first run already spent the ledger's one touch.
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 0, out)
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1",
+                                 "--promote", "--quiet")
+        self.assertEqual(code, 2, out)
+        self.assertNotIn("Traceback", out)
+        self.assertIn("ran ", out)  # the loop's own result, before the reason
+        self.assertIn("ledger: ", out)
+        self.assertIn("already holds a test card", out)
+        self.assertIn("A new contract name, not a second touch", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+
     def test_baseline_queue_is_the_default_and_promotes_nothing(self):
         code, out = self.run_cli("loop", "-c", "flood-zz", "--promote", "--quiet")
         self.assertEqual(code, 0, out)
@@ -584,14 +601,31 @@ class TestPromoteCommand(FeatureCase):
                                  "--param", "feature_sets=era5-antecedent,terrain")
         self.assertEqual(code, 2)
 
-    def test_refuses_a_kwargs_mismatch(self):
+    def test_refuses_named_arguments_no_validate_card_carries(self):
         self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
         code, out = self.run_cli("promote", "logistic+iso", "-c", "flood-zz", "--quiet",
-                                 "--spend-test-touch")
+                                 "--spend-test-touch", "--param", "iters=61",
+                                 "--param", "feature_sets=era5-antecedent,terrain")
         self.assertEqual(code, 2)
         self.assertIn("no validate card for exactly this model, version and arguments",
                       out)
         self.assertFalse(self.where.touch_budget.exists())
+
+    def test_without_param_the_validate_cards_arguments_are_adopted(self):
+        # `make promote MODEL=logistic+iso` and the documented command name no
+        # arguments at all; the registry's defaults are not what was validated.
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--quiet")
+        code, out = self.run_cli("promote", "logistic+iso", "-c", "flood-zz",
+                                 "--spend-test-touch")
+        self.assertEqual(code, 0, out)
+        self.assertIn("adopted from validate card", out)
+        self.assertIn('"iters": 60', out)
+        self.assertIn("arguments        {", out)
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+        card = json.loads(self.where.ledger.read_text().splitlines()[-1])
+        self.assertEqual(card["split"], "test")
+        self.assertEqual(card["data_snapshot"]["model_kwargs"]["iters"], 60)
 
 
 class TestBacktestAndPhase1Verify(FeatureCase):
@@ -625,9 +659,38 @@ class TestBacktestAndPhase1Verify(FeatureCase):
         code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",
                                  "--quiet")
         self.assertEqual(code, 0, out)
-        self.assertIn("[ok]   replay brier_score: card ", out)
-        self.assertIn("[ok]   replay reliability_bins_sha256", out)
+        self.assertIn("[ok]   replay brier_score: agrees", out)
+        self.assertIn("[ok]   replay feature_digest: card ", out)
+        for i in range(self.contract.n_reliability_bins):
+            self.assertIn(f"[ok]   replay reliability_bins[{i}]: agrees", out)
         self.assertEqual(self.where.touch_budget.read_text(), touches)
+
+    def test_replay_never_prints_a_score_from_the_test_split(self):
+        # The refit rescores the one-shot holdout; the command may say whether
+        # it agrees with the card and nothing more. Where they agree the card's
+        # own rendering *is* the refit's, so neither may be printed.
+        self.run_cli("loop", "-c", "flood-zz", "--queue", "phase1", "--promote",
+                     "--quiet")
+        self.run_cli("backtest", "-c", "flood-zz")
+        result = verify.phase1(
+            self.contract, ledger_path=self.where.ledger,
+            touch_path=self.where.touch_budget,
+            backtest_path=self.where.directory / "backtest.html",
+        )
+        rows = verify.replay(self.contract, self.dataset, result.card)
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        replay_lines = "\n".join(x for x in out.splitlines() if "replay " in x)
+        scored = {f: (e, o) for f, e, o, _ok in rows
+                  if f not in verify.REPLAY_SHOWN_FIELDS and not f.startswith("reli")}
+        self.assertIn("brier_score", scored)
+        for field, (expected, observed) in scored.items():
+            with self.subTest(field=field):
+                self.assertNotIn(verify.sig(observed), replay_lines)
+                self.assertNotIn(repr(observed), replay_lines)
+                self.assertNotIn(verify.sig(expected), replay_lines)
+                self.assertIn(f"replay {field}: agrees", out)
 
     def test_replay_without_a_test_card_is_a_failure(self):
         code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "1", "--replay",

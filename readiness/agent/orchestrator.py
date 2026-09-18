@@ -39,7 +39,7 @@ from readiness.engine.features import FEATURE_SETS
 from readiness.harness import contract as contract_mod
 from readiness.harness import scoring
 from readiness.harness.ledger import GENESIS, ExperimentCard, Ledger, utc_now
-from readiness.harness.splits import TouchBudget, get_split
+from readiness.harness.splits import TouchBudget, get_split, split_panel
 
 Progress = Callable[[str], None]
 
@@ -265,7 +265,14 @@ QUEUES: dict[str, tuple[Candidate, ...]] = {
 
 
 class PromotionRefused(RuntimeError):
-    """A test touch that would have no validate record behind it, or a second one."""
+    """A test touch that would have no validate record behind it, or a second one.
+
+    `result` is the loop that ran before the refusal, when there was one, so a
+    caller that refuses to promote can still report the experiments it did
+    run instead of losing them to the traceback.
+    """
+
+    result: "LoopResult | None" = None
 
 
 @dataclass
@@ -324,8 +331,19 @@ def run_experiment(
     if split.name == "test":
         if touch_budget is None:
             raise RuntimeError("scoring against test requires a touch budget")
-        # Paid before the model sees a single test unit, so a run that is
-        # interrupted after scoring cannot be re-run for free.
+        # Build and audit the feature frame *before* paying. It is the same
+        # call `scoring` makes on the way to a fit, it takes units and never
+        # labels, and it is the one step that can still refuse: a missing
+        # source or an unclean audit must not burn the one touch. Everything
+        # after this point pays first and scores second, so a run interrupted
+        # after scoring cannot be re-run for free.
+        scoring._features(
+            model,
+            contract,
+            split_panel(panel, contract.splits.train),
+            split_panel(panel, split),
+            dataset.sources,
+        )
         spent = touch_budget.spend(model.name, model.version)
         progress(f"  test touch {spent}/{contract.test_touch_budget} spent")
 
@@ -366,6 +384,37 @@ def run_experiment(
         contract_digest=contract.digest(),
     )
     return ledger.append(card)
+
+
+def _same_data(built, validated: ExperimentCard, dataset: data_mod.Dataset) -> None:
+    """Refuse a touch earned on one version of the data and spent on another.
+
+    The validate pass is the evidence the touch is bought with; if the panel
+    or the feature extracts have been re-pulled since, the evidence is about
+    other numbers. Both versions are named so the difference can be looked up
+    in the manifest rather than guessed at.
+    """
+    snapshot = validated.data_snapshot or {}
+    stored = snapshot.get("data_version")
+    if stored != dataset.data_version:
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: validate card "
+            f"{validated.experiment_id} was scored on data version sha256:{stored}, and "
+            f"this dataset is sha256:{dataset.data_version}. Re-score it on validate "
+            "against the data in hand; a pass earned on other bytes does not buy the "
+            "touch."
+        )
+    card_features = snapshot.get("feature_version")
+    if card_features is None and not dataset.feature_version:
+        return
+    if (card_features or "") != (dataset.feature_version or ""):
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: validate card "
+            f"{validated.experiment_id} was scored on feature version "
+            f"sha256:{card_features or 'none'}, and this dataset is "
+            f"sha256:{dataset.feature_version or 'none'}. The features a model is "
+            "judged on are part of what earned the pass."
+        )
 
 
 def run_local(
@@ -453,9 +502,17 @@ def run_local(
         skipped=skipped,
     )
     if promote:
-        result.promoted = _promote_first_pass(
-            ran, dataset, experiments_dir=experiments_dir, progress=progress
-        )
+        try:
+            result.promoted = _promote_first_pass(
+                ran, dataset, experiments_dir=experiments_dir, progress=progress
+            )
+        except PromotionRefused as exc:
+            # The queue ran and its cards are written; only the promotion was
+            # refused. Carry the result on the refusal so the caller can still
+            # report what the loop found before it says why nothing moved to
+            # the test split.
+            exc.result = result
+            raise
     return result
 
 
@@ -498,10 +555,27 @@ def _validated(
     return found
 
 
+def _latest_validated(
+    ledger: Ledger, name: str, version: str, digest: str
+) -> ExperimentCard | None:
+    """The latest validate PASS card for this model and version, whatever its arguments."""
+    found = None
+    for card in ledger.read():
+        if (
+            card.split == "validate"
+            and card.model == name
+            and card.version == version
+            and card.contract_digest == digest
+            and card.status == "PASS"
+        ):
+            found = card
+    return found
+
+
 def promote(
     contract: Contract,
     model: str,
-    kwargs: dict,
+    kwargs: dict | None,
     dataset: data_mod.Dataset,
     *,
     experiments_dir: pathlib.Path | None = None,
@@ -509,29 +583,70 @@ def promote(
 ) -> ExperimentCard:
     """The one atomic test touch: spend the budget and write the test card together.
 
-    Refused unless the ledger already holds a validate card for this exact
-    model, version and constructor arguments, under the current contract
-    digest, that passed with a clear canary; and refused if any test card
-    already exists under the current digest, so the test split cannot be
-    shopped across candidates. Everything else is `run_experiment` as usual,
-    with the budget it needs for the test split.
+    `kwargs` None means "the arguments that earned the pass": the latest
+    validate PASS card for this model and version under the current digest is
+    read and its own constructor arguments are adopted and printed, so
+    `readiness promote logistic` promotes what was actually validated rather
+    than the registry's defaults. Given explicitly, they must still match a
+    validate card exactly.
+
+    Refused, in order, when: the dataset has not loaded a source the candidate
+    needs (a touch spent on a run that cannot build its features is a touch
+    spent on nothing); the ledger already holds *any* test card; no validate
+    card for exactly this model, version and arguments passed with a clear
+    canary; or the data the pass was earned on is not the data in hand.
+    Everything else is `run_experiment` as usual, with the budget it needs for
+    the test split.
     """
     where = data_mod.paths(contract, experiments_dir=experiments_dir)
     ledger = Ledger(where.ledger)
     digest = contract.digest()
+    identity = build_model(model)
+    name, version = identity.name, identity.version
+
+    if kwargs is None:
+        adopted = _latest_validated(ledger, name, version, digest)
+        if adopted is None:
+            raise PromotionRefused(
+                f"refusing to promote {name}@{version}: no validate card for it passed "
+                f"the contract (sha256:{digest}) with a clear canary, so there are no "
+                "arguments to adopt. Score it on validate first, or name the arguments "
+                "with --param."
+            )
+        kwargs = adopted.data_snapshot.get("model_kwargs") or {}
+        progress(
+            f"  arguments        {json.dumps(kwargs, sort_keys=True)} "
+            f"(adopted from validate card {adopted.experiment_id})"
+        )
     built = build_model(model, **kwargs)
     wanted = json_kwargs(kwargs)
 
-    prior = [
-        c for c in ledger.read() if c.split == "test" and c.contract_digest == digest
-    ]
+    # What the candidate would ask the harness for, before anything is spent.
+    probe = Candidate(model=model, changed="", hypothesis="", kwargs=dict(kwargs))
+    missing = missing_sources(probe, dataset)
+    if missing:
+        raise PromotionRefused(
+            f"refusing to promote {built.name}@{built.version}: it needs source(s) "
+            f"{list(missing)} for feature set(s) {list(probe.requires)}; load them with "
+            "--features and promote again. The touch pays for a scored model, and a run "
+            "that cannot build its features scores nothing."
+        )
+
+    prior = [c for c in ledger.read() if c.split == "test"]
     if prior:
+        first = prior[0]
+        under = (
+            "this contract"
+            if first.contract_digest == digest
+            else f"contract sha256:{first.contract_digest}"
+        )
         raise PromotionRefused(
             f"refusing to promote {built.name}@{built.version}: the ledger already "
-            f"holds a test card under contract sha256:{digest} "
-            f"({prior[0].experiment_id}, {prior[0].model}@{prior[0].version}, "
-            f"{prior[0].status}). One test touch per contract version; a new "
-            "contract name, not a second touch, is the sanctioned next move."
+            f"holds a test card ({first.experiment_id}, {first.model}@{first.version}, "
+            f"{first.status}, under {under}). The test years are spent once per ledger, "
+            "not once per contract version — re-registering the criteria does not make "
+            "them untouched again. A new contract name, not a second touch, is the "
+            "sanctioned next move."
         )
     validated = _validated(ledger, built.name, built.version, wanted, digest)
     if validated is None:
@@ -542,6 +657,7 @@ def promote(
             "with a clear canary. Score it on validate first; the test touch is "
             "spent only on a result that was earned there."
         )
+    _same_data(built, validated, dataset)
 
     candidate = Candidate(
         model=model,

@@ -19,7 +19,11 @@ One request per county covers the whole year range, and the pull is
 sequential on one keep-alive session: the archive API rate-limits by the
 minute, so parallel workers only earn 429s. A 429 is slept through and retried.
 The extract is resumable: a county already written is not fetched again unless
-`refresh` is set or its line no longer covers the requested years.
+`refresh` is set or its line no longer covers the requested years. What is
+never done is re-pinning an extract whose bytes have stopped matching the
+manifest: the record is the provenance every card built on it names, so a
+mismatch is an error and `refresh` is the way to say "discard it and pull
+again".
 
 The harness sees two sources from the same extract: a series source `era5`
 (`precip_mm`, `tmean_c`, whose months speak for themselves) and a static
@@ -264,29 +268,56 @@ def snapshot(
 ) -> list[pathlib.Path]:
     """Fetch what the extracts lack, write them, pin them. Returns their paths.
 
-    The range requested starts on 1 January of the year *before* `years[0]`
-    so that a trailing twelve-month window exists for the first year's first
-    period. `scope` puts every county in one extract under that label (the
-    national pull uses `"all"`, as Storm Events does); otherwise counties are
-    grouped by state FIPS.
+    The range requested starts on 1 January of `years[0] - 2`, which is what
+    the firewall needs: the first period of the first year is cut a month
+    before it starts (the minimum lag), and a trailing twelve-month window
+    ending there reaches back into the year before *that*. A one-year
+    lookback left the first period's twelve-month columns missing for every
+    contract. The coverage check asks for the same range, so an extract
+    pulled under the old rule is completed rather than silently reused.
+
+    An extract whose bytes no longer match the manifest record is never
+    re-pinned: that is either an edit or a corrupted resume, and pinning the
+    new bytes would quietly re-bless it. It is an error unless `refresh` is
+    set, which discards the file and fetches every region again.
+
+    `scope` puts every county in one extract under that label (the national
+    pull uses `"all"`, as Storm Events does); otherwise counties are grouped
+    by state FIPS.
     """
     years = sorted(set(years))
-    first_year, last_year = years[0] - 1, years[-1]
+    first_year, last_year = years[0] - 2, years[-1]
     session = session or DEFAULT_SESSION
     paths: list[pathlib.Path] = []
     for part, regions in parts_for(centroids, scope).items():
         path, key = extract_path(snapshot_dir, part), manifest_key(part)
+        record = manifest.records.get(key)
+        if record is not None and path.exists():
+            found = sha256_bytes(path.read_bytes())
+            if found != record.sha256 and not refresh:
+                raise ConnectorError(
+                    f"{path} does not match its manifest record: pinned "
+                    f"sha256:{record.sha256}, on disk sha256:{found}. Every card "
+                    "scored against this extract names the pinned bytes, so "
+                    "re-pinning what is there now would rewrite that provenance. "
+                    "Restore the file, or re-pull it with refresh=True "
+                    "(`readiness snapshot --refresh`), which discards it and "
+                    "fetches every region again."
+                )
+            if found != record.sha256:
+                progress(f"open-meteo: {part} discarded (bytes did not match the pin)")
+                path.unlink()
         lines = {} if refresh else read_extract(path)
         todo = [
             f for f in regions
             if f not in lines or not _covers(lines[f], first_year, last_year)
         ]
-        record = manifest.records.get(key)
         if not todo and record is not None and path.exists():
-            if sha256_bytes(path.read_bytes()) == record.sha256:
-                progress(f"open-meteo: {part} pinned ({len(regions)} counties)")
-                paths.append(path)
-                continue
+            # The bytes were checked against the record above, so a complete
+            # extract that is still what was pinned needs nothing at all.
+            progress(f"open-meteo: {part} pinned ({len(regions)} counties)")
+            paths.append(path)
+            continue
         path.parent.mkdir(parents=True, exist_ok=True)
         raw_notes: list[str] = []
         # Append as each county lands so an interrupted pull resumes where it

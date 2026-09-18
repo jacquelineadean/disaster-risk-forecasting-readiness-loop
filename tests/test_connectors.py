@@ -8,6 +8,7 @@ or the whole country, without a second download.
 """
 
 import ast
+import calendar
 import csv
 import gzip
 import io
@@ -15,6 +16,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import socket
 import socketserver
 import ssl
@@ -147,6 +149,22 @@ class TestManifest(unittest.TestCase):
         m.add("x", record(sha="1" * 64))
         m.add("x", record(sha="2" * 64))
         self.assertIn("upstream content changed", m.records["x"].notes)
+        self.assertIn("1" * 12, m.records["x"].notes)
+
+    def test_the_change_notice_is_appended_to_the_connectors_own_notes(self):
+        # `backtest` reads `derived_through=YYYY` out of a record's notes to
+        # decide whether a static layer may be a feature; a notice that
+        # replaced them would strip a re-pulled layer of its vintage.
+        m = Manifest(path=self.path)
+        m.add("nri", record(sha="1" * 64, notes="derived_through=2023; v1.20"))
+        m.add("nri", record(sha="2" * 64, notes="derived_through=2023; v1.20"))
+        notes = m.records["nri"].notes
+        self.assertTrue(notes.startswith("derived_through=2023; v1.20"), notes)
+        self.assertIn("upstream content changed", notes)
+        # A connector that writes no notes still gets the notice alone.
+        m.add("bare", record(sha="1" * 64, notes=""))
+        m.add("bare", record(sha="2" * 64, notes=""))
+        self.assertTrue(m.records["bare"].notes.startswith("upstream content changed"))
 
     def test_round_trips_through_disk(self):
         m = Manifest(path=self.path)
@@ -815,6 +833,40 @@ class FakeSession:
         return self.payload
 
 
+class RangeSession:
+    """Serves a synthetic daily payload covering exactly the range the URL asks for.
+
+    The committed sample spans two calendar years; the connector now asks for
+    three, because the first period's trailing twelve-month window sits two
+    years back. A resume test needs a source that answers whatever range it is
+    handed, or every county looks uncovered and is fetched again forever.
+    """
+
+    def __init__(self, elevation: float = 12.0, daily_mm: float = 1.0):
+        self.urls: list[str] = []
+        self.elevation = elevation
+        self.daily_mm = daily_mm
+
+    def get(self, url: str) -> bytes:
+        self.urls.append(url)
+        first = re.search(r"start_date=(\d{4})-(\d{2})", url)
+        last = re.search(r"end_date=(\d{4})-(\d{2})", url)
+        days, precip, temp = [], [], []
+        start = F.month_index(int(first.group(1)), int(first.group(2)))
+        end = F.month_index(int(last.group(1)), int(last.group(2)))
+        for index in range(start, end + 1):
+            year, month = divmod(index, 12)
+            for day in range(1, calendar.monthrange(year, month + 1)[1] + 1):
+                days.append(f"{year:04d}-{month + 1:02d}-{day:02d}")
+                precip.append(self.daily_mm)
+                temp.append(10.0)
+        return json.dumps({
+            "elevation": self.elevation,
+            "daily": {"time": days, "precipitation_sum": precip,
+                      "temperature_2m_mean": temp},
+        }).encode()
+
+
 class TestOpenMeteoParse(unittest.TestCase):
     payload = json.loads((DATA / "era5_sample.json").read_text())
 
@@ -898,14 +950,36 @@ class TestOpenMeteoSnapshot(unittest.TestCase):
         self.assertEqual(rec.source, "Open-Meteo ERA5 archive")
         self.assertNotIn("raw sha256", rec.notes)
 
-    def test_requests_the_whole_range_from_the_year_before(self):
+    def test_requests_the_range_from_two_years_before_the_first(self):
+        # The first period of 2005 is cut a month before it starts, and a
+        # trailing twelve-month window ending there reaches back to 2003.
         self.snapshot()
         self.assertEqual(len(self.session.urls), 2)
-        self.assertIn("start_date=2004-01-01&end_date=2005-12-31", self.session.urls[0])
+        self.assertIn("start_date=2003-01-01&end_date=2005-12-31", self.session.urls[0])
         self.assertIn("latitude=30.1000&longitude=-91.1000", self.session.urls[0])
         self.assertIn("daily=precipitation_sum,temperature_2m_mean", self.session.urls[0])
 
+    def test_the_first_periods_trailing_twelve_months_are_covered(self):
+        # What the two-year lookback buys: with a one-month lag the first
+        # quarter of the first contract year is built from the twelve months
+        # ending in December of the year before, which start in January of the
+        # year before that. Under a one-year lookback this column was NaN.
+        self.session = RangeSession(daily_mm=2.0)
+        paths = self.snapshot()
+        era5 = open_meteo.sources(paths, ["open-meteo/era5/99"])["era5"]
+        spec = F.FeatureSpec("precip_12m", "era5", "precip_mm", "trailing_sum", 12)
+        unit = ("99001", 2005, 1)
+        frame = F.build_frame([spec], {"era5": era5}, [unit], 4)
+        value = frame.row(unit)[0]
+        self.assertFalse(math.isnan(value), "the first period has no trailing year")
+        # Twelve months of 2 mm a day, December 2003 through November 2004.
+        days = sum(calendar.monthrange(y, m)[1]
+                   for y, m in [(2003, 12)] + [(2004, m) for m in range(1, 12)])
+        self.assertAlmostEqual(value, 2.0 * days, places=9)
+        self.assertEqual(spec.cutoff(unit, 4), F.month_index(2004, 12))
+
     def test_resumes_without_refetching(self):
+        self.session = RangeSession()
         self.snapshot()
         self.snapshot()
         self.assertEqual(len(self.session.urls), 2)  # pinned and complete: nothing
@@ -917,12 +991,38 @@ class TestOpenMeteoSnapshot(unittest.TestCase):
         self.snapshot(more, refresh=True)
         self.assertEqual(len(self.session.urls), 6)
 
+    def test_an_extract_that_no_longer_matches_its_pin_is_refused(self):
+        # Re-pinning edited bytes would rewrite the provenance of every card
+        # scored against the old ones, so it is an error — and `refresh` is
+        # the only way to say "discard this and pull it again".
+        self.session = RangeSession()
+        paths = self.snapshot()
+        pinned = self.manifest.records["open-meteo/era5/99"].sha256
+        edited = paths[0].read_text().replace("12.0", "99.0")
+        paths[0].write_text(edited)
+        on_disk = sha256_bytes(paths[0].read_bytes())
+        with self.assertRaises(ConnectorError) as ctx:
+            self.snapshot()
+        message = str(ctx.exception)
+        self.assertIn(pinned, message)
+        self.assertIn(on_disk, message)
+        self.assertIn("refresh", message)
+        self.assertEqual(self.manifest.records["open-meteo/era5/99"].sha256, pinned)
+        self.assertEqual(paths[0].read_text(), edited)  # untouched by the refusal
+        # With refresh the file is discarded and every region is fetched again.
+        before = len(self.session.urls)
+        self.snapshot(refresh=True)
+        self.assertEqual(len(self.session.urls), before + len(self.centroids))
+        self.assertEqual(self.manifest.records["open-meteo/era5/99"].sha256, pinned)
+        self.assertEqual(sha256_bytes(paths[0].read_bytes()), pinned)
+
     def paths(self):
         return [self.dir / "open_meteo" / "99_era5_monthly.jsonl"]
 
     def test_an_interrupted_pull_resumes_where_it_stopped(self):
         # A partial extract with no manifest record: the county it holds is
         # kept, the missing one is fetched, and the whole file is then pinned.
+        self.session = RangeSession()
         path = self.paths()[0]
         path.parent.mkdir()
         self.snapshot({"99001": (30.1, -91.1)})

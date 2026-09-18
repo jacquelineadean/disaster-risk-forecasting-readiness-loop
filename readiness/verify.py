@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import pathlib
 from dataclasses import dataclass
+from typing import Mapping
 
 from readiness import data as data_mod
 from readiness.contracts import Contract
@@ -225,7 +227,8 @@ def _ledger_check(ledger_path: pathlib.Path) -> Check:
 # Phase 1
 # ---------------------------------------------------------------------------
 
-#: Significant figures at which a replayed score must agree with its card.
+#: Significant figures a replay *prints* at. The comparison is `agrees()`,
+#: not this: see `REPLAY_REL_TOL`.
 REPLAY_SIGFIGS = 12
 
 
@@ -411,12 +414,26 @@ def _touch_budget_check(
         )
     counts = TouchBudget(touch_path, contract.test_touch_budget).as_dict()
     key = f"{card.model}@{card.version}"
+    # The file must be exactly {the card's model: 1}. A second touch is the
+    # obvious failure; a stray key is the quieter one — it records a test
+    # score for a model with no test card behind it, which is either a card
+    # that was removed or a touch spent outside `promote`.
     used = counts.get(key, 0)
+    strays = sorted(k for k in counts if k != key)
+    problems = []
     if used != 1:
+        problems.append(f"{used} touch(es) for {key}, not 1")
+    if strays:
+        problems.append(
+            f"touches for {strays} with no test card: "
+            + ", ".join(f"{k}={counts[k]}" for k in strays)
+        )
+    if problems:
         return Check(
             "touch budget", False,
-            f"touch budget: {data_mod.relative(touch_path)} records {used} touch(es) for "
-            f"{key}; the ledger's one test card needs exactly 1",
+            f"touch budget: {data_mod.relative(touch_path)} records "
+            + "; ".join(problems)
+            + f"; the ledger's one test card needs exactly {{\"{key}\": 1}}",
         )
     return Check("touch budget", True, f"touch budget: exactly 1 test touch for {key}")
 
@@ -449,10 +466,63 @@ def _published_check(
 
 
 def sig(value: object, figures: int = REPLAY_SIGFIGS) -> str:
-    """A value at `figures` significant figures, or as it is when not a number."""
+    """A value at `figures` significant figures, for display only.
+
+    Never for comparison: two numbers that differ in the last bit can round to
+    the same string and two that agree can straddle a rounding boundary.
+    `agrees()` is the comparison.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return str(value)
     return f"{value:.{figures}g}"
+
+
+#: How close a replayed number must be to the card's. Relative, so every
+#: quantity is held to the same twelve figures whatever its magnitude;
+#: absolute as well, so a number that is legitimately zero is not measured
+#: against a relative tolerance nothing can meet. The remaining slack is
+#: `harness.metrics`, whose builtin `sum` over floats is compensated on
+#: CPython 3.12 and a left fold on 3.10: the scores themselves can differ in
+#: the last bit between two interpreters that are both running the same code.
+REPLAY_REL_TOL = 1e-12
+REPLAY_ABS_TOL = 1e-12
+
+#: Reliability-bin fields that must be identical, and those compared at the
+#: tolerance. A bin's edges, its count and whether it is populated are
+#: integers and exact fractions; only the two averages are floating-point
+#: reductions over forecasts.
+BIN_EXACT_FIELDS: tuple[str, ...] = ("lower", "upper", "count", "populated")
+BIN_CLOSE_FIELDS: tuple[str, ...] = ("mean_forecast", "observed_frequency")
+
+#: The only replay fields whose values may be printed. A digest and a count
+#: name the data; every other field is a score on the one-shot test split, and
+#: a command that printed the refit's would hand a second reading of the
+#: holdout to whoever ran it. Whether it agrees is the finding; what it says
+#: is on the card.
+REPLAY_SHOWN_FIELDS: frozenset[str] = frozenset(
+    {"n_units", "n_positive", "panel_digest", "train_digest", "contract_digest",
+     "feature_digest"}
+)
+
+
+def agrees(expected: object, observed: object) -> bool:
+    """Card value against refit value: numbers at the tolerance, anything else equal."""
+    if isinstance(expected, bool) or isinstance(observed, bool):
+        return expected == observed
+    if isinstance(expected, (int, float)) and isinstance(observed, (int, float)):
+        return math.isclose(
+            expected, observed, rel_tol=REPLAY_REL_TOL, abs_tol=REPLAY_ABS_TOL
+        )
+    return expected == observed
+
+
+def _same_bin(expected: Mapping | None, observed: Mapping | None) -> bool:
+    """One reliability bin, field by field: edges and counts exact, means close."""
+    if expected is None or observed is None:
+        return False
+    if any(expected.get(f) != observed.get(f) for f in BIN_EXACT_FIELDS):
+        return False
+    return all(agrees(expected.get(f), observed.get(f)) for f in BIN_CLOSE_FIELDS)
 
 
 def replay(
@@ -461,18 +531,31 @@ def replay(
     """Refit the card's model from its own arguments and rescore it on test.
 
     No touch is spent: this is `scoring.score`, not the orchestrator, and the
-    card it is compared against already exists. Returns one row per
-    fingerprint field: (field, expected, observed, agree at 12 s.f.).
+    card it is compared against already exists. Returns one row per compared
+    field — (field, card value, refit value, agree) — over the reproducibility
+    fields, the feature digest (exact: the feature channel reduces with
+    `math.fsum` and is the same on every interpreter) and then one row per
+    reliability bin, compared bin by bin rather than through a hash of the
+    lot, so a difference names the bin it is in instead of reporting that
+    something, somewhere, moved.
     """
     kwargs = card.data_snapshot.get("model_kwargs", {})
     model = build_model(card.model, canary_panel=dataset.panel, **kwargs)
     split = contract.splits.get(card.split)
-    observed = repro_fingerprint(
-        scoring.score(model, dataset.panel, contract, split, sources=dataset.sources)
+    refit = scoring.score(model, dataset.panel, contract, split, sources=dataset.sources)
+    stored = stored_scorecard(card)
+
+    rows: list[tuple[str, object, object, bool]] = []
+    for field in REPRO_FIELDS:
+        want, got = getattr(stored, field), getattr(refit, field)
+        rows.append((field, want, got, agrees(want, got)))
+    rows.append(
+        ("feature_digest", stored.feature_digest, refit.feature_digest,
+         stored.feature_digest == refit.feature_digest)
     )
-    expected = repro_fingerprint(stored_scorecard(card))
-    return [
-        (field, expected[field], observed[field],
-         sig(expected[field]) == sig(observed[field]))
-        for field in expected
-    ]
+    want_bins, got_bins = stored.reliability_bins, refit.reliability_bins
+    for i in range(max(len(want_bins), len(got_bins))):
+        want = want_bins[i] if i < len(want_bins) else None
+        got = got_bins[i] if i < len(got_bins) else None
+        rows.append((f"reliability_bins[{i}]", want, got, _same_bin(want, got)))
+    return rows

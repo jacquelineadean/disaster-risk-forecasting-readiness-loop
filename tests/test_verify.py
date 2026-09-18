@@ -330,6 +330,18 @@ class TestPhase1(Phase1Case):
         self.assertFalse(twice.passed)
         self.assertIn("records 2 touch(es)", twice.detail)
 
+    def test_the_touch_file_must_hold_exactly_the_one_card_it_paid_for(self):
+        # A stray key is a test score with no card behind it: either a card was
+        # removed from the ledger or a touch was spent outside `promote`.
+        self.good_ledger()
+        self.assertTrue(self.phase1().passed)
+        self.touch(model="gbm")
+        stray = self.by_name(self.phase1())["touch budget"]
+        self.assertFalse(stray.passed)
+        self.assertIn("gbm@1.0.0", stray.detail)
+        self.assertIn("no test card", stray.detail)
+        self.assertIn('{"logistic+iso@1.0.0": 1}', stray.detail)
+
     def test_fails_when_verdict_does_not_re_derive(self):
         append_card(self.ledger, self.contract, "validate")
         # The stored word says PASS; the stored numbers say the worst bin is
@@ -420,19 +432,61 @@ class TestReplay(unittest.TestCase):
         before = where.touch_budget.read_text()
         rows = verify.replay(self.contract, self.dataset, card)
         self.assertEqual(where.touch_budget.read_text(), before)
-        self.assertEqual({r[0] for r in rows},
-                         set(verify.REPRO_FIELDS) | {"reliability_bins_sha256"})
+        bins = [f"reliability_bins[{i}]" for i in range(self.contract.n_reliability_bins)]
+        self.assertEqual([r[0] for r in rows],
+                         list(verify.REPRO_FIELDS) + ["feature_digest"] + bins)
         self.assertTrue(all(ok for _f, _e, _o, ok in rows), rows)
         # A different dataset does not reproduce the card, and says which field.
         other = signal_dataset(self.contract, self.dir, n_regions=6)
         differing = [r[0] for r in verify.replay(self.contract, other, card) if not r[3]]
         self.assertIn("brier_score", differing)
+        self.assertIn("feature_digest", differing)
+        self.assertTrue([f for f in differing if f.startswith("reliability_bins[")])
 
-    def test_sig_compares_at_twelve_significant_figures(self):
-        self.assertEqual(verify.sig(0.1234567890123456), verify.sig(0.1234567890123999))
-        self.assertNotEqual(verify.sig(0.123456789012), verify.sig(0.123456789013))
+    def test_sig_is_display_only_and_agrees_is_the_comparison(self):
         self.assertEqual(verify.sig("abc"), "abc")
         self.assertEqual(verify.sig(12), "12")
+        self.assertEqual(verify.sig(0.1234567890123456), "0.123456789012")
+        # Twelve figures as a tolerance, not as a string: two values that
+        # straddle a rounding boundary still agree, and one that differs in
+        # the eleventh figure does not.
+        self.assertTrue(verify.agrees(0.1234567890123456, 0.1234567890123999))
+        self.assertTrue(verify.agrees(0.12345678901235, 0.123456789012349999))
+        self.assertFalse(verify.agrees(0.123456789012, 0.123456789013))
+        self.assertTrue(verify.agrees(0.0, 0.0))
+        self.assertFalse(verify.agrees(0.0, 1e-9))
+        self.assertTrue(verify.agrees("abc", "abc"))
+        self.assertFalse(verify.agrees("abc", "abd"))
+        self.assertFalse(verify.agrees(None, 0.0))
+        self.assertTrue(verify.agrees(180, 180))
+        self.assertFalse(verify.agrees(180, 181))
+
+    def test_bins_are_compared_field_by_field_not_as_a_hash(self):
+        card = {"lower": 0.1, "upper": 0.2, "count": 40, "populated": True,
+                "mean_forecast": 0.15, "observed_frequency": 0.175}
+        same = dict(card, mean_forecast=0.15 + 1e-17, observed_frequency=0.175 - 1e-17)
+        self.assertTrue(verify._same_bin(card, same))
+        for field, value in (("count", 41), ("populated", False), ("lower", 0.11),
+                             ("upper", 0.21), ("mean_forecast", 0.16),
+                             ("observed_frequency", 0.18)):
+            with self.subTest(field=field):
+                self.assertFalse(verify._same_bin(card, dict(card, **{field: value})))
+        self.assertFalse(verify._same_bin(card, None))
+        # An empty bin carries None for both averages on either side.
+        empty = {"lower": 0.9, "upper": 1.0, "count": 0, "populated": False,
+                 "mean_forecast": None, "observed_frequency": None}
+        self.assertTrue(verify._same_bin(empty, dict(empty)))
+        self.assertFalse(verify._same_bin(empty, dict(empty, mean_forecast=0.95)))
+
+    def test_only_digests_and_counts_are_shown_in_a_replay_line(self):
+        shown = verify.REPLAY_SHOWN_FIELDS
+        self.assertEqual(shown, frozenset({
+            "n_units", "n_positive", "panel_digest", "train_digest",
+            "contract_digest", "feature_digest"}))
+        for scored in ("brier_score", "auc", "brier_skill_score", "sharpness",
+                       "reliability", "resolution", "uncertainty", "base_rate",
+                       "brier_score_reference", "reliability_bins[0]"):
+            self.assertNotIn(scored, shown)
 
 
 if __name__ == "__main__":

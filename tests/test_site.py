@@ -386,6 +386,30 @@ class TestSandboxModule(unittest.TestCase):
              / "test_touches.json").exists()
         )
 
+    def test_loop_promote_is_refused_exactly_like_promote(self):
+        # `loop --promote` spends the same one touch as `promote`; a committed
+        # budget must never be spent from a tab, whichever route asks for it.
+        for argv in (("loop", "-c", "flood-zz", "--promote"),
+                     ("loop", "-c", "flood-zz", "--promote", "--queue", "phase1"),
+                     ("loop", "-c", "flood-zz", "--prom")):  # argparse abbreviation
+            with self.subTest(argv=argv):
+                code, text = self.cli(*argv)
+                self.assertEqual(code, 2, text)
+                self.assertIn("`readiness loop --promote` is not available in the "
+                              "browser sandbox", text)
+                self.assertIn("spent budget with no card in the repository", text)
+        experiments = pathlib.Path(os.environ["READINESS_EXPERIMENTS_DIR"])
+        self.assertFalse((experiments / "flood-zz" / "test_touches.json").exists())
+        # The same loop without the flag still runs, and spends nothing.
+        ds = self.sb._DATASETS[self.contract.digest()]
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"READINESS_EXPERIMENTS_DIR": tmp}), \
+                mock.patch("readiness.data.build", return_value=ds):
+            code, text = self.cli("loop", "-c", "flood-zz", "--quiet")
+            self.assertEqual(code, 0, text)
+            self.assertFalse((pathlib.Path(tmp) / "flood-zz"
+                              / "test_touches.json").exists())
+
     def test_playground_test_refusal_names_promote(self):
         r = self.call("score_playground", contract="flood-zz",
                       model="climatology-pooled", split="test")

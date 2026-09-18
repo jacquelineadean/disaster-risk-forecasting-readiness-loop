@@ -393,29 +393,50 @@ def cmd_loop(args) -> int:
         f"experimental loop  ({c.name}, {args.backend} backend, split={args.split}, "
         f"queue={args.queue})"
     )
-    result = orchestrator.run_local(
-        c,
-        split_name=args.split,
-        queue=orchestrator.QUEUES[args.queue],
-        include_canary=not args.no_canary,
-        features=features,
-        promote=args.promote,
-        progress=progress,
-    )
+    # A refused promotion is a verdict, not a crash: the queue's cards are
+    # written and worth printing, and the reason the test split was not
+    # touched is the thing the operator needs to read. Exit 2, like every
+    # other refusal the CLI reports.
+    refusal: Exception | None = None
+    try:
+        result = orchestrator.run_local(
+            c,
+            split_name=args.split,
+            queue=orchestrator.QUEUES[args.queue],
+            include_canary=not args.no_canary,
+            features=features,
+            promote=args.promote,
+            progress=progress,
+        )
+    except orchestrator.PromotionRefused as exc:
+        refusal, result = exc, exc.result
     _p()
-    _p(result.format())
-    _p()
+    if result is not None:
+        _p(result.format())
+        _p()
     where = data_mod.paths(c)
     _p(f"ledger: {where.relative(where.ledger)}")
+    if refusal is not None:
+        _p()
+        _p(str(refusal))
+        return 2
     return 0
 
 
 def cmd_promote(args) -> int:
-    """The one test touch, refused unless it is earned and unless it is asked for."""
+    """The one test touch, refused unless it is earned and unless it is asked for.
+
+    Without `--param` the arguments are not the registry's defaults but the
+    ones on the validate card that earned the pass: `readiness promote
+    logistic` promotes what was actually validated, and prints what it
+    adopted. With `--param` they are taken as given, and must match a validate
+    card exactly like everything else.
+    """
     from readiness.agent import orchestrator
 
     c = _contract(args)
-    kwargs = parse_params(args.model, args.param)
+    given = parse_params(args.model, args.param)  # also refuses an unknown model
+    kwargs = given if args.param else None
     if not args.spend_test_touch:
         _p()
         _p(
@@ -437,6 +458,10 @@ def cmd_promote(args) -> int:
         return 2
     _p()
     _p(f"  card             {card.experiment_id}  ({card.status})  {card.card_hash}")
+    _p(
+        "  arguments        "
+        + json.dumps(card.data_snapshot.get("model_kwargs", {}), sort_keys=True)
+    )
     report = canary_mod.CanaryReport(**_canary_dict(card))
     code = _print_screen(verify.stored_scorecard(card), report, c)
     _p()
@@ -562,13 +587,28 @@ def _verify_phase1(args, c: Contract, where: data_mod.Paths) -> int:
     if args.replay and result.card is not None:
         ds = _dataset(args, c, _features(args, c))
         for field, expected, observed, ok in verify.replay(c, ds, result.card):
-            detail = f"replay {field}: card {verify.sig(expected)}"
-            if not ok:
-                detail += f", refit {verify.sig(observed)}  <- differs"
-            checks.append(Check(f"replay {field}", ok, detail))
+            checks.append(
+                Check(f"replay {field}", ok, _replay_detail(field, expected, observed, ok))
+            )
     elif args.replay:
         checks.append(Check("replay", False, "replay: no test card to replay"))
     return _print_phase(1, c, checks)
+
+
+def _replay_detail(field: str, expected, observed, ok: bool) -> str:
+    """One replay line, which never quotes a score the refit produced on test.
+
+    The refit rescores the one-shot holdout. Printing its Brier score, AUC or
+    skill would put a second reading of the test split in the terminal of
+    anyone who runs `--replay`, which is the thing the touch budget exists to
+    ration — so for those fields the line says only whether it agrees with the
+    card. Digests and the two counts identify the data rather than score it,
+    and are already on the card and in the report, so they are shown.
+    """
+    if field in verify.REPLAY_SHOWN_FIELDS:
+        detail = f"replay {field}: card {verify.sig(expected)}"
+        return detail if ok else f"{detail}, refit {verify.sig(observed)}  <- differs"
+    return f"replay {field}: " + ("agrees" if ok else "<- differs")
 
 
 def cmd_backtest(args) -> int:

@@ -12,17 +12,18 @@ a logit so a linear model can put a coefficient on it.
 
 The asymmetry this module exists for
 -------------------------------------
-For a *training* row the rate excludes that row's own year (leave-one-year-
-out); for a *holdout* unit it uses every training year. A model that used the
-in-sample rate for its training rows would be fitting a coefficient on a
-feature that already contains each row's own label: the shrunk cell rate
-moves with the row's outcome, so the fit learns an optimistic coefficient on
-its own labels and then emits sharper-than-warranted probabilities on the
-holdout, where the feature no longer contains the answer. That is exactly the
-failure the contract's reliability clause punishes — a forecast that is more
-confident than the observed frequencies justify. Leave-one-year-out gives the
-training rows a feature of the same kind the holdout rows will get: a rate
-computed without the row being forecast. This is the regime
+For a *training* row the rate excludes that row's whole year at every level of
+the back-off (leave-one-year-out); for a *holdout* unit it uses every training
+year. A model that used the in-sample rate for its training rows would be
+fitting a coefficient on a feature that already contains each row's own
+label: the shrunk cell rate moves with the row's outcome, so the fit learns
+an optimistic coefficient on its own labels and then emits
+sharper-than-warranted probabilities on the holdout, where the feature no
+longer contains the answer. That is exactly the failure the contract's
+reliability clause punishes — a forecast that is more confident than the
+observed frequencies justify. Leaving out the whole year, rather than the row
+alone, gives the training rows a feature of the same kind the holdout rows
+will get: a rate computed without the year being forecast. This is the regime
 `PersistenceLastYear` already lives under: nothing a model sees at fit time
 may contain the label it is being fitted to.
 """
@@ -68,23 +69,35 @@ class HistoryFeatures:
         self._label: dict[Unit, int] = {}
         self._cell: dict[tuple[str, int], list[int]] = {}
         self._period: dict[int, list[int]] = {}
+        self._period_year: dict[tuple[int, int], list[int]] = {}
+        self._year: dict[int, list[int]] = {}
         self._total = [0, 0]
 
     def fit(self, rows: Sequence[tuple[Unit, int]]) -> "HistoryFeatures":
-        """Count positives and rows per cell, per period and overall."""
+        """Count positives and rows per cell, per period, per year and overall.
+
+        The per-year and per-period-and-year counts are what leave-one-year-out
+        subtracts: a training row's whole year comes out of every level, not
+        only the row itself.
+        """
         self.pooled_rate, self.by_period, self.by_region_period = seasonal_rates(
             rows, self.shrinkage
         )
         cell: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
         period: dict[int, list[int]] = defaultdict(lambda: [0, 0])
+        period_year: dict[tuple[int, int], list[int]] = defaultdict(lambda: [0, 0])
+        year: dict[int, list[int]] = defaultdict(lambda: [0, 0])
         total = [0, 0]
         self._label = {}
-        for (region, _year, per), label in rows:
-            self._label[(region, _year, per)] = label
-            for counter in (cell[(region, per)], period[per], total):
+        for (region, yr, per), label in rows:
+            self._label[(region, yr, per)] = label
+            counters = (cell[(region, per)], period[per], period_year[(per, yr)],
+                        year[yr], total)
+            for counter in counters:
                 counter[0] += label
                 counter[1] += 1
         self._cell, self._period, self._total = dict(cell), dict(period), total
+        self._period_year, self._year = dict(period_year), dict(year)
         return self
 
     def rate(self, unit: Unit, in_sample: bool) -> float:
@@ -107,20 +120,31 @@ class HistoryFeatures:
         return self.pooled_rate
 
     def _loyo_rate(self, unit: Unit) -> float:
-        """The training row's own (label, 1) removed from every level, then shrunk.
+        """The training row's whole *year* removed from every level, then shrunk.
 
-        With the row's own count gone, a cell that held only that row has zero
+        Leave-one-year-out has to mean the year: a rate that dropped only the
+        row itself would still be backed by the pooled and seasonal counts of
+        the other regions in the same year, and those move with whatever made
+        that year wet. The cell (region, period) holds exactly one row per
+        year, so its own row is its whole year; the period and the pool each
+        lose every row the year contributed.
+
+        With the year gone, a cell that held only that row has zero
         observations and the formula returns its parent rate unchanged: the
         same back-off the holdout path takes for an unseen cell.
         """
-        region, _year, period = unit
+        region, year, period = unit
         try:
             own = self._label[unit]
         except KeyError:
             raise ValueError(f"{unit} is not a training row; use in_sample=False") from None
+        year_pos, year_n = self._year[year]
         pos, n = self._total
-        pooled = (pos - own) / (n - 1) if n > 1 else 0.0
+        pooled = (pos - year_pos) / (n - year_n) if n > year_n else 0.0
         pos, n = self._period[period]
-        by_period = (pos - own + self.shrinkage * pooled) / (n - 1 + self.shrinkage)
+        drop_pos, drop_n = self._period_year[(period, year)]
+        by_period = (pos - drop_pos + self.shrinkage * pooled) / (
+            n - drop_n + self.shrinkage
+        )
         pos, n = self._cell[(region, period)]
         return (pos - own + self.shrinkage * by_period) / (n - 1 + self.shrinkage)

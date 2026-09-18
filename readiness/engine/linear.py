@@ -4,9 +4,12 @@ The first real candidate of Phase 1. It is deliberately the dullest possible
 learner — full-batch gradient descent on the L2-regularised log-loss for a
 fixed number of steps — because the loop's value is in the harness, not the
 model, and a model whose fit depends on a seed or a convergence tolerance is a
-model whose fingerprint depends on the interpreter's mood. Every operation
-here is a plain float sum in a fixed order, so the same view and the same
-frame give byte-identical probabilities twice.
+model whose fingerprint depends on the interpreter's mood. Every reduction
+over floats here is `math.fsum`, which is exactly rounded and therefore the
+same number on every interpreter; the builtin `sum` is not (3.12 compensates
+where 3.10 folds left), and a model fitted through 400 steps of it drifts
+visibly. So the same view and the same frame give byte-identical
+probabilities twice, on 3.10 and on 3.12 alike.
 
 Columns, in order: each declared feature standardised with the training
 mean and standard deviation (a zero deviation is treated as one), then a
@@ -65,8 +68,12 @@ class Standardiser:
         self.means, self.stds, self.indicator_for = [], [], []
         for j in range(n_columns):
             present = [row[j] for row in matrix if not math.isnan(row[j])]
-            mean = sum(present) / len(present) if present else 0.0
-            var = sum((x - mean) ** 2 for x in present) / len(present) if present else 0.0
+            mean = math.fsum(present) / len(present) if present else 0.0
+            var = (
+                math.fsum((x - mean) ** 2 for x in present) / len(present)
+                if present
+                else 0.0
+            )
             std = math.sqrt(var)
             self.means.append(mean)
             self.stds.append(std if std > 0.0 else 1.0)
@@ -133,7 +140,7 @@ class LogisticRegression(FittedModel):
         design = [self._scale.transform(row) + [1.0] for row in raw]
         self.columns = self._scale.names(raw_columns) + ["intercept"]
         self.weights = _gradient_descent(design, labels, self.l2, self.iters, self.lr)
-        self.train_loss = sum(
+        self.train_loss = math.fsum(
             log_loss(_dot(self.weights, x), y) for x, y in zip(design, labels)
         ) / len(labels)
 
@@ -147,7 +154,7 @@ class LogisticRegression(FittedModel):
 
 
 def _dot(w: Sequence[float], x: Sequence[float]) -> float:
-    return sum(wi * xi for wi, xi in zip(w, x))
+    return math.fsum(wi * xi for wi, xi in zip(w, x))
 
 
 def _gradient_descent(
@@ -163,11 +170,13 @@ def _gradient_descent(
     k = len(design[0])
     w = [0.0] * k
     for _ in range(iters):
-        grad = [0.0] * k
-        for x, y in zip(design, labels):
-            residual = sigmoid(_dot(w, x)) - y
-            for j in range(k):
-                grad[j] += residual * x[j]
+        residuals = [sigmoid(_dot(w, x)) - y for x, y in zip(design, labels)]
+        # One exactly-rounded reduction per component, so the gradient is a
+        # function of the residuals and nothing else — not of the order the
+        # rows happen to arrive in, and not of the interpreter's `sum`.
+        grad = [
+            math.fsum(r * x[j] for r, x in zip(residuals, design)) for j in range(k)
+        ]
         for j in range(k - 1):
             grad[j] += l2 * w[j]
         for j in range(k):

@@ -1,0 +1,51 @@
+{
+  "_contract": "1f32d4f84bbaef2d",
+  "_n_regions": 8,
+  "_note": "Blessed from identical output under CPython 3.10 and 3.12. Hashes are over probabilities rendered at 12 significant figures; the feature digest is exact.",
+  "_panel_digest": "0595c7718fb72575",
+  "_sources": [
+    "elevation",
+    "era5",
+    "gazetteer"
+  ],
+  "gbm": {
+    "feature_digest": "775c3aa709de437c",
+    "kwargs": {
+      "rounds": 20
+    },
+    "n_distinct": 22,
+    "n_probs": 160,
+    "probs_sha256_12sf": "23886c03449fdaa1"
+  },
+  "gbm+iso": {
+    "feature_digest": "775c3aa709de437c",
+    "kwargs": {
+      "rounds": 20
+    },
+    "map_blocks": 2,
+    "map_sha256_12sf": "e9f4b4ef839ceec8",
+    "n_distinct": 8,
+    "n_probs": 160,
+    "probs_sha256_12sf": "8875a5fb97bbebdb"
+  },
+  "logistic": {
+    "feature_digest": "775c3aa709de437c",
+    "kwargs": {
+      "iters": 40
+    },
+    "n_distinct": 160,
+    "n_probs": 160,
+    "probs_sha256_12sf": "9bbbad8de32cb9f2"
+  },
+  "logistic+iso": {
+    "feature_digest": "775c3aa709de437c",
+    "kwargs": {
+      "iters": 40
+    },
+    "map_blocks": 5,
+    "map_sha256_12sf": "4203c4c3419601a8",
+    "n_distinct": 1,
+    "n_probs": 160,
+    "probs_sha256_12sf": "f288b597ceff0c19"
+  }
+}

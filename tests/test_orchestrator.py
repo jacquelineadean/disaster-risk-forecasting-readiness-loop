@@ -11,6 +11,7 @@ promotion can be tested.
 """
 
 import dataclasses
+import json
 import pathlib
 import tempfile
 import unittest
@@ -19,6 +20,8 @@ from unittest import mock
 
 from readiness import data as data_mod
 from readiness.agent import guard, orchestrator, subagents
+from readiness.engine import build_model
+from readiness.harness import features as F
 from readiness.harness import scoring
 from readiness.connectors.base import Manifest
 from readiness.harness.labels import diagnose
@@ -472,6 +475,116 @@ class TestPromote(unittest.TestCase):
         self.assertEqual(len(Ledger(self.where.ledger)), n)
         promoted = result.promoted
         self.assertEqual(self.budget().count(promoted.model, promoted.version), 1)
+
+    def test_promote_refuses_a_source_the_dataset_never_loaded(self):
+        # The touch pays for a scored model. A candidate whose feature sets
+        # need a source that is not loaded scores nothing, so it is refused
+        # before the budget file is ever written.
+        self.validate_run()
+        thin = feature_dataset(
+            self.contract, self.dir, {"era5": SignalSeries()}, self.dataset.panel
+        )
+        passing = self.queue[3]
+        with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+            orchestrator.promote(
+                self.contract, passing.model, passing.kwargs, thin,
+                experiments_dir=self.dir,
+            )
+        message = str(ctx.exception)
+        self.assertIn("needs source(s) ['elevation', 'gazetteer']", message)
+        self.assertIn("--features", message)
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_promote_refuses_when_any_test_card_exists_even_under_another_digest(self):
+        self.validate_run(promote=True)
+        other = make_contract(name="flood-zz", thresholds={"min_auc": 0.71})
+        self.assertNotEqual(other.digest(), self.contract.digest())
+        dataset = signal_dataset(other, self.dir)
+        # Give the new criteria their own validate pass, so the only thing
+        # left to refuse on is the test card already in the ledger.
+        orchestrator.run_local(
+            other, experiments_dir=self.dir, dataset=dataset, queue=self.queue,
+            include_canary=False, progress=lambda _m: None,
+        )
+        passing = self.queue[3]
+        with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+            orchestrator.promote(
+                other, passing.model, passing.kwargs, dataset, experiments_dir=self.dir,
+            )
+        message = str(ctx.exception)
+        self.assertIn("already holds a test card", message)
+        self.assertIn("a new contract name, not a second touch", message.lower())
+        self.assertEqual(json.loads(self.where.touch_budget.read_text()),
+                         {"logistic+iso@1.0.0": 1})
+
+    def test_promote_refuses_data_that_is_not_what_the_pass_was_earned_on(self):
+        self.validate_run()
+        passing = self.queue[3]
+        moved = dataclasses.replace(self.dataset, data_version="moved-on")
+        with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+            orchestrator.promote(
+                self.contract, passing.model, passing.kwargs, moved,
+                experiments_dir=self.dir,
+            )
+        self.assertIn("sha256:synthetic", str(ctx.exception))
+        self.assertIn("sha256:moved-on", str(ctx.exception))
+        refeatured = dataclasses.replace(self.dataset, feature_version="new-features")
+        with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+            orchestrator.promote(
+                self.contract, passing.model, passing.kwargs, refeatured,
+                experiments_dir=self.dir,
+            )
+        self.assertIn("feature version", str(ctx.exception))
+        self.assertIn("sha256:synthetic-features", str(ctx.exception))
+        self.assertIn("sha256:new-features", str(ctx.exception))
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_promote_without_arguments_adopts_the_validate_cards(self):
+        self.validate_run()
+        lines: list[str] = []
+        card = orchestrator.promote(
+            self.contract, "logistic+iso", None, self.dataset,
+            experiments_dir=self.dir, progress=lines.append,
+        )
+        passing = self.queue[3]
+        self.assertEqual(card.split, "test")
+        self.assertEqual(card.data_snapshot["model_kwargs"],
+                         orchestrator.json_kwargs(passing.kwargs))
+        self.assertTrue([line for line in lines if "adopted from validate card" in line],
+                        lines)
+        self.assertIn('"iters": 60', "\n".join(lines))
+
+    def test_promote_without_arguments_still_needs_a_validate_pass(self):
+        with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+            orchestrator.promote(
+                self.contract, "logistic+iso", None, self.dataset,
+                experiments_dir=self.dir,
+            )
+        self.assertIn("no arguments to adopt", str(ctx.exception))
+        self.assertFalse(self.where.touch_budget.exists())
+
+    def test_the_touch_is_not_spent_when_the_frame_cannot_be_built(self):
+        # The audit runs before the budget file is written: a promotion that
+        # cannot build its features leaves the budget untouched, and the same
+        # model can be promoted once the sources are back.
+        self.validate_run()
+        passing = self.queue[3]
+        stripped = dataclasses.replace(
+            self.dataset,
+            sources={k: v for k, v in self.dataset.sources.items() if k != "elevation"},
+        )
+        card = build_model(passing.model, **passing.kwargs)
+        budget = TouchBudget(self.where.touch_budget, self.contract.test_touch_budget)
+        with self.assertRaises(F.FeatureAdmissionError):
+            orchestrator.run_experiment(
+                dataclasses.replace(passing, model=passing.model),
+                stripped,
+                get_split(self.contract, "test"),
+                Ledger(self.where.ledger),
+                touch_budget=budget,
+            )
+        self.assertFalse(self.where.touch_budget.exists())
+        self.assertEqual(budget.count(card.name, card.version), 0)
 
     def test_promote_only_looks_at_cards_under_the_current_contract(self):
         self.validate_run()

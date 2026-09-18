@@ -301,10 +301,11 @@ class FeatureSnapshotCase(SnapshotCase):
         (self.root / "census" / gazetteer.CACHE_NAME).write_bytes(gaz)
         manifest.add(gazetteer.MANIFEST_KEY, record("gazetteer", sha256_bytes(gaz)))
         # The extract the connector would have written for this scope: every
-        # county of state 99, from the year before the contract's first year.
+        # county of state 99, from two years before the contract's first year
+        # (the first period's trailing twelve months reach back that far).
         self.extract = open_meteo.extract_path(self.root, STATE_FIPS)
         self.extract.parent.mkdir()
-        lines = [era5_line(f, 1999, 2007) for f in ("99001", "99003", "99005")]
+        lines = [era5_line(f, 1998, 2007) for f in ("99001", "99003", "99005")]
         self.extract.write_text("".join(open_meteo._dumps(ln) for ln in lines))
         self.era5_key = open_meteo.manifest_key(STATE_FIPS)
         manifest.add(
@@ -322,6 +323,14 @@ class FeatureSnapshotCase(SnapshotCase):
 
     def build(self, contract=None, **kw):
         return data_mod.build(contract or self.c, snapshot_dir=self.root, **kw)
+
+    def repin(self):
+        """Pin the extract's current bytes, as an honest re-pull would."""
+        manifest = Manifest.load(self.root / "manifest.json")
+        manifest.add(
+            self.era5_key, record("era5", sha256_bytes(self.extract.read_bytes()))
+        )
+        manifest.save(force=True)
 
 
 class TestBuildWithFeatures(FeatureSnapshotCase):
@@ -362,13 +371,35 @@ class TestBuildWithFeatures(FeatureSnapshotCase):
         ds = self.build(features=("era5",))
         self.assertEqual(sorted(ds.sources), ["elevation", "era5"])
         s = ds.sources["era5"].series("99005", "precip_mm")
-        self.assertEqual(s.start, F.month_index(1999, 1))
-        self.assertEqual(len(s.values), 9 * 12)
+        self.assertEqual(s.start, F.month_index(1998, 1))
+        self.assertEqual(len(s.values), 10 * 12)
         F.admit(ds.sources["era5"], self.c)
 
-    def test_a_county_missing_from_the_extract_means_a_download(self):
-        lines = [era5_line(f, 1999, 2007) for f in ("99001", "99003")]
+    def test_an_extract_that_stops_two_years_short_is_completed(self):
+        # The lookback moved from one year to two; an extract pulled under the
+        # old rule no longer covers the first period's trailing year, so it is
+        # fetched again rather than quietly reused.
+        lines = [era5_line(f, 1999, 2007) for f in ("99001", "99003", "99005")]
         self.extract.write_text("".join(open_meteo._dumps(ln) for ln in lines))
+        self.repin()
+        with self.assertRaises(AssertionError) as ctx:
+            self.build(features=("era5",))
+        self.assertIn("start_date=1998-01-01", str(ctx.exception))
+
+    def test_an_extract_that_no_longer_matches_its_pin_stops_the_build(self):
+        # Edited bytes are not re-pinned behind the operator's back: the data
+        # version on every card built from this extract names the old ones.
+        self.extract.write_text(self.extract.read_text() + "\n")
+        with self.assertRaises(ConnectorError) as ctx:
+            self.build(features=("era5",))
+        message = str(ctx.exception)
+        self.assertIn("does not match its manifest record", message)
+        self.assertIn("refresh", message)
+
+    def test_a_county_missing_from_the_extract_means_a_download(self):
+        lines = [era5_line(f, 1998, 2007) for f in ("99001", "99003")]
+        self.extract.write_text("".join(open_meteo._dumps(ln) for ln in lines))
+        self.repin()
         with self.assertRaises(AssertionError):
             self.build(features=("era5",))
 

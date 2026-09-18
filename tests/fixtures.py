@@ -159,8 +159,11 @@ def make_signal_panel(
     frame = F.build_frame((spec,), {series_source.name: series_source}, units, ppy)
     values = [frame.row(u)[0] for u in units]
     present = [v for v in values if not math.isnan(v)]
-    mean = sum(present) / len(present)
-    std = math.sqrt(sum((v - mean) ** 2 for v in present) / len(present)) or 1.0
+    # `math.fsum`, like the harness: the builtin `sum` over floats differs
+    # between CPython 3.10 and 3.12, and a fixture whose labels depend on the
+    # interpreter cannot back a cross-interpreter fingerprint.
+    mean = math.fsum(present) / len(present)
+    std = math.sqrt(math.fsum((v - mean) ** 2 for v in present) / len(present)) or 1.0
 
     rng = random.Random(seed)
     labels = []
