@@ -429,7 +429,94 @@ sub-county key. `make phase2` chains the fleet, the
 backtests, the exposure snapshot and spot-check, an issue per passing
 contract, the briefs for the spot-checked states, and this check.
 
-## 13. The research briefing
+## 13. Phase 3: the planning thought-partner
+
+Phase 2 answers "how likely, for this county." Phase 3 answers a narrower,
+harder question for one building: *does this facility's plan survive the
+region's own validated risk?* It runs a hazard-agnostic scenario against a
+facility record the planner supplies, and turns the answers into a cited
+document, reviewed blind by a practising emergency manager before it counts
+for anything. Full reference: [docs/plans.md](plans.md). No transcript of it
+exists yet, for the same reason as Phases 1 and 2: the risk numbers a real
+report cites need the real-data run, and its exit needs reviews a person has
+to give.
+
+**See what is registered.** The scenario library is committed at Phase 0, as
+a specification the rules are tested against.
+
+```bash
+readiness scenarios list
+readiness scenarios check [--case-studies DIR]    # runs every case study against its expected findings
+```
+
+`plans/scenarios/96h-isolation-acute-care.json` sits beside its markdown, and
+a test keeps the markdown the specification: the JSON's question ids and
+text must match the prose. `scenarios check` runs every committed case study
+— published, cited accounts of real events, mapped onto the scenario's
+injects — through the same rules a live facility goes through and compares
+the result to the file's own expected findings. None ships by default; the
+mechanism is proven on a synthetic case study in the test suite.
+
+**Build a gap report.** One facility, one period, one scenario.
+
+```bash
+readiness gap-report --facility PATH --period 2026-Q4 [--scenario 96h-isolation-acute-care] \
+    [--out DIR] [--drafter local|claude]
+```
+
+The facility record has no address or coordinate field — design intensity
+(the flood elevation, the design wind speed) comes from the planner's own
+elevation certificate or FIRM, cited as a facility document, never looked up
+from a location. Every scenario question is answered by a rule against the
+record and the county's issued risk layer, and every rule returns one of
+four statuses: `answered`, `unanswered`, `failed`, `cannot_run`. A missing
+design intensity is fail-closed — one `cannot_run` finding naming the
+elevation-certificate guidance — and no rule substitutes a county number for
+it. The report is validated by the same five `readiness.cite` rules the
+county brief passes, written only when the list of violations is empty, and
+rendered twice: the plain document, and a blinded one (`FACILITY-<hash6>`,
+`PARTNER-n` in place of every name) for review by someone who is not told
+which building it is. Exit 1 with the violations on a citation failure, exit
+2 if the facility file cannot be read. **Real facility files and real gap
+reports never enter git.**
+
+**Record a review.** A review is an attestation bound to one blinded
+report's hash, not a survey response.
+
+```bash
+readiness review record --report PATH.blind.html \
+    --rating {not useful,somewhat useful,useful,very useful} \
+    --role "practising emergency manager" --org-type hospital|county|state|ngo|other \
+    --years N [--comments TEXT] [--reviews DIR]
+```
+
+The record is written to `plans/reviews/<sha256 of the blinded report>.json`,
+and that filename is the binding: the sha must match the file `--report`
+names, or the command refuses. Change one byte of a report and every review
+of the version before it is orphaned, on purpose.
+
+**Verify.** The Phase 3 check takes no contract:
+
+```bash
+readiness verify --phase 3 [--reports DIR] [--reviews DIR]
+```
+
+Four checks, in order: **reviews** — at least three reviews of distinct
+blinded facilities, rated useful or very useful, by a reviewer role
+containing "emergency manager"; **reports** — each of those reviews' sha
+matches a blinded render that still validates with zero citation
+violations; **case studies** — every committed one reproduces its expected
+findings; **no coordinates** — no committed JSON under `plans/` carries an
+`address`, `lat`, `lon`, `tract`, `block` or `parcel` key, anywhere. `make
+scenarios-check` and `make gap-report FACILITY=<path> PERIOD=<label>` wrap
+the first two commands; `make verify PHASE=3` wraps the check.
+
+Not mechanisable: that the facilities are real and the reviewers are
+practising emergency managers. A review record is an attestation, and
+`verify --phase 3`'s first check is the honest extent of what a machine can
+confirm about it.
+
+## 14. The research briefing
 
 The design the implementation follows is in [`report/index.html`](../report/index.html)
 (`make serve` to read it locally). Its second section is the argument for

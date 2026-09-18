@@ -27,6 +27,7 @@ BACKTEST_DOC = REPO_ROOT / "docs" / "backtest.md"
 BRIEF_DOC = REPO_ROOT / "docs" / "brief.md"
 PLAN = REPO_ROOT / "docs" / "plan.md"
 CARD_SKILL = REPO_ROOT / "skills" / "experiment-card.md"
+PLANS_DOC = REPO_ROOT / "docs" / "plans.md"
 
 # INTEGRATOR: the Phase 1 command surface. The subcommands and flags below are
 # implemented by the CLI cluster; the docs name them now. Until that parser is
@@ -63,8 +64,42 @@ PHASE2_FLAGS = (
     ("issue --reissue",
      ["issue", "m", "-c", "x", "--period", "2026-Q4", "--reissue"]),
 )
+# INTEGRATOR: the Phase 3 command surface, implemented by the Phase 3 CLI
+# cluster (`readiness/plans/`, `readiness/agent/planner.py`). The docs name
+# it now; the parser-backed assertions skip until that parser is merged and
+# must run, not skip, afterwards.
+PHASE3_COMMANDS = {"scenarios", "gap-report", "review"}
+PHASE3_FLAGS = (
+    ("verify --phase 3", ["verify", "--phase", "3"]),
+    ("verify --phase 3 --reports --reviews",
+     ["verify", "--phase", "3", "--reports", "d1", "--reviews", "d2"]),
+    ("scenarios list", ["scenarios", "list"]),
+    ("scenarios check --case-studies", ["scenarios", "check", "--case-studies", "d"]),
+    ("gap-report --facility --period --scenario --out --drafter", [
+        "gap-report", "--facility", "f.json", "--period", "2026-Q4",
+        "--scenario", "96h-isolation-acute-care", "--out", "d", "--drafter", "claude",
+    ]),
+    ("review record --report --rating --role --org-type --years --comments --reviews", [
+        "review", "record", "--report", "r.blind.html", "--rating", "very useful",
+        "--role", "practising emergency manager", "--org-type", "hospital",
+        "--years", "5", "--comments", "text", "--reviews", "d",
+    ]),
+)
+
 #: Paths the README map names that arrive with the CLI clusters.
-PENDING_PATHS = {"readiness/backtest.py"}
+PENDING_PATHS = {
+    "readiness/backtest.py",
+    # INTEGRATOR: the Phase 3 code cluster (`readiness/plans/`,
+    # `readiness/agent/planner.py`) and its gitignored-but-committed-shell
+    # output directories (`plans/facilities/`, `plans/reports/`,
+    # `plans/reviews/`, each with its own README, mirroring `issued/` and
+    # `briefs/`). Empty this set of Phase 3 entries once that cluster lands.
+    "readiness/plans/",
+    "readiness/agent/planner.py",
+    "plans/facilities/",
+    "plans/reports/",
+    "plans/reviews/",
+}
 
 
 def parser_accepts(argv: list[str]) -> bool:
@@ -125,12 +160,12 @@ class TestReadmeCommandsExist(unittest.TestCase):
         available = parser_commands()
         missing = named - available
         self.assertEqual(
-            missing - PHASE1_COMMANDS - PHASE2_COMMANDS, set(),
+            missing - PHASE1_COMMANDS - PHASE2_COMMANDS - PHASE3_COMMANDS, set(),
             f"README's Commands block names subcommands the CLI does not have: {missing}",
         )
         if missing:
             self.skipTest(
-                f"Phase 1/2 subcommands not in this tree's parser yet: {sorted(missing)}"
+                f"Phase 1/2/3 subcommands not in this tree's parser yet: {sorted(missing)}"
             )
 
     def test_commands_block_names_the_phase1_surface(self):
@@ -192,6 +227,36 @@ class TestReadmeCommandsExist(unittest.TestCase):
 
     def test_phase2_flags_are_in_the_parser(self):
         for label, argv in PHASE2_FLAGS:
+            with self.subTest(flag=label):
+                if not parser_accepts(argv):
+                    self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
+
+    def test_commands_block_names_the_phase3_surface(self):
+        # Text-only, so it runs in every tree: the README documents exactly
+        # the Phase 3 command surface — the facility gap report, the blinded
+        # review record and the no-`-c` verify check.
+        block = re.search(r"## Commands\n\n```\n(.*?)```", README.read_text(), re.S).group(1)
+        self.assertRegex(block, r"(?m)^readiness scenarios\b.*\{list\|check\}")
+        self.assertRegex(block, r"(?m)^readiness gap-report\b.*--facility PATH --period YYYY-Qn")
+        self.assertRegex(block, r"(?m)^readiness gap-report\b.*--drafter local\|claude")
+        self.assertRegex(block, r"(?m)^readiness review record\b")
+        self.assertRegex(
+            block,
+            r"(?m)^readiness review record\b.*"
+            r"\{not useful,somewhat useful,useful,very useful\}",
+        )
+        self.assertRegex(block, r"(?m)^readiness review record\b.*--org-type hospital\|county\|state\|ngo\|other")
+        self.assertRegex(block, r"(?m)^readiness verify .*--phase 0\|1\|2\|3")
+
+    def test_phase3_subcommands_are_in_the_parser(self):
+        missing = PHASE3_COMMANDS - parser_commands()
+        if missing:
+            self.skipTest(f"INTEGRATOR: parser lacks {sorted(missing)}")
+        # `verify --phase 3` takes no contract, like `--phase 2`.
+        self.assertTrue(parser_accepts(["verify", "--phase", "3"]))
+
+    def test_phase3_flags_are_in_the_parser(self):
+        for label, argv in PHASE3_FLAGS:
             with self.subTest(flag=label):
                 if not parser_accepts(argv):
                     self.skipTest(f"INTEGRATOR: parser lacks `{label}`")
@@ -341,6 +406,36 @@ class TestBriefDocStatesTheRules(unittest.TestCase):
         self.assertIn("(delivered as the Phase 2 queue, §3.1)", text)
         self.assertIn("the ten must come from at least three states", text)
         self.assertIn("the fleet's default queue is the Phase 2 queue", text)
+    def test_how_it_works_names_the_phase3_commands(self):
+        text = HOW_IT_WORKS.read_text()
+        for command in ("readiness scenarios list", "readiness scenarios check",
+                        "readiness gap-report --facility", "readiness review record --report",
+                        "readiness verify --phase 3"):
+            self.assertIn(command, text, f"how-it-works.md lacks {command!r}")
+
+
+class TestPlansDocStatesTheRules(unittest.TestCase):
+    """docs/plans.md names the four `verify --phase 3` checks and the four
+    finding statuses a rule can return, so a reader of a refusal or a
+    finding can find the rule without reading readiness/plans/."""
+
+    def test_names_the_four_verify_phase3_checks(self):
+        text = PLANS_DOC.read_text()
+        for phrase in ("Reviews", "Reports", "Case studies", "No coordinates"):
+            self.assertIn(phrase, text, f"docs/plans.md does not name the {phrase!r} check")
+
+    def test_names_the_four_finding_statuses(self):
+        text = PLANS_DOC.read_text()
+        for status in ("answered", "unanswered", "failed", "cannot_run"):
+            self.assertIn(f"`{status}`", text, f"docs/plans.md does not name status {status!r}")
+
+    def test_states_the_facility_record_has_no_address_or_coordinate(self):
+        text = PLANS_DOC.read_text()
+        for phrase in ("No address or coordinate field exists",
+                       "elevation certificate", "Fail-closed", "blinded",
+                       "FACILITY-", "PARTNER-", "sha256",
+                       "never enter git", "practising emergency manager"):
+            self.assertIn(phrase, text, f"docs/plans.md lacks {phrase!r}")
 
 
 class TestQuotedDigestsMatchTheCode(unittest.TestCase):
