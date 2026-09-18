@@ -8,7 +8,7 @@ records what was decided, what was built, and what each phase still owes.
 |---|---|---|
 | R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
 | 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
-| 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | pending |
+| 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
 | 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | pending |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
 
@@ -336,6 +336,53 @@ spot-validated against county assessor counts in ten sampled counties.
 
 **Needs the data run:** which four hazards pass; the USA Structures layer
 vocabulary; the ten assessor counts (collected by a person, with URLs).
+
+### 3.1. Phase 2 status
+
+Built, on the branch stacked above Phase 1, green with the guard (886 tests,
+no skips):
+
+- Six national contracts registered as data through the CLI, no hand edits
+  (`inland-flood-us`, `tornado-us`, `hail-us`, `severe-wind-us` quarterly;
+  `winter-storm-us`, `heat-us` monthly with the zone crosswalk); their
+  digests are pinned by a test; none has a ledger yet.
+- `readiness fleet`: sequential loops per contract with the Phase 2 queue
+  (logistic, calibrated logistic, a capped boosted model and its calibrated
+  form), continuing past a contract whose data is missing, promoting where a
+  validate pass exists, and a ledger-only `--status` table; every card now
+  records its wall-clock cost.
+- Exposure: USA Structures county counts pulled per state through paged
+  statistics queries and pinned, an occupancy mapping marked to confirm on
+  the first real pull, a county table with no sub-county field by
+  construction, and the assessor spot-check over a header-only committed CSV
+  with a declared ratio band; rows outside the band never count toward the
+  ten.
+- `readiness/cite.py`: the five citation rules every human-facing document
+  passes (uncited sentence, unknown claim, unresolved source, number without
+  a claim, forbidden phrasing), with identifier exemptions and the fixed
+  alerts disclaimer; `plans/guidance.json` registers the guidance documents.
+- `readiness issue`: refits the validated model through the training view,
+  requires the training and feature digests to match the test card, builds
+  and audits the target period's frame under the firewall, refuses a period
+  the series data does not yet reach, and has no parameter through which a
+  label could arrive (a test flips every holdout label and gets a
+  byte-identical file).
+- `readiness brief`: one paragraph per contract covering the county, every
+  number a cited claim, exposure stated or its absence stated (never
+  substituted), the alerts disclaimer citing its guidance entry, written only
+  when validation is clean; never below the county, never "would touch".
+- `readiness verify --phase 2`, the briefs page on the site, `docs/brief.md`.
+
+Two decisions taken while building: the "issued" check accepts the period
+label the most passing contracts issued (quarterly and monthly contracts
+cannot share one label) and requires at least four of them to name their
+first test card; the missing-exposure sentence cites a computed claim
+derived from the paragraph's own probability claim, because an absence has
+no artefact to point at.
+
+What Phase 2 still owes is the data run: which four hazards pass nationally,
+the USA Structures layer's vocabulary confirmed on the first pull, and the
+ten assessor counts collected by a person with their URLs.
 
 ## 4. Phase 3: the planning thought-partner
 

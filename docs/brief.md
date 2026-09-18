@@ -49,7 +49,7 @@ sentences, in this order (annex §2.5):
    event in {county} during {period} [c1].` — `p` is the county's value in
    the issued file; `hazard` is the contract's hazard; `period` is the label
    the file was issued for (`2026-Q4`, `2026-M11` or `2026`).
-2. **The provenance.** `This comes from {model}@{version}, which scored BSS
+2. **The provenance.** `This comes from {model}@{version}, which scored a Brier skill score of
    {bss:+.2f} on the untouched {test years} with every populated reliability
    bin within 5 points [c2].` — `bss` is the Brier skill score on the
    contract's *test* card, cited by card id; `model@version` is the promoted
