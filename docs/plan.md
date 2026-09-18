@@ -263,8 +263,55 @@ Built and integrated, green with the guard:
   CLIMADA layer with its out-of-package tool stub; the connector registry as
   data; `data.build(features=...)` with a separate `feature_version`.
 
-In progress: the Phase 1 queue and `promote`, `verify --phase 1`, the
-backtest report, the site and the documentation.
+- The loop: `PHASE1_QUEUE` (history-only logistic, logistic with the
+  ERA5 antecedent set, with terrain, isotonic-calibrated, `gbm`, `gbm+iso`),
+  candidates skipped with a progress line when their sources are not
+  loaded, `readiness promote` as the one atomic test touch (refuses without
+  a validate pass for the same model, version and arguments, refuses a second
+  test card), `readiness features`, `readiness backtest` from committed files
+  only, `readiness verify --phase 1` ledger-only with `--replay`.
+- The site and the documentation: the feature catalogue and the backtest on
+  the website, the sandbox refusing `promote` and `backtest` in the browser,
+  `docs/features.md`, `docs/backtest.md`, the walkthrough section.
+
+### 2.2. Phase 1 review outcome
+
+Five lenses (leakage, numbers, correctness, tests, documentation) over the
+whole Phase 1 diff; two findings were confirmed by both skeptics before the
+review's verification budget ran out, and the rest were triaged by hand.
+Fixed:
+
+- **Interpreter-dependent numbers (high).** CPython 3.12 made `sum()` over
+  floats compensated; 3.10 is a naive fold. Feature values, feature digests
+  and boosted-tree splits therefore differed between the two interpreters in
+  CI, and a card written under one could not be replayed under the other.
+  Every float reduction in the feature transforms and the Phase 1 models now
+  goes through `math.fsum`, which is exactly rounded and identical
+  everywhere; a committed fingerprint of the four feature models on the
+  fixture is checked on both interpreters. `metrics.py` and the Phase 0
+  baselines are untouched, so `verify --replay` compares scorecard floats at
+  a tolerance and reliability bins bin by bin rather than through an exact
+  hash. The replay prints agreement per field, never the refit's test-split
+  values.
+- **A touch spent with no card (medium).** `promote` now refuses, before the
+  budget is charged, when the candidate's sources are not loaded, when any
+  test card already exists in the ledger under any digest, and when the
+  validate pass was produced on a different data or feature version; the
+  feature frame is built and audited before the spend; and `verify --phase 1`
+  requires the touch file to hold exactly one touch for the promoted model.
+- `promote` without arguments adopts the arguments of the model's latest
+  validate pass, so `make promote` works; `loop --promote` is refused in the
+  browser; the loop reports a promotion refusal as an exit code rather than a
+  traceback; the ERA5 extract is refused when its bytes no longer match the
+  manifest and starts two years before the first split so the first period's
+  twelve-month window exists; the history feature is leave-one-year-out for
+  the pooled and per-period totals as well as the cell; the canary's
+  feature-provenance mismatch branch is tested; the documentation says where
+  the feature provenance actually lives (on the scorecard).
+
+What Phase 1 still owes is the real-data run: `real-data.yml` with
+`phase=1` on a state contract, and a passing test card published with its
+backtest.
 
 ## 3. Phase 2: multi-hazard, national, with exposure
 
@@ -332,7 +379,7 @@ available data.
 **Needs the data run:** the partner records or EM-DAT export, a geoBoundaries
 release, the ERA5 pulls, and whether the contracts pass.
 
-## 6. Order of work
+## 6. Order of work, and how it is delivered
 
 1. Phase R, in the cluster order above; the guard stays green throughout.
 2. Phase 1 harness (`features.py`, plumbing, canary check 5), then connectors,
@@ -341,4 +388,16 @@ release, the ERA5 pulls, and whether the contracts pass.
 3. Phase 2, 3, 4 as sections 3–5.
 
 After each phase: the suite green on the working tree, this file's status
-table updated, one commit per coherent change, pushed to the PR branch.
+table updated, one commit per coherent change.
+
+Delivery is a stack of pull requests, each reviewable on its own and each
+based on the one below it:
+
+| PR | branch | contains | base |
+|---|---|---|---|
+| #11 | `claude/affectionate-lovelace-bnu9tz` | the guard, this plan, Phase R and Phase 1 | `main` |
+| next | `…-phase2` | Phase 2: national contracts, fleet, exposure, citations, issuance, the brief | #11 |
+| next | `…-phase3` | Phase 3: facility record, scenarios, gap report, reviews | the Phase 2 branch |
+| next | `…-phase4` | Phase 4: contract schema, global connectors, pilots | the Phase 3 branch |
+
+A fix to a lower PR is made there and the branches above it are rebased.
