@@ -24,13 +24,13 @@ from unittest import mock
 from readiness import brief as brief_mod
 from readiness import fleet as fleet_mod
 from readiness import cite, contracts, data as data_mod
-from readiness.connectors.base import Manifest
+from readiness.connectors.base import Manifest, SourceRecord
 from readiness.connectors import usa_structures
 from readiness.agent import orchestrator
 from readiness.cli import build_parser
 from readiness.engine.features import FEATURE_SETS
 from readiness.engine.registry import REGISTRY
-from tests.fixtures import make_contract
+from tests.fixtures import make_contract, make_pilot_contract
 from tests.test_connectors import PAGES, FakeLayer
 from tests.test_orchestrator import synthetic_dataset
 
@@ -744,3 +744,112 @@ class TestSandboxModule(unittest.TestCase):
     def test_errors_come_back_as_json_not_exceptions(self):
         self.assertIn("error", self.call("score_playground", contract="nope"))
         self.assertIn("error", self.call("tamper", contract="flood-zz", action="burn"))
+
+
+class TestSandboxNeverPacksPartnerRecords(unittest.TestCase):
+    """The archive is published. A partner's ground truth is not.
+
+    A pilot's records file is pinned by hash and never redistributed
+    (DATA-LICENSES.md), and the sandbox archive is the one artefact of this
+    repository that is handed to strangers. So the packer is pointed at a
+    synthetic tree that has a pilot in its registry and a records file in its
+    snapshots, and the archive it produces is searched for both the bytes and
+    the path.
+    """
+
+    SECRET = b"CONFIDENTIAL-PARTNER-ROW-DO-NOT-PUBLISH"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.out = self.dir / "generated"
+        self.out.mkdir(parents=True)
+        self.snapshots = self.dir / "snapshots"
+        self.build = _load("build_site_private", ROOT / "tools" / "build_site.py")
+        self.build.log = lambda _msg: None
+
+        # The minimum tree `build_sandbox` reads from, so it can run against a
+        # temporary root rather than the repository's own.
+        (self.dir / "experiments").mkdir()
+        (self.dir / "experiments" / "README.md").write_text("synthetic\n")
+        (self.dir / "readiness").mkdir()
+        (self.dir / "readiness" / "__init__.py").write_text("__version__ = '0.1'\n")
+        (self.snapshots / "census").mkdir(parents=True)
+        (self.snapshots / "census" / "national_county2020.txt").write_text(
+            "STATE|STATEFP|COUNTYFP|COUNTYNS|COUNTYNAME|CLASSFP|FUNCSTAT\n"
+            "ZZ|99|001|00000001|One County|H1|A\n"
+        )
+        self.contract = make_pilot_contract(name="flood-zz", sha256="a" * 64)
+        self.records = self.snapshots / "records" / "zz_records.csv"
+        self.records.parent.mkdir(parents=True)
+        self.records.write_bytes(
+            b"event_id,start_date,region_id,hazard,deaths,injured,damage_usd,source\n"
+            + self.SECRET
+            + b",2006-03-14,ZZ-ADM1-001,flood,2,11,450000,partner\n"
+        )
+        manifest = Manifest(path=self.snapshots / "manifest.json")
+        manifest.add(
+            data_mod.records_key(self.contract),
+            SourceRecord(
+                source="the partner", url="", sha256="a" * 64, bytes=1,
+                fetched_at="2026-01-01T00:00:00+00:00",
+                license="partner data; not redistributed",
+            ),
+        )
+        manifest.save()
+        self.registry = {"flood-zz": self.contract}
+        self.patches = [
+            mock.patch.object(data_mod, "SNAPSHOT_DIR", self.snapshots),
+            mock.patch.object(self.build, "ROOT", self.dir),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        self.tmp.cleanup()
+
+    def archive(self) -> zipfile.ZipFile:
+        self.build.build_sandbox(self.out, self.registry)
+        return zipfile.ZipFile(self.out / "sandbox.zip")
+
+    def test_the_archive_holds_no_records_path_and_no_records_bytes(self):
+        with self.archive() as zf:
+            names = zf.namelist()
+            self.assertIn("snapshots/census/national_county2020.txt", names)
+            for name in names:
+                self.assertFalse(
+                    name.startswith("snapshots/records"), f"packed {name}"
+                )
+                self.assertNotIn(self.SECRET, zf.read(name), f"in {name}")
+
+    def test_a_packed_manifest_drops_the_private_records(self):
+        # The hashes are public — that is the point of pinning by hash — but
+        # the archive has no use for a partner document's file name and should
+        # not carry one.
+        with self.archive() as zf:
+            packed = json.loads(zf.read("snapshots/manifest.json"))
+        self.assertEqual(packed["records"], {})
+        self.assertNotIn("zz_records.csv", json.dumps(packed))
+
+    def test_adding_such_a_file_raises_rather_than_skipping_quietly(self):
+        # The guard is on the packer's `add` itself, so a pattern added later
+        # cannot sweep one in: it raises where it would have written.
+        self.assertTrue(self.build.is_private("snapshots/records/zz_records.csv"))
+        self.assertTrue(self.build.is_private("snapshots/records"))
+        self.assertFalse(self.build.is_private("snapshots/census/x.txt"))
+        for key in ("records/ZZ/zz_records.csv", "emdat/ZY/zy.xlsx"):
+            self.assertTrue(self.build.is_private_key(key))
+        for key in ("noaa/storm_events/2010", "geoboundaries/ZZ/ADM1"):
+            self.assertFalse(self.build.is_private_key(key))
+
+    def test_the_two_label_source_prefixes_are_the_harnesss_own(self):
+        # One statement of what "ground truth" means, not two that can drift.
+        from readiness.connectors import CONNECTORS
+
+        private = {
+            info.key_prefix for name, info in CONNECTORS.items()
+            if info.is_label_source and not info.network
+        }
+        self.assertEqual(private, set(self.build.PRIVATE_KEY_PREFIXES))

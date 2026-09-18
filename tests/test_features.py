@@ -210,6 +210,34 @@ class TestAdmission(unittest.TestCase):
                 with self.assertRaises(F.FeatureAdmissionError):
                     F.admit(FakeStatic("gazetteer", keys=(key,)), self.contract)
 
+    def test_every_registered_label_source_is_refused_by_the_same_rule(self):
+        """The registry and the firewall must not be able to disagree.
+
+        `LABEL_SOURCE_PREFIXES` is a literal in the harness and
+        `is_label_source` a literal in the connector registry, because the
+        harness may not import a connector. This walks the registry: whatever
+        it calls a ground truth, `admit` refuses a feature built from it.
+        """
+        from readiness.connectors import CONNECTORS, connector_for_key
+
+        label_sources = {k: v for k, v in CONNECTORS.items() if v.is_label_source}
+        self.assertEqual(
+            sorted(label_sources), ["emdat", "national_records", "storm_events"]
+        )
+        for name, info in label_sources.items():
+            key = f"{info.key_prefix}ZZ/a-file"
+            with self.subTest(connector=name):
+                self.assertTrue(connector_for_key(key).is_label_source)
+                with self.assertRaises(F.FeatureAdmissionError):
+                    F.admit(FakeStatic("gazetteer", keys=(key,)), self.contract)
+        # ...and nothing else in the registry is caught by the prefixes.
+        for name, info in CONNECTORS.items():
+            if not info.is_label_source:
+                with self.subTest(connector=name):
+                    self.assertFalse(
+                        info.key_prefix.startswith(F.LABEL_SOURCE_PREFIXES), name
+                    )
+
 
 class TestAudit(unittest.TestCase):
     def setUp(self):

@@ -6,7 +6,10 @@ The forecast unit (report §5) is:
 
 where the hazard, the regions and the period are all set by the contract. For
 the NOAA Storm Events ground truth, regions are US counties and the period is
-a month, a quarter or a year.
+a month, a quarter or a year. For a pilot outside the US the same three come
+from a partner's national record or an EM-DAT export over geoBoundaries ADM1 or
+ADM2 units — a `RecordEvent` rather than a `StormEvent`, walked by the same
+code, judged by the same pre-registered damage definition.
 
 Two things make this harder than it looks, and both are handled here:
 
@@ -71,6 +74,60 @@ class StormEvent:
         return self.cz_type == "C"
 
 
+@dataclass(frozen=True)
+class RecordEvent:
+    """One event from a ground truth that names its regions directly.
+
+    The generic counterpart of `StormEvent`, and what the Phase 4 connectors
+    produce: a partner's national record (`connectors.national_records`) or an
+    EM-DAT export (`connectors.emdat`). Two differences from a Storm Events
+    row, both of which make the panel walk *simpler* rather than special:
+
+    * the hazard was already matched to the contract by the connector, through
+      `config.HAZARD_CATEGORIES`, which also counted what it could not match —
+      so there is no event-type filter left to apply here; and
+    * `region_ids` are geoBoundaries shapeIDs the record itself names (an
+      EM-DAT row can list several admin units for one flood), so nothing is
+      zone-coded and `zone_policy` has nothing to do. The contract validator
+      insists it is `drop` outside the US for exactly that reason.
+
+    The damage fields are deliberately the same names `is_damaging` reads on a
+    `StormEvent`: one pre-registered damage definition, applied identically
+    wherever the record came from. There is no "damaging by inclusion"
+    convention — an event listed in a national archive still has to clear the
+    contract's threshold.
+    """
+
+    event_id: str
+    year: int
+    month: int
+    hazard: str
+    region_ids: tuple[str, ...]
+    injuries: int
+    deaths: int
+    damage_property_usd: float
+    damage_crops_usd: float = 0.0
+
+    def period_index(self, periods_per_year: int) -> int:
+        """1-based period of the year: month 8 is quarter 3, half 2, month 8, year 1."""
+        return (self.month - 1) * periods_per_year // 12 + 1
+
+    def unit_for(self, periods_per_year: int) -> Unit:
+        """The first region's unit. An event naming several marks each; see
+        `_regions_hit`, which is what the panel walk uses."""
+        return (self.region_ids[0], self.year, self.period_index(periods_per_year))
+
+    @property
+    def county_coded(self) -> bool:
+        """True: a record event names its regions, so it is never zone-coded."""
+        return True
+
+
+#: Either ground truth's event. `is_damaging`, `_regions_hit` and the panel
+#: walk take both; nothing else in the harness distinguishes them.
+Event = StormEvent | RecordEvent
+
+
 _MAGNITUDE = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
 _DAMAGE_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([KMBT]?)\s*$", re.IGNORECASE)
 #: A magnitude suffix with no number at all. NOAA emits this occasionally for a
@@ -101,8 +158,13 @@ def parse_damage(raw: str | None) -> float:
     return float(m.group(1)) * _MAGNITUDE[m.group(2).upper()]
 
 
-def is_damaging(event: StormEvent, contract: Contract) -> bool:
-    """Apply the contract's pre-registered damage definition."""
+def is_damaging(event: Event, contract: Contract) -> bool:
+    """Apply the contract's pre-registered damage definition, to either record.
+
+    The fields it reads — property damage, injuries, deaths — are named the
+    same on a `StormEvent` and a `RecordEvent`, so the definition a contract
+    pre-registered in the US is the definition a pilot is judged by.
+    """
     if event.damage_property_usd >= contract.damage_property_usd_min:
         return True
     if contract.damage_count_casualties and (event.injuries > 0 or event.deaths > 0):
@@ -201,13 +263,19 @@ def _require_crosswalk(contract: Contract, crosswalk: Crosswalk | None) -> None:
 
 
 def _regions_hit(
-    event: StormEvent, contract: Contract, crosswalk: Crosswalk | None
+    event: Event, contract: Contract, crosswalk: Crosswalk | None
 ) -> tuple[str, ...] | None:
     """Which regions an event lands in, or None if it is zone-coded and dropped.
 
     Returns an empty tuple for a zone-coded event whose zone the crosswalk does
     not know (unmapped) — distinct from None so the diagnostics can count it.
+
+    A `RecordEvent` names its regions, so it short-circuits: a partner's row
+    or an EM-DAT admin unit is already a geoBoundaries id (the connector did
+    the crosswalk, and counted what it could not map).
     """
+    if isinstance(event, RecordEvent):
+        return event.region_ids
     if event.county_coded:
         return (event.county_fips,)
     if contract.zone_policy != "expand":
@@ -232,6 +300,15 @@ class Diagnostics:
     n_damaging: int          # in universe and damaging (a zone row counts once)
     n_positive_units: int    # distinct units marked positive
     crosswalk_edition: str = ""
+    #: Rows of a pilot's ground truth whose hazard value is not one of this
+    #: hazard's (`config.HAZARD_CATEGORIES`) — counted by the connector that
+    #: read them and carried here so `readiness panel` can print it. Zero on
+    #: every US path, which is what keeps that path byte-identical.
+    n_skipped_hazard: int = 0
+    #: What the directly-coded rows are coded against, for the printed line
+    #: only: "county" for Storm Events, "ADM1"/"ADM2" for a pilot. The default
+    #: keeps every US rendering byte-for-byte what it was.
+    region_coding: str = "county"
 
     @property
     def zone_share(self) -> float:
@@ -244,7 +321,7 @@ class Diagnostics:
     def format(self) -> str:
         lines = [
             f"  {self.hazard}: {self.n_in_years:,} events in the contract's years",
-            f"    county-coded      {self.n_county_coded:>8,}",
+            f"    {self.region_coding + '-coded':<18}{self.n_county_coded:>8,}",
         ]
         if self.zone_policy == "expand":
             lines.append(
@@ -253,10 +330,15 @@ class Diagnostics:
                 f"{self.crosswalk_edition or ''}".rstrip()
                 + f", {self.n_zone_unmapped:,} unmapped (zone not in this edition)"
             )
-        else:
+        elif self.region_coding == "county":
             lines.append(
                 f"    zone-coded        {self.n_zone_coded:>8,}"
                 "   dropped (zone_policy: drop)"
+            )
+        if self.n_skipped_hazard:
+            lines.append(
+                f"    other hazards     {self.n_skipped_hazard:>8,}"
+                "   rows of another hazard in the same records file"
             )
         lines.append(f"    outside universe  {self.n_outside_universe:>8,}")
         lines.append(
@@ -278,12 +360,27 @@ class Diagnostics:
         return "\n".join(lines)
 
 
+def _hazard_matches(event: Event, event_types: set[str]) -> bool:
+    """Whether an event is one of the contract's.
+
+    A `StormEvent` carries a Storm Events EVENT_TYPE and has to be one the
+    contract lists. A `RecordEvent` reached the walk through a connector that
+    already matched it to the contract's hazard through
+    `config.HAZARD_CATEGORIES` and counted the rows it rejected, so it is in by
+    construction — the filter is applied once, where the vocabulary lives.
+    """
+    if isinstance(event, RecordEvent):
+        return True
+    return event.event_type in event_types
+
+
 def _walk_events(
-    events: Iterable[StormEvent],
+    events: Iterable[Event],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
     crosswalk: Crosswalk | None,
+    n_skipped_hazard: int = 0,
 ) -> tuple[set[Unit], Diagnostics]:
     """One pass over the events: the units to mark positive, and where every row went.
 
@@ -302,7 +399,7 @@ def _walk_events(
     n_outside = n_damaging = 0
     positive: set[Unit] = set()
     for event in events:
-        if event.event_type not in event_types:
+        if not _hazard_matches(event, event_types):
             continue
         n_events += 1
         if event.year not in year_set:
@@ -341,6 +438,10 @@ def _walk_events(
         n_damaging=n_damaging,
         n_positive_units=len(positive),
         crosswalk_edition=crosswalk.edition if crosswalk is not None else "",
+        n_skipped_hazard=n_skipped_hazard,
+        region_coding=(
+            contract.admin_level if contract.regions_source != "census" else "county"
+        ),
     )
     return positive, diagnostics
 
@@ -368,11 +469,13 @@ def _dense_panel(
 
 
 def panel_and_diagnostics(
-    events: Iterable[StormEvent],
+    events: Iterable[Event],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
     crosswalk: Crosswalk | None = None,
+    *,
+    n_skipped_hazard: int = 0,
 ) -> tuple[Panel, Diagnostics]:
     """The labelled panel and the account of how it was built, from one pass.
 
@@ -380,12 +483,14 @@ def panel_and_diagnostics(
     the diagnostics `readiness panel` prints come from the same walk over the
     same events, so they cannot disagree.
     """
-    positive, diagnostics = _walk_events(events, regions, years, contract, crosswalk)
+    positive, diagnostics = _walk_events(
+        events, regions, years, contract, crosswalk, n_skipped_hazard
+    )
     return _dense_panel(positive, regions, years, contract), diagnostics
 
 
 def build_panel(
-    events: Iterable[StormEvent],
+    events: Iterable[Event],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,
@@ -402,7 +507,7 @@ def build_panel(
 
 
 def diagnose(
-    events: Iterable[StormEvent],
+    events: Iterable[Event],
     regions: Sequence[str],
     years: Sequence[int],
     contract: Contract,

@@ -126,7 +126,11 @@ def contract_view(c: contracts_mod.Contract, out: pathlib.Path) -> dict:
         "scope_label": c.scope_label,
         # Plan §3: "six national contracts registered as data"; the fleet and
         # `verify --phase 2` count only these, so the pages tell them apart.
-        "national": not c.states,
+        "national": not c.states and not c.is_pilot,
+        "pilot": c.is_pilot,
+        "ground_truth": dict(c.ground_truth),
+        "regions": dict(c.regions),
+        "record_start_year": c.record_start_year,
         "period": c.period,
         "periods_per_year": c.periods_per_year,
         "damage_property_usd_min": c.damage_property_usd_min,
@@ -400,7 +404,7 @@ def build_tapes(
     for name, ds in datasets.items():
         c = registry[name]
         panel = ds.panel
-        regions = [county.fips for county in ds.regions]
+        regions = [region.id for region in ds.regions]
         rindex = {fips: i for i, fips in enumerate(regions)}
         periods = sorted({(year, period) for _region, year, period in panel.units})
         pindex = {yp: i for i, yp in enumerate(periods)}
@@ -424,7 +428,7 @@ def build_tapes(
             "years": [periods[0][0], periods[-1][0]],
             "n_periods": n_periods,
             "n_regions": n_regions,
-            "regions": [{"fips": r.fips, "name": r.name} for r in ds.regions],
+            "regions": [{"fips": r.id, "name": r.name} for r in ds.regions],
             "splits": {
                 "train": [c.train_years[0], c.train_years[-1]],
                 "validate": [c.validate_years[0], c.validate_years[-1]],
@@ -485,7 +489,11 @@ def build_fleet(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]) 
     """
     rows = []
     for row in fleet_mod.status(registry):
-        rows.append(dataclasses.asdict(row) | {"national": not registry[row.name].states})
+        contract = registry[row.name]
+        rows.append(
+            dataclasses.asdict(row)
+            | {"national": not contract.states and not contract.is_pilot}
+        )
     dump(out / "fleet.json", rows)
     passing = [r["name"] for r in rows if r["phase1_ok"]]
     log(f"fleet.json: {len(rows)} contract(s); phase 1 met for {passing}")
@@ -686,6 +694,35 @@ def build_exposure(out: pathlib.Path, snapshot_dir: pathlib.Path = data_mod.SNAP
 # ---------------------------------------------------------------------------
 
 
+#: Manifest-key prefixes whose *bytes* are ground truth somebody gave us under
+#: terms that forbid redistribution: a partner's national record, an EM-DAT
+#: export. Only their sha256 is committed, and the sandbox archive is a
+#: published artefact, so nothing pinned under these ever goes into it.
+PRIVATE_KEY_PREFIXES: tuple[str, ...] = ("records/", "emdat/")
+
+#: The snapshot subdirectory those files live in. Refused as a whole, by path,
+#: so a future pattern added to the packer cannot sweep one in by accident —
+#: the guard is structural rather than a list of what we remembered to exclude.
+PRIVATE_SNAPSHOT_DIR = "snapshots/records"
+
+
+class PrivateDataError(RuntimeError):
+    """Raised rather than skipping: packing a partner's bytes is not a warning."""
+
+
+def is_private(relpath: str) -> bool:
+    """Whether a repo-relative path holds ground-truth bytes that must not ship."""
+    posix = str(relpath).replace("\\", "/")
+    return posix == PRIVATE_SNAPSHOT_DIR or posix.startswith(
+        PRIVATE_SNAPSHOT_DIR + "/"
+    )
+
+
+def is_private_key(manifest_key: str) -> bool:
+    """Whether a manifest key names such a file."""
+    return str(manifest_key).startswith(PRIVATE_KEY_PREFIXES)
+
+
 def _package_files() -> list[pathlib.Path]:
     return sorted(
         p for p in (ROOT / "readiness").rglob("*.py") if "__pycache__" not in p.parts
@@ -701,6 +738,21 @@ def _filter_rows(text: str, keep: set[str]) -> tuple[str, int]:
         if row.get("EVENT_TYPE") in keep:
             kept.append(line)
     return ("\n".join(kept) + "\n") if kept else "", len(kept)
+
+
+def _public_manifest(snapshot_dir: pathlib.Path) -> str:
+    """`snapshots/manifest.json` with every private ground-truth record removed.
+
+    The hashes themselves are committed and public — that is the whole point of
+    pinning by hash. What is dropped here is the *file name* of a partner's
+    export, which the archive has no use for (a pilot's panel cannot be built
+    in the browser, because its bytes are not there) and which names a document
+    somebody shared in confidence.
+    """
+    blob = json.loads((snapshot_dir / "manifest.json").read_text())
+    records = blob.get("records") or {}
+    blob["records"] = {k: v for k, v in records.items() if not is_private_key(k)}
+    return json.dumps(blob, indent=2, sort_keys=True) + "\n"
 
 
 def _generated_at(manifest_path: pathlib.Path) -> str | None:
@@ -732,7 +784,13 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
     zf = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
 
     def add(path: pathlib.Path) -> None:
-        zf.write(path, path.relative_to(ROOT).as_posix())
+        rel = path.relative_to(ROOT).as_posix()
+        if is_private(rel):
+            raise PrivateDataError(
+                f"refusing to pack {rel}: partner records and EM-DAT exports are "
+                "pinned by hash and never redistributed (DATA-LICENSES.md)"
+            )
+        zf.write(path, rel)
 
     for p in _package_files():
         add(p)
@@ -750,7 +808,7 @@ def build_sandbox(out: pathlib.Path, registry: dict[str, contracts_mod.Contract]
 
     states_info: dict[str, dict] = {}
     if manifest and (snapshot_dir / "census" / "national_county2020.txt").exists():
-        add(snapshot_dir / "manifest.json")
+        zf.writestr("snapshots/manifest.json", _public_manifest(snapshot_dir))
         add(snapshot_dir / "census" / "national_county2020.txt")
         crosswalk = snapshot_dir / "nws" / "zone_county.dbx"
         if crosswalk.exists():

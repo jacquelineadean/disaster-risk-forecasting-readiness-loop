@@ -3,6 +3,7 @@
 import unittest
 
 from readiness.harness.labels import (
+    RecordEvent,
     build_panel,
     county_fips,
     diagnose,
@@ -10,7 +11,36 @@ from readiness.harness.labels import (
     panel_and_diagnostics,
     parse_damage,
 )
-from tests.fixtures import make_contract, make_event
+from tests.fixtures import (
+    make_contract,
+    make_event,
+    make_panel,
+    make_pilot_contract,
+    shape_id,
+)
+
+
+def make_record(
+    *,
+    event_id: str = "E1",
+    year: int = 2006,
+    month: int = 8,
+    hazard: str = "flood",
+    regions: tuple[str, ...] = (),
+    injuries: int = 0,
+    deaths: int = 0,
+    damage: float = 0.0,
+) -> RecordEvent:
+    return RecordEvent(
+        event_id=event_id,
+        year=year,
+        month=month,
+        hazard=hazard,
+        region_ids=regions or (shape_id(0),),
+        injuries=injuries,
+        deaths=deaths,
+        damage_property_usd=damage,
+    )
 
 
 class TestDamageParsing(unittest.TestCase):
@@ -337,6 +367,138 @@ class TestZonePolicy(unittest.TestCase):
         # instead, which is what the card records.
         self.assertEqual(a.units_digest(), b.units_digest())
         self.assertNotEqual(drop.digest(), expand.digest())
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: the same walk, over a record that names its own regions
+# ---------------------------------------------------------------------------
+
+
+class TestRecordEvents(unittest.TestCase):
+    """`RecordEvent` goes through `build_panel` unchanged — that is the claim."""
+
+    def setUp(self):
+        self.contract = make_pilot_contract()
+        self.regions = [shape_id(i) for i in range(3)]
+        self.years = [2006, 2007]
+
+    def build(self, events, **kw):
+        return build_panel(events, self.regions, self.years, self.contract, **kw)
+
+    def test_record_events_build_a_dense_panel(self):
+        panel = self.build([
+            make_record(year=2006, month=8, regions=(shape_id(0),), damage=50_000),
+            make_record(event_id="E2", year=2007, month=1, regions=(shape_id(2),),
+                        deaths=1),
+        ])
+        # Dense: three regions x two years x four quarters, zeros written out.
+        self.assertEqual(len(panel), 3 * 2 * 4)
+        self.assertEqual(
+            sorted(u for u, y in panel if y == 1),
+            [(shape_id(0), 2006, 3), (shape_id(2), 2007, 1)],
+        )
+        self.assertEqual(panel.scope, "ZZ:all")
+
+    def test_one_event_can_name_several_regions(self):
+        panel = self.build([
+            make_record(regions=(shape_id(0), shape_id(1)), damage=20_000),
+        ])
+        self.assertEqual(
+            sorted(u for u, y in panel if y == 1),
+            [(shape_id(0), 2006, 3), (shape_id(1), 2006, 3)],
+        )
+
+    def test_the_contracts_damage_definition_is_applied_unchanged(self):
+        # No "damaging by inclusion": being in a national archive is not the
+        # same as clearing the threshold the contract pre-registered.
+        harmless = make_record(damage=10.0)
+        self.assertFalse(is_damaging(harmless, self.contract))
+        self.assertEqual(sum(self.build([harmless]).labels), 0)
+        self.assertTrue(is_damaging(make_record(damage=10_000.0), self.contract))
+        self.assertTrue(is_damaging(make_record(injuries=1), self.contract))
+
+    def test_a_region_outside_the_universe_is_counted_not_dropped_silently(self):
+        d = diagnose(
+            [make_record(regions=("ZZ-ADM1-999",), damage=50_000)],
+            self.regions, self.years, self.contract,
+        )
+        self.assertEqual(d.n_outside_universe, 1)
+        self.assertEqual(d.n_damaging, 0)
+
+    def test_nothing_is_zone_coded(self):
+        d = diagnose(
+            [make_record(damage=50_000)], self.regions, self.years, self.contract
+        )
+        self.assertEqual(d.n_zone_coded, 0)
+        self.assertEqual(d.n_county_coded, 1)
+        self.assertEqual(d.n_positive_units, 1)
+
+    def test_the_period_index_matches_a_storm_events_row(self):
+        for month, quarter in ((1, 1), (3, 1), (4, 2), (8, 3), (12, 4)):
+            with self.subTest(month=month):
+                self.assertEqual(make_record(month=month).period_index(4), quarter)
+        self.assertEqual(make_record(month=8).period_index(12), 8)
+        self.assertEqual(make_record(month=8).unit_for(4), (shape_id(0), 2006, 3))
+
+    def test_the_diagnostics_name_the_admin_level_not_a_county(self):
+        d = diagnose(
+            [make_record(damage=50_000)], self.regions, self.years, self.contract
+        )
+        self.assertEqual(d.region_coding, "ADM1")
+        text = d.format()
+        self.assertIn("ADM1-coded               1", text)
+        self.assertNotIn("county", text)
+        # Nothing is zone-coded outside the US, so the line that explains the
+        # zone policy is simply absent rather than a row of zeros.
+        self.assertNotIn("zone-coded", text)
+
+    def test_the_skipped_hazard_count_rides_along_when_given(self):
+        panel, d = panel_and_diagnostics(
+            [make_record(damage=50_000)], self.regions, self.years, self.contract,
+            n_skipped_hazard=17,
+        )
+        self.assertEqual(d.n_skipped_hazard, 17)
+        self.assertIn("other hazards", d.format())
+        self.assertEqual(sum(panel.labels), 1)
+
+
+class TestUsPanelsAreUnchanged(unittest.TestCase):
+    """The hard constraint: generalising the walk moved no US panel.
+
+    The blessed fingerprints in `tests/expected/synthetic_fingerprints.json`
+    were written before any Phase 4 edit; `tests/test_repro_guard.py` checks
+    them in full. These two are stated here as well, because this is the file
+    that changed.
+    """
+
+    def test_the_fixture_panel_digests_are_bit_identical(self):
+        self.assertEqual(make_panel(n_regions=12).digest(), "244b04a1edb85132")
+        self.assertEqual(
+            make_panel(contract=make_contract(period="month"), n_regions=12, rare=True)
+            .digest(),
+            "6d5fae56bb972168",
+        )
+
+    def test_the_default_diagnostics_counter_is_zero_on_every_us_path(self):
+        d = diagnose(
+            [make_event(damage=50_000)], ["99003"], [2010], make_contract()
+        )
+        self.assertEqual(d.n_skipped_hazard, 0)
+        self.assertNotIn("other hazards", d.format())
+
+    def test_the_us_diagnostics_rendering_is_byte_for_byte_what_it_was(self):
+        # `panels.json` on the website embeds this text, and the wording is
+        # quoted in the docs. The new fields default to the US rendering.
+        d = diagnose([make_event(damage=50_000)], ["99003"], [2010], make_contract())
+        self.assertEqual(d.region_coding, "county")
+        self.assertEqual(
+            d.format(),
+            "  inland_flood: 1 events in the contract's years\n"
+            "    county-coded             1\n"
+            "    zone-coded               0   dropped (zone_policy: drop)\n"
+            "    outside universe         0\n"
+            "    damaging                 1   -> 1 positive units",
+        )
 
 
 if __name__ == "__main__":

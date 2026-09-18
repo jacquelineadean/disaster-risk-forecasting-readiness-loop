@@ -13,6 +13,7 @@ disagrees, a report rendered before the touch.
 
 import json
 import os
+import shutil
 import pathlib
 import tempfile
 import unittest
@@ -29,7 +30,7 @@ from readiness.harness.ledger import ExperimentCard, Ledger, utc_now
 from readiness.harness.splits import TouchBudget
 from readiness.issue import Issued
 from tests import fixtures_plans
-from tests.fixtures import make_contract
+from tests.fixtures import make_contract, make_pilot_contract
 from tests.test_orchestrator import quick, signal_dataset, synthetic_dataset
 
 CLEAR_CANARY = {
@@ -72,7 +73,7 @@ def synthetic_scorecard(
 
 def append_card(
     ledger: Ledger, contract, split, *, kwargs=None, verdict_passed=None,
-    canary=CLEAR_CANARY, **scorecard_kw,
+    canary=CLEAR_CANARY, snapshot=None, **scorecard_kw,
 ) -> ExperimentCard:
     """Seal one card into `ledger`; `verdict_passed` overrides the honest verdict."""
     sc = synthetic_scorecard(contract, split, **scorecard_kw)
@@ -81,7 +82,10 @@ def append_card(
         version=sc["version"], split=split, changed="synthetic", hypothesis="synthetic",
         outcome="synthetic", scorecard=sc, canary=canary,
         contract_digest=contract.digest(),
-        data_snapshot={"model_kwargs": kwargs if kwargs is not None else {"iters": 60}},
+        data_snapshot={
+            "model_kwargs": kwargs if kwargs is not None else {"iters": 60},
+            **(snapshot or {}),
+        },
         verdict=None,
     )
     verdict = contract_mod.evaluate(verify.stored_scorecard(card), contract).to_dict()
@@ -1181,6 +1185,223 @@ class TestPhase3(unittest.TestCase):
         result = self.phase3()
         self.assertFalse(result.passed)
         self.assertEqual(len(result.failures()), 2)
+        self.assertTrue(all("\n" not in f for f in result.failures()))
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 4
+# ---------------------------------------------------------------------------
+
+
+class TestPhase4(unittest.TestCase):
+    """Two pilots, on globally available data, with the US digests unmoved.
+
+    Nothing here builds a panel — which matters more in this phase than any
+    other, because a pilot's ground truth is a file that is not in the
+    repository and never will be. The cards carry their own input lists, so
+    the check reads the committed ledger exactly as a reader with a clone
+    would.
+    """
+
+    #: Inputs a pilot's card names: its boundary release and its record.
+    PILOT_INPUTS = {
+        "flood-zz": ["geoboundaries/ZZ/ADM1", "records/ZZ/zz_records.csv"],
+        "cyclone-zy": ["geoboundaries/ZY/ADM2", "emdat/ZY/zy_emdat.xlsx"],
+    }
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.experiments = self.dir / "experiments"
+        self.snapshots = self.dir / "snapshots"
+        self.env = mock.patch.dict(
+            os.environ, {data_mod.EXPERIMENTS_DIR_ENV: str(self.experiments)}
+        )
+        self.env.start()
+
+        self.registry = {
+            "flood-zz": make_pilot_contract(
+                name="flood-zz", hazard="inland_flood", country="ZZ",
+                source="national_records", file="zz_records.csv",
+                sha256="a" * 64, admin_level="ADM1",
+            ),
+            "cyclone-zy": make_pilot_contract(
+                name="cyclone-zy", hazard="tropical_cyclone", country="ZY",
+                source="emdat", file="zy_emdat.xlsx", sha256="b" * 64,
+                record_start_year=2000, admin_level="ADM2",
+            ),
+            # A US contract in the same registry: it is not a pilot and must
+            # not count toward the two.
+            "flood-us": make_contract(name="flood-us", scope={"states": []}),
+        }
+        self.manifest = Manifest(path=self.snapshots / "manifest.json")
+        for name, contract in self.registry.items():
+            if not contract.is_pilot:
+                continue
+            self.pass_phase1(contract, self.PILOT_INPUTS[name])
+            self.pin_records(contract)
+        self.manifest.save()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    # -- fixtures ----------------------------------------------------------
+
+    def pass_phase1(self, contract, inputs, feature_inputs=None) -> ExperimentCard:
+        """A ledger, a touch file and a backtest report that clear Phase 1.
+
+        The test card carries the input lists Phase 4 reads, which is where the
+        "globally available" question is actually answered.
+        """
+        where = data_mod.paths(contract, experiments_dir=self.experiments)
+        if where.directory.exists():
+            shutil.rmtree(where.directory)
+        ledger = Ledger(where.ledger)
+        append_card(ledger, contract, "validate")
+        card = append_card(
+            ledger, contract, "test",
+            snapshot={
+                "inputs": list(inputs),
+                "feature_inputs": list(
+                    feature_inputs
+                    if feature_inputs is not None
+                    else [f"open-meteo/era5/{contract.country}"]
+                ),
+            },
+        )
+        TouchBudget(where.touch_budget, contract.test_touch_budget).spend(
+            card.model, card.version
+        )
+        backtest.write(contract)
+        return card
+
+    def pin_records(self, contract) -> None:
+        self.manifest.add(
+            data_mod.records_key(contract),
+            SourceRecord(
+                source="partner", url="",
+                sha256=contract.ground_truth["sha256"], bytes=1,
+                fetched_at=utc_now(), license="partner data; not redistributed",
+            ),
+        )
+
+    def phase4(self, **kw) -> verify.Phase4Result:
+        options = dict(
+            registry=self.registry, experiments_dir=self.experiments,
+            snapshot_dir=self.snapshots,
+        )
+        options.update(kw)
+        return verify.phase4(**options)
+
+    def check(self, result, name) -> contract_mod.Check:
+        return next(c for c in result.checks if c.name == name)
+
+    # -- the criteria ------------------------------------------------------
+
+    def test_two_pilots_passing_phase1_on_global_data_meets_the_exit(self):
+        result = self.phase4()
+        self.assertTrue(result.passed, [c.detail for c in result.checks if not c.passed])
+        self.assertEqual(
+            [c.name for c in result.checks],
+            ["pilots", "global inputs", "ground truth pinned", "us digests"],
+        )
+
+    def test_one_pilot_is_not_two(self):
+        del self.registry["cyclone-zy"]
+        result = self.phase4()
+        self.assertFalse(result.passed)
+        self.assertIn("1/1", self.check(result, "pilots").detail)
+
+    def test_a_us_contract_does_not_count_as_a_pilot(self):
+        del self.registry["flood-zz"]
+        self.assertIn("flood-us", self.registry)
+        self.assertFalse(self.phase4().passed)
+
+    def test_a_pilot_whose_ledger_does_not_pass_phase1_is_not_counted(self):
+        where = data_mod.paths(
+            self.registry["flood-zz"], experiments_dir=self.experiments
+        )
+        where.touch_budget.unlink()
+        result = self.phase4()
+        self.assertFalse(result.passed)
+        self.assertIn("[ .. ] flood-zz", self.check(result, "pilots").detail)
+
+    def test_a_us_only_connector_in_a_pilots_inputs_fails(self):
+        self.pass_phase1(
+            self.registry["flood-zz"],
+            ["geoboundaries/ZZ/ADM1", "records/ZZ/zz_records.csv",
+             "census/national_county2020"],
+        )
+        result = self.phase4()
+        self.assertFalse(result.passed)
+        detail = self.check(result, "global inputs").detail
+        self.assertIn("census/national_county2020", detail)
+        self.assertIn("flood-zz", detail)
+
+    def test_a_us_only_feature_input_fails_too(self):
+        # A pilot whose panel is global but whose *features* are not has not
+        # demonstrated the swap either.
+        self.pass_phase1(
+            self.registry["cyclone-zy"],
+            self.PILOT_INPUTS["cyclone-zy"],
+            feature_inputs=["fema/nri_counties_2023"],
+        )
+        result = self.phase4()
+        self.assertFalse(result.passed)
+        self.assertIn("fema/nri_counties_2023", self.check(result, "global inputs").detail)
+
+    def test_an_unregistered_manifest_key_fails_rather_than_passing_silently(self):
+        self.pass_phase1(
+            self.registry["flood-zz"],
+            ["geoboundaries/ZZ/ADM1", "records/ZZ/zz_records.csv", "somebody/else"],
+        )
+        self.assertIn(
+            "no registered connector",
+            self.check(self.phase4(), "global inputs").detail,
+        )
+
+    def test_the_ground_truth_hash_must_match_the_manifest(self):
+        key = data_mod.records_key(self.registry["flood-zz"])
+        self.manifest.records[key].sha256 = "c" * 64
+        self.manifest.save(force=True)
+        result = self.phase4()
+        self.assertFalse(result.passed)
+        detail = self.check(result, "ground truth pinned").detail
+        self.assertIn("flood-zz", detail)
+        self.assertIn("the contract names", detail)
+
+    def test_an_unpinned_record_fails(self):
+        del self.manifest.records[data_mod.records_key(self.registry["cyclone-zy"])]
+        self.manifest.save(force=True)
+        self.assertIn(
+            "is not pinned", self.check(self.phase4(), "ground truth pinned").detail
+        )
+
+    def test_the_us_example_digests_are_read_from_the_blessed_fingerprints(self):
+        # The real repository's fingerprints and contracts, deliberately: this
+        # criterion is a fact about the committed artefacts, not about the
+        # temporary registry the rest of this test uses.
+        check = self.check(self.phase4(), "us digests")
+        self.assertTrue(check.passed, check.detail)
+        for name in verify.US_EXAMPLE_CONTRACTS:
+            self.assertIn(name, check.detail)
+
+    def test_a_moved_us_digest_fails(self):
+        blessed = self.dir / "blessed"
+        blessed.mkdir()
+        for name in verify.US_EXAMPLE_CONTRACTS:
+            (blessed / f"{name}.json").write_text(json.dumps({"_contract": "0" * 16}))
+        check = self.check(self.phase4(expected_dir=blessed), "us digests")
+        self.assertFalse(check.passed)
+        self.assertIn("incomparable", check.detail)
+
+    def test_failures_are_one_line_each(self):
+        del self.registry["cyclone-zy"]
+        del self.registry["flood-zz"]
+        result = self.phase4()
+        self.assertEqual(len(result.failures()), 3)
         self.assertTrue(all("\n" not in f for f in result.failures()))
 
 

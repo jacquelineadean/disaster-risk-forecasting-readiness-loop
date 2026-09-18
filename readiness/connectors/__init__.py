@@ -111,6 +111,36 @@ CONNECTORS: dict[str, ConnectorInfo] = {
         network=True,
         is_label_source=False,
     ),
+    # -- Phase 4: the global counterparts. `verify --phase 4` requires every
+    # input of a pilot's test card to resolve to one of the entries below (or
+    # to another `global_coverage=True` one), which is what "using only
+    # globally available data" means as a check rather than a claim.
+    "geoboundaries": ConnectorInfo(
+        key_prefix="geoboundaries/",
+        source="geoBoundaries gbOpen administrative boundaries",
+        license="CC BY 4.0 (geoBoundaries, William & Mary geoLab)",
+        global_coverage=True,
+        network=True,
+        is_label_source=False,
+    ),
+    "national_records": ConnectorInfo(
+        key_prefix="records/",
+        source="Partner national disaster records (supplied per contract)",
+        license="partner data; not redistributed",
+        global_coverage=True,
+        network=False,
+        is_label_source=True,
+    ),
+    "emdat": ConnectorInfo(
+        key_prefix="emdat/",
+        source="EM-DAT, CRED / UCLouvain (registered export)",
+        license=(
+            "free for research, registration required; redistribution not permitted"
+        ),
+        global_coverage=True,
+        network=False,
+        is_label_source=True,
+    ),
 }
 
 

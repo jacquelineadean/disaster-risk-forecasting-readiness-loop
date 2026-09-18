@@ -23,6 +23,7 @@ import ssl
 import tempfile
 import threading
 import unittest
+import zipfile
 from unittest import mock
 
 from readiness.connectors import (
@@ -31,7 +32,10 @@ from readiness.connectors import (
     census,
     climada_layer,
     connector_for_key,
+    emdat,
     gazetteer,
+    geoboundaries,
+    national_records,
     nri,
     nws_zones,
     open_meteo,
@@ -50,9 +54,16 @@ from readiness.connectors.base import (
     sha256_bytes,
     utc_now,
 )
+from readiness import contracts as contracts_mod
 from readiness.contracts import Contract
 from readiness.harness import features as F
-from tests.fixtures import make_contract
+from tests.fixtures import (
+    make_contract,
+    make_geojson,
+    make_pilot_contract,
+    make_records_csv,
+    record_row,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = REPO_ROOT / "tests" / "data"
@@ -646,6 +657,9 @@ class TestRegistry(unittest.TestCase):
             "nri": nri.MANIFEST_KEY,
             "climada": climada_layer.manifest_key("inland_flood", "US:LA"),
             "usa_structures": usa_structures.manifest_key("22"),
+            "geoboundaries": geoboundaries.manifest_key("ZZ", "ADM1"),
+            "national_records": national_records.manifest_key("ZZ", "zz_records.csv"),
+            "emdat": emdat.manifest_key("ZZ", "zz_emdat.xlsx"),
         }
         self.assertEqual(sorted(keys), sorted(CONNECTORS))
         for name, key in keys.items():
@@ -663,6 +677,9 @@ class TestRegistry(unittest.TestCase):
             "nri": nri.LICENSE,
             "climada": climada_layer.LICENSE,
             "usa_structures": usa_structures.LICENSE,
+            "geoboundaries": geoboundaries.LICENSE,
+            "national_records": national_records.LICENSE,
+            "emdat": emdat.LICENSE,
         }
         for name, licence in licences.items():
             self.assertEqual(CONNECTORS[name].license, licence, name)
@@ -670,6 +687,8 @@ class TestRegistry(unittest.TestCase):
             ("gazetteer", gazetteer), ("era5", open_meteo),
             ("nri", nri), ("climada", climada_layer),
             ("usa_structures", usa_structures),
+            ("geoboundaries", geoboundaries), ("national_records", national_records),
+            ("emdat", emdat),
         ):
             self.assertEqual(CONNECTORS[name].source, module.SOURCE, name)
 
@@ -693,17 +712,30 @@ class TestRegistry(unittest.TestCase):
         self.assertIs(connector_for_key("a/b/c", registry), long)
         self.assertIs(connector_for_key("a/x", registry), short)
 
-    def test_the_ground_truth_is_the_only_label_source(self):
-        labels = [k for k, v in CONNECTORS.items() if v.is_label_source]
-        self.assertEqual(labels, ["storm_events"])
-        # ...and the harness's label-origin rule already knows its prefix.
-        self.assertTrue(
-            CONNECTORS["storm_events"].key_prefix.startswith(F.LABEL_SOURCE_PREFIXES)
-        )
+    def test_the_ground_truths_are_the_only_label_sources(self):
+        labels = sorted(k for k, v in CONNECTORS.items() if v.is_label_source)
+        self.assertEqual(labels, ["emdat", "national_records", "storm_events"])
+        # ...and the harness's label-origin rule already knows every prefix, so
+        # a feature built from any of them is refused by `admit`.
+        for name in labels:
+            self.assertTrue(
+                CONNECTORS[name].key_prefix.startswith(F.LABEL_SOURCE_PREFIXES), name
+            )
 
-    def test_only_the_climada_layer_needs_no_network(self):
+    def test_the_us_specific_connectors_are_not_globally_available(self):
+        # `verify --phase 4` asks whether a pilot's inputs are all global; that
+        # question is only meaningful if the US-only layers say so.
+        for name in ("census", "storm_events", "nws_zones", "nri",
+                     "usa_structures", "gazetteer"):
+            self.assertFalse(CONNECTORS[name].global_coverage, name)
+        for name in ("geoboundaries", "national_records", "emdat", "era5", "climada"):
+            self.assertTrue(CONNECTORS[name].global_coverage, name)
+
+    def test_only_local_layers_need_no_network(self):
+        # The two ground truths a pilot may use are files somebody was given;
+        # there is nothing to fetch, which is why they are never mirrored.
         offline = sorted(k for k, v in CONNECTORS.items() if not v.network)
-        self.assertEqual(offline, ["climada"])
+        self.assertEqual(offline, ["climada", "emdat", "national_records"])
 
     def test_the_climada_tool_is_never_imported_by_the_package(self):
         # The tool is GPL-3.0 territory; the package names it in prose and
@@ -1529,3 +1561,552 @@ class TestRefreshWithoutFetching(unittest.TestCase):
             root = pathlib.Path(tmp)
             with self.assertRaises(ConnectorError):
                 nws_zones.load(root, Manifest(path=root / "m.json"), refresh=True, allow_fetch=False)
+
+
+# ---------------------------------------------------------------------------
+# A minimal .xlsx, built the way the connector reads one
+# ---------------------------------------------------------------------------
+# An xlsx is a zip of XML, and `emdat.py` reads it with `zipfile` and
+# `xml.etree` because the project is standard library only (and runs in
+# Pyodide). Writing one here with the same two modules keeps the test honest:
+# nothing in this file knows a spreadsheet library either, and the committed
+# `tests/data/emdat_sample.xlsx` was produced by exactly this function.
+
+CONTENT_TYPES = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+    '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>'
+    "</Types>"
+)
+RELS = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+    "</Relationships>"
+)
+WORKBOOK = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    '<sheets><sheet name="EM-DAT" sheetId="1" r:id="rId1" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/>'
+    "</sheets></workbook>"
+)
+
+
+def _escape(text):
+    return (
+        str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+
+
+def _ref(row, col):
+    letters = ""
+    col += 1
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return f"{letters}{row}"
+
+
+def emdat_xlsx(rows, *, shared=True):
+    """`rows` (lists of cell values) as .xlsx bytes, built with zipfile alone."""
+    strings, index = [], {}
+    body = []
+    for r, row in enumerate(rows, start=1):
+        cells = []
+        for c, value in enumerate(row):
+            if value is None or value == "":
+                continue
+            ref = _ref(r, c)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+            elif shared:
+                if value not in index:
+                    index[value] = len(strings)
+                    strings.append(value)
+                cells.append(f'<c r="{ref}" t="s"><v>{index[value]}</v></c>')
+            else:
+                cells.append(
+                    f'<c r="{ref}" t="inlineStr"><is><t>{_escape(value)}</t></is></c>'
+                )
+        body.append(f'<row r="{r}">{"".join(cells)}</row>')
+    sheet = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(body)}</sheetData></worksheet>'
+    )
+    shared_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        f'count="{len(strings)}" uniqueCount="{len(strings)}">'
+        + "".join(f"<si><t>{_escape(s)}</t></si>" for s in strings)
+        + "</sst>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", CONTENT_TYPES)
+        zf.writestr("_rels/.rels", RELS)
+        zf.writestr("xl/workbook.xml", WORKBOOK)
+        zf.writestr("xl/worksheets/sheet1.xml", sheet)
+        zf.writestr("xl/sharedStrings.xml", shared_xml)
+    return buf.getvalue()
+
+
+#: The rows of the committed `tests/data/emdat_sample.xlsx`, so the binary blob
+#: in the repository is not opaque: a test rebuilds it from these and compares.
+EMDAT_SAMPLE_ROWS: tuple[dict, ...] = (
+    {},
+    {
+        "DisNo.": "2006-0002-ZZ",
+        "Disaster Subtype": "Flash flood",
+        "Start Month": 7,
+        "Total Deaths": 0,
+        "No. Injured": 3,
+        "Total Damage (\'000 US$)": 12,
+        "Admin Units": (
+            "[{'adm1_code':102,'adm1_name':'Central Province'},"
+            "{'adm1_code':103,'adm1_name':'Windward Islands'}]"
+        ),
+    },
+    {
+        "DisNo.": "2007-0003-ZZ",
+        "Disaster Type": "Storm",
+        "Disaster Subtype": "Tropical cyclone",
+        "Start Year": 2007,
+        "Start Month": 9,
+        "Total Deaths": 30,
+        "No. Injured": 120,
+        "Total Damage (\'000 US$)": 8000,
+        "Admin Units": '[{"adm1_code":102,"adm1_name":"Central Province"}]',
+    },
+    {
+        "DisNo.": "2008-0004-ZZ",
+        "Start Year": 2008,
+        "Start Month": "",
+        "Total Deaths": 1,
+        "No. Injured": 0,
+        "Total Damage (\'000 US$)": 30,
+        "Admin Units": '[{"adm1_code":999,"adm1_name":"Eastern Marches"}]',
+    },
+)
+
+
+def _emdat_row(**over) -> list:
+    """One EM-DAT row in `emdat.COLUMNS` order, with sensible fictional values."""
+    values = {
+        "DisNo.": "2006-0001-ZZ",
+        "Disaster Type": "Flood",
+        "Disaster Subtype": "Riverine flood",
+        "Start Year": 2006,
+        "Start Month": 3,
+        "Country": "Zzland",
+        "Admin Units": '[{"adm1_code":101,"adm1_name":"Northern Province"}]',
+        "Total Deaths": 12,
+        "No. Injured": 40,
+        "Total Damage (\'000 US$)": 450,
+    }
+    values.update(over)
+    return [values[c] for c in emdat.COLUMNS]
+
+# ---------------------------------------------------------------------------
+# Phase 4: geoBoundaries, partner records, EM-DAT
+# ---------------------------------------------------------------------------
+
+
+class TestGeoBoundaries(unittest.TestCase):
+    sample = (DATA / "geoboundaries_sample.geojson").read_bytes()
+
+    def test_parse_the_committed_sample(self):
+        regions = geoboundaries.parse(self.sample)
+        self.assertEqual(
+            [r.id for r in regions],
+            ["ZZ-ADM1-001", "ZZ-ADM1-002", "ZZ-ADM1-003"],
+        )
+        self.assertEqual(regions[0].name, "Northern Province")
+
+    def test_centroid_is_the_outer_rings_vertex_mean(self):
+        by_id = {r.id: r for r in geoboundaries.parse(self.sample)}
+        # A 0..2 square with a hole in the middle: the hole is not a vertex of
+        # the outer ring, so it cannot move the point.
+        self.assertEqual(
+            (by_id["ZZ-ADM1-001"].centroid_lat, by_id["ZZ-ADM1-001"].centroid_lon),
+            (1.0, 1.0),
+        )
+        # A 10..12 x 20..24 rectangle.
+        self.assertEqual(
+            (by_id["ZZ-ADM1-002"].centroid_lat, by_id["ZZ-ADM1-002"].centroid_lon),
+            (22.0, 11.0),
+        )
+        # Two islands, averaged together rather than the largest one taken.
+        self.assertEqual(
+            (by_id["ZZ-ADM1-003"].centroid_lat, by_id["ZZ-ADM1-003"].centroid_lon),
+            (2.0, 2.0),
+        )
+
+    def test_the_closing_vertex_is_not_counted_twice(self):
+        # A square whose corners are equally weighted has its centre at the
+        # middle; counting the repeated first vertex would drag it to a corner.
+        regions = geoboundaries.parse(make_geojson(n_regions=2))
+        self.assertEqual(
+            [(r.centroid_lat, r.centroid_lon) for r in regions], [(0.5, 0.5), (1.5, 1.5)]
+        )
+
+    def test_points_is_the_shape_open_meteo_asks_for(self):
+        points = geoboundaries.points(geoboundaries.parse(self.sample))
+        self.assertEqual(sorted(points), ["ZZ-ADM1-001", "ZZ-ADM1-002", "ZZ-ADM1-003"])
+        self.assertEqual(points["ZZ-ADM1-002"], (22.0, 11.0))
+
+    def test_a_feature_without_a_shape_id_is_schema_drift(self):
+        drifted = self.sample.replace(b'"shapeID"', b'"shape_id"')
+        with self.assertRaises(ConnectorError):
+            geoboundaries.parse(drifted)
+
+    def test_an_empty_collection_is_an_error(self):
+        with self.assertRaises(ConnectorError):
+            geoboundaries.parse(b'{"type": "FeatureCollection", "features": []}')
+        with self.assertRaises(ConnectorError):
+            geoboundaries.parse(b"not json at all")
+        with self.assertRaises(ConnectorError):
+            geoboundaries.parse(b'{"type": "Feature"}')
+
+    def test_a_duplicate_shape_id_is_an_error(self):
+        doubled = self.sample.replace(b"ZZ-ADM1-002", b"ZZ-ADM1-001")
+        with self.assertRaises(ConnectorError):
+            geoboundaries.parse(doubled)
+
+    def test_an_unsupported_geometry_is_named(self):
+        point = json.dumps({
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "properties": {"shapeID": "ZZ-ADM1-001", "shapeName": "A"},
+                "geometry": {"type": "Point", "coordinates": [1.0, 2.0]},
+            }],
+        }).encode()
+        with self.assertRaises(ConnectorError) as ctx:
+            geoboundaries.parse(point)
+        self.assertIn("Point", str(ctx.exception))
+
+    def test_the_release_names_the_tag_the_data_is_served_from(self):
+        self.assertEqual(geoboundaries.release_ref("gbOpen 6.0.0"), "6.0.0")
+        self.assertIn("6.0.0", geoboundaries.url_for("ZZ", "ADM1", "gbOpen 6.0.0"))
+        self.assertIn(
+            "geoBoundaries-ZZ-ADM1.geojson",
+            geoboundaries.url_for("zz", "adm1", "gbOpen 6.0.0"),
+        )
+        for bad in ("6.0.0", "gbHumanitarian 6.0.0", "", "latest"):
+            with self.subTest(release=bad), self.assertRaises(ConnectorError):
+                geoboundaries.release_ref(bad)
+
+    def test_the_url_template_can_be_overridden_for_a_mirror(self):
+        with mock.patch.dict(
+            os.environ, {geoboundaries.URL_ENV: "https://mirror.invalid/{ref}/{country}/{level}"}
+        ):
+            self.assertEqual(
+                geoboundaries.url_for("ZZ", "ADM1", "gbOpen 6.0.0"),
+                "https://mirror.invalid/6.0.0/ZZ/ADM1",
+            )
+
+    def test_load_pins_under_the_country_and_level(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            manifest = Manifest(path=root / "manifest.json")
+            blob = make_geojson(n_regions=3)
+            with mock.patch.object(geoboundaries, "fetch", lambda _url: blob):
+                regions = geoboundaries.load(
+                    "ZZ", "ADM1", "gbOpen 6.0.0", root, manifest
+                )
+            self.assertEqual(len(regions), 3)
+            key = "geoboundaries/ZZ/ADM1"
+            self.assertEqual(manifest.records[key].sha256, sha256_bytes(blob))
+            self.assertEqual(manifest.records[key].license, geoboundaries.LICENSE)
+            self.assertTrue(geoboundaries.cache_path(root, "ZZ", "ADM1").exists())
+            # Pinned: a second load must not fetch.
+            with mock.patch.object(geoboundaries, "fetch", _no_fetch):
+                again = geoboundaries.load(
+                    "ZZ", "ADM1", "gbOpen 6.0.0", root, manifest, allow_fetch=False
+                )
+            self.assertEqual(again, regions)
+
+    def test_an_unknown_admin_level_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(ConnectorError):
+                geoboundaries.load(
+                    "ZZ", "ADM3", "gbOpen 6.0.0", root, Manifest(path=root / "m.json")
+                )
+
+    def test_the_default_release_agrees_with_the_contract_modules_literal(self):
+        # `contracts` may not import a connector, so the constant is written
+        # twice; this is the tripwire that keeps the two copies equal.
+        self.assertEqual(
+            geoboundaries.DEFAULT_RELEASE, contracts_mod.GEOBOUNDARIES_RELEASE
+        )
+        self.assertEqual(
+            list(geoboundaries.ADMIN_LEVELS), list(contracts_mod.ADMIN_LEVELS)
+        )
+
+
+def _no_fetch(url, **_kw):
+    raise AssertionError(f"connector tried to download {url}")
+
+
+class TestNationalRecords(unittest.TestCase):
+    sample = (DATA / "national_records_sample.csv").read_bytes()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_agreed_schema_is_read(self):
+        c = make_pilot_contract()
+        records = national_records.parse(self.sample, c)
+        self.assertEqual(records.n_rows, 5)
+        self.assertEqual([e.event_id for e in records.events],
+                         ["ZZ-2006-0001", "ZZ-2006-0002", "ZZ-2007-0004"])
+        first = records.events[0]
+        self.assertEqual((first.year, first.month), (2006, 3))
+        self.assertEqual(first.region_ids, ("ZZ-ADM1-001",))
+        self.assertEqual((first.deaths, first.injuries), (2, 11))
+        self.assertEqual(first.damage_property_usd, 450_000.0)
+
+    def test_the_header_comment_carries_the_records_first_year(self):
+        self.assertEqual(national_records.read_start_year(self.sample), 2005)
+        self.assertIsNone(national_records.read_start_year(b"event_id,start_date\n"))
+
+    def test_a_hazard_value_outside_the_mapping_is_skipped_and_counted(self):
+        records = national_records.parse(self.sample, make_pilot_contract())
+        self.assertEqual(records.n_skipped_hazard, 2)
+        self.assertEqual(records.skipped_hazards, ("drought", "tropical_cyclone"))
+        # ...and the same file read under the drought contract finds that row.
+        drought = national_records.parse(
+            self.sample, make_pilot_contract(hazard="drought")
+        )
+        self.assertEqual([e.event_id for e in drought.events], ["ZZ-2008-0005"])
+        self.assertEqual(drought.n_skipped_hazard, 4)
+
+    def test_hazard_values_are_normalised_not_matched_literally(self):
+        # "Flash Flood" and "riverine flood" are the partner's spelling.
+        records = national_records.parse(self.sample, make_pilot_contract())
+        self.assertEqual(
+            [e.hazard for e in records.events],
+            ["flood", "flash_flood", "riverine_flood"],
+        )
+
+    def test_missing_columns_are_schema_drift(self):
+        drifted = self.sample.replace(b",damage_usd,", b",damage,")
+        with self.assertRaises(ConnectorError) as ctx:
+            national_records.parse(drifted, make_pilot_contract())
+        self.assertIn("damage_usd", str(ctx.exception))
+
+    def test_a_malformed_date_raises_rather_than_becoming_a_zero(self):
+        bad = self.sample.replace(b"2006-03-14", b"14/03/2006")
+        with self.assertRaises(ConnectorError):
+            national_records.parse(bad, make_pilot_contract())
+        worse = self.sample.replace(b",450000,", b",lots,")
+        with self.assertRaises(ConnectorError):
+            national_records.parse(worse, make_pilot_contract())
+
+    def test_a_hazard_with_no_global_mapping_is_refused(self):
+        c = make_pilot_contract()
+        object.__setattr__(c, "hazard", "dust_storm")
+        with self.assertRaises(ConnectorError):
+            national_records.parse(self.sample, c)
+
+    def test_load_pins_the_hash_and_copies_nothing(self):
+        path = self.dir / "records" / "zz_records.csv"
+        draft = make_pilot_contract()
+        sha = make_records_csv(path, draft, record_row(damage_usd=50_000))
+        contract = make_pilot_contract(sha256=sha)
+        manifest = Manifest(path=self.dir / "manifest.json")
+        records = national_records.load(path, contract, manifest)
+        self.assertEqual(len(records.events), 1)
+        key = "records/ZZ/zz_records.csv"
+        self.assertEqual(manifest.records[key].sha256, sha)
+        self.assertEqual(manifest.records[key].license, "partner data; not redistributed")
+        self.assertEqual(manifest.records[key].url, "")
+        # Nothing was written anywhere but the manifest the caller holds.
+        self.assertEqual(
+            sorted(p.name for p in self.dir.rglob("*") if p.is_file()),
+            ["zz_records.csv"],
+        )
+
+    def test_a_hash_mismatch_is_refused_and_names_both(self):
+        path = self.dir / "zz_records.csv"
+        draft = make_pilot_contract()
+        sha = make_records_csv(path, draft, record_row())
+        contract = make_pilot_contract(sha256=sha)
+        path.write_bytes(path.read_bytes() + b"# a later correction\n")
+        with self.assertRaises(ConnectorError) as ctx:
+            national_records.load(path, contract, Manifest(path=self.dir / "m.json"))
+        message = str(ctx.exception)
+        self.assertIn(sha, message)
+        self.assertIn(sha256_bytes(path.read_bytes()), message)
+
+    def test_a_missing_file_says_where_to_put_it(self):
+        contract = make_pilot_contract(sha256="a" * 64)
+        with self.assertRaises(ConnectorError) as ctx:
+            national_records.load(self.dir / "absent.csv", contract)
+        self.assertIn("never committed", str(ctx.exception))
+
+
+class TestEmdat(unittest.TestCase):
+    """The EM-DAT export, read as what it is: a zip of XML."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.crosswalk = emdat.parse_crosswalk(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        self.contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", record_start_year=2005
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_xlsx_is_read_with_the_standard_library_alone(self):
+        blob = emdat_xlsx([list(emdat.COLUMNS), _emdat_row()])
+        self.assertTrue(blob.startswith(b"PK"))
+        rows = list(emdat.rows(blob))
+        self.assertEqual(rows[0], list(emdat.COLUMNS))
+        self.assertEqual(len(rows), 2)
+
+    def test_inline_strings_read_the_same_as_shared_ones(self):
+        rows = [list(emdat.COLUMNS), _emdat_row()]
+        shared = list(emdat.rows(emdat_xlsx(rows, shared=True)))
+        inline = list(emdat.rows(emdat_xlsx(rows, shared=False)))
+        self.assertEqual(shared, inline)
+
+    def test_the_committed_sample_is_the_rows_this_file_documents(self):
+        # A binary fixture nobody can read is a fixture nobody can review.
+        rebuilt = emdat_xlsx(
+            [list(emdat.COLUMNS)] + [_emdat_row(**row) for row in EMDAT_SAMPLE_ROWS]
+        )
+        self.assertEqual(
+            list(emdat.rows((DATA / "emdat_sample.xlsx").read_bytes())),
+            list(emdat.rows(rebuilt)),
+        )
+
+    def test_the_committed_sample_parses(self):
+        blob = (DATA / "emdat_sample.xlsx").read_bytes()
+        records = emdat.parse(blob, self.contract, self.crosswalk)
+        self.assertEqual(records.n_rows, 4)
+        self.assertEqual([e.event_id for e in records.events],
+                         ["2006-0001-ZZ", "2006-0002-ZZ"])
+        self.assertEqual(records.countries, ("Zzland",))
+
+    def test_damage_is_converted_from_thousands_of_dollars(self):
+        records = emdat.parse(
+            (DATA / "emdat_sample.xlsx").read_bytes(), self.contract, self.crosswalk
+        )
+        self.assertEqual(records.events[0].damage_property_usd, 450_000.0)
+
+    def test_a_row_naming_two_admin_units_marks_both(self):
+        records = emdat.parse(
+            (DATA / "emdat_sample.xlsx").read_bytes(), self.contract, self.crosswalk
+        )
+        self.assertEqual(
+            records.events[1].region_ids, ("ZZ-ADM1-002", "ZZ-ADM1-003")
+        )
+
+    def test_another_disaster_type_is_skipped_and_counted(self):
+        records = emdat.parse(
+            (DATA / "emdat_sample.xlsx").read_bytes(), self.contract, self.crosswalk
+        )
+        self.assertEqual(records.n_skipped_hazard, 1)  # the tropical cyclone
+        cyclone = emdat.parse(
+            (DATA / "emdat_sample.xlsx").read_bytes(),
+            make_pilot_contract(hazard="tropical_cyclone", source="emdat",
+                                file="zz_emdat.xlsx"),
+            self.crosswalk,
+        )
+        self.assertEqual([e.event_id for e in cyclone.events], ["2007-0003-ZZ"])
+
+    def test_unmapped_admin_units_are_counted_never_guessed(self):
+        records = emdat.parse(
+            (DATA / "emdat_sample.xlsx").read_bytes(), self.contract, self.crosswalk
+        )
+        self.assertEqual(records.n_unmapped_units, 1)
+        self.assertEqual(records.unmapped_names, ("Eastern Marches",))
+        self.assertEqual(records.n_rows_unmapped, 1)
+        self.assertNotIn(
+            "2008-0004-ZZ", [e.event_id for e in records.events]
+        )
+        self.assertIn("not in the crosswalk", records.summary())
+
+    def test_a_missing_month_becomes_january_rather_than_a_crash(self):
+        rows = [list(emdat.COLUMNS),
+                _emdat_row(**{"Start Month": "", "DisNo.": "2009-0001-ZZ"})]
+        records = emdat.parse(emdat_xlsx(rows), self.contract, self.crosswalk)
+        self.assertEqual(records.events[0].month, 1)
+
+    def test_admin_units_accept_both_json_and_python_quoting(self):
+        self.assertEqual(
+            emdat.admin_names('[{"adm1_name": "Northern Province"}]', "ADM1"),
+            (["Northern Province"], 1),
+        )
+        self.assertEqual(
+            emdat.admin_names("[{'adm2_name': 'Somewhere District'}]", "ADM2"),
+            (["Somewhere District"], 1),
+        )
+        self.assertEqual(emdat.admin_names("", "ADM1"), ([], 0))
+        self.assertEqual(emdat.admin_names("not a list", "ADM1"), ([], 0))
+        # An ADM1 contract cannot use an ADM2-only row.
+        self.assertEqual(
+            emdat.admin_names('[{"adm2_name": "Somewhere District"}]', "ADM1"), ([], 1)
+        )
+
+    def test_a_renamed_column_is_schema_drift(self):
+        header = [c if c != "Total Deaths" else "Deaths" for c in emdat.COLUMNS]
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.parse(emdat_xlsx([header, _emdat_row()]), self.contract, self.crosswalk)
+        self.assertIn("Total Deaths", str(ctx.exception))
+
+    def test_a_csv_export_is_refused_by_name(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.parse(b"DisNo.,Disaster Type\n", self.contract, self.crosswalk)
+        self.assertIn(".xlsx", str(ctx.exception))
+
+    def test_the_crosswalk_is_committed_and_required(self):
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.load_crosswalk(self.dir / "zz_emdat_regions.csv")
+        self.assertIn("written down by a person", str(ctx.exception))
+        self.assertEqual(
+            emdat.crosswalk_path(self.dir, "ZZ").name, "zz_emdat_regions.csv"
+        )
+        with self.assertRaises(ConnectorError):
+            emdat.parse_crosswalk(b"name,id\nA,B\n")
+        with self.assertRaises(ConnectorError):
+            emdat.parse_crosswalk(b"emdat_name,shape_id\nA,B\nA,C\n")
+
+    def test_load_pins_only_the_hash_and_refuses_other_bytes(self):
+        blob = (DATA / "emdat_sample.xlsx").read_bytes()
+        path = self.dir / "records" / "zz_emdat.xlsx"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(blob)
+        (self.dir / "records" / "zz_emdat_regions.csv").write_bytes(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        contract = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", sha256=sha256_bytes(blob)
+        )
+        manifest = Manifest(path=self.dir / "manifest.json")
+        records = emdat.load(path, contract, manifest, snapshot_dir=self.dir)
+        self.assertEqual(len(records.events), 2)
+        key = "emdat/ZZ/zz_emdat.xlsx"
+        self.assertEqual(manifest.records[key].sha256, sha256_bytes(blob))
+        self.assertIn("redistribut", manifest.records[key].license)
+
+        path.write_bytes(blob + b"\n")
+        with self.assertRaises(ConnectorError) as ctx:
+            emdat.load(path, contract, manifest, snapshot_dir=self.dir)
+        self.assertIn(contract.ground_truth["sha256"], str(ctx.exception))

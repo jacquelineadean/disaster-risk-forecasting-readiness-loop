@@ -17,7 +17,9 @@ from readiness import data as data_mod
 from readiness.connectors import (
     census,
     climada_layer,
+    connector_for_key,
     gazetteer,
+    geoboundaries,
     nri,
     nws_zones,
     open_meteo,
@@ -26,7 +28,16 @@ from readiness.connectors import (
 from readiness.connectors.base import ConnectorError, Manifest, SourceRecord, sha256_bytes
 from readiness.harness import features as F
 from readiness.harness.labels import diagnose
-from tests.fixtures import STATE_FIPS, make_contract, make_panel
+from tests.fixtures import (
+    STATE_FIPS,
+    make_contract,
+    make_geojson,
+    make_panel,
+    make_pilot_contract,
+    make_records_csv,
+    record_row,
+    shape_id,
+)
 
 DATA = pathlib.Path(__file__).resolve().parent / "data"
 
@@ -477,5 +488,180 @@ class TestPinnedWithFeatures(FeatureSnapshotCase):
         self.assertEqual(data_mod.era5_parts(self.c, ["99"]), ["99"])
 
 
+
+# ---------------------------------------------------------------------------
+# Phase 4: the same seam, dispatched on the contract's sources
+# ---------------------------------------------------------------------------
+
+
+class PilotSnapshotCase(unittest.TestCase):
+    """A temporary snapshot laid out for a pilot, as the connectors would leave it.
+
+    geoBoundaries in its cache path, the partner record where `data.records_path`
+    looks for it, and a manifest pinning both by their real hashes — so `build`
+    finds nothing missing and never reaches for `fetch`.
+    """
+
+    hazard = "inland_flood"
+    source = "national_records"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.geojson = make_geojson(n_regions=3)
+        draft = make_pilot_contract(hazard=self.hazard)
+        self.records_file = self.root / "records" / "zz_records.csv"
+        sha = make_records_csv(
+            self.records_file,
+            draft,
+            record_row(event_id="E1", start_date="2006-08-14", region_id=shape_id(0),
+                       damage_usd=50_000),
+            record_row(event_id="E2", start_date="2006-09-02", region_id=shape_id(0),
+                       damage_usd=1_000_000),
+            record_row(event_id="E3", start_date="2007-02-11", region_id=shape_id(2),
+                       deaths=1),
+            record_row(event_id="E4", start_date="2007-02-11", region_id=shape_id(1),
+                       damage_usd=10),                       # harmless
+            record_row(event_id="E5", start_date="2008-05-01", region_id=shape_id(1),
+                       hazard="tornado", damage_usd=900_000),  # another hazard
+        )
+        self.c = make_pilot_contract(
+            hazard=self.hazard, sha256=sha,
+            splits={"train": [2005, 2006], "validate": [2007, 2007], "test": [2008, 2008]},
+        )
+        gb = geoboundaries.cache_path(self.root, "ZZ", "ADM1")
+        gb.parent.mkdir(parents=True, exist_ok=True)
+        gb.write_bytes(self.geojson)
+        manifest = Manifest(path=self.root / "manifest.json")
+        manifest.add(
+            data_mod.regions_key(self.c), record("geoboundaries", sha256_bytes(self.geojson))
+        )
+        manifest.add(data_mod.records_key(self.c), record("records", sha))
+        manifest.save()
+        self.patches = [
+            mock.patch.object(geoboundaries, "fetch", no_fetch),
+            mock.patch.object(census, "fetch", no_fetch),
+            mock.patch.object(storm_events, "fetch", no_fetch),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def build(self, contract=None):
+        return data_mod.build(contract or self.c, snapshot_dir=self.root)
+
+
+class TestBuildDispatchesOnSources(PilotSnapshotCase):
+    def test_the_pilot_path_builds_a_dense_panel_over_geoboundaries_regions(self):
+        ds = self.build()
+        self.assertEqual([r.id for r in ds.regions],
+                         [shape_id(i) for i in range(3)])
+        self.assertEqual([r.name for r in ds.regions],
+                         ["Region 1", "Region 2", "Region 3"])
+        self.assertEqual(len(ds.panel), 3 * 4 * 4)   # 3 regions x 4 years x 4 quarters
+        self.assertEqual(
+            sorted(u for u, y in ds.panel if y == 1),
+            [(shape_id(0), 2006, 3), (shape_id(2), 2007, 1)],
+        )
+
+    def test_the_diagnostics_count_the_other_hazards_rows(self):
+        d = self.build().diagnostics
+        self.assertEqual(d.n_skipped_hazard, 1)      # the tornado row
+        self.assertEqual(d.n_events, 4)
+        self.assertEqual(d.n_damaging, 3)            # two of them share one cell
+        self.assertEqual(d.n_zone_coded, 0)
+        self.assertIn("other hazards", d.format())
+
+    def test_input_keys_are_the_region_file_and_the_record(self):
+        self.assertEqual(
+            data_mod.input_keys(self.c),
+            ["geoboundaries/ZZ/ADM1", "records/ZZ/zz_records.csv"],
+        )
+        ds = self.build()
+        self.assertEqual(ds.data_version, ds.manifest.digest(data_mod.input_keys(self.c)))
+        self.assertEqual(ds.provenance()["inputs"], data_mod.input_keys(self.c))
+        self.assertEqual(ds.provenance()["scope"], "ZZ:all")
+        json.dumps(ds.provenance())   # it goes onto a card
+
+    def test_every_input_resolves_to_a_globally_available_connector(self):
+        for key in data_mod.input_keys(self.c):
+            with self.subTest(key=key):
+                self.assertTrue(connector_for_key(key).global_coverage, key)
+
+    def test_a_pilot_snapshot_is_pinned(self):
+        self.assertTrue(data_mod.pinned(self.c, self.root))
+
+    def test_a_record_that_no_longer_matches_its_hash_is_not_pinned(self):
+        self.records_file.write_bytes(self.records_file.read_bytes() + b"# edit\n")
+        self.assertFalse(data_mod.pinned(self.c, self.root))
+        with self.assertRaises(ConnectorError) as ctx:
+            self.build()
+        self.assertIn("different contract", str(ctx.exception))
+
+    def test_a_missing_boundary_file_is_not_pinned(self):
+        geoboundaries.cache_path(self.root, "ZZ", "ADM1").unlink()
+        self.assertFalse(data_mod.pinned(self.c, self.root))
+
+    def test_the_us_path_is_untouched_by_the_dispatch(self):
+        # The same assertion `TestBuild` makes, restated here: dispatching on
+        # the contract's sources did not move the census/storm-events branch.
+        us = make_contract(splits=SPLITS)
+        self.assertEqual(
+            data_mod.input_keys(us),
+            [data_mod.CENSUS_KEY] + [data_mod.storm_events_key(y) for y in us.all_years()],
+        )
+        self.assertEqual(data_mod.era5_parts(us, ["99"]), ["99"])
+        self.assertEqual(data_mod.era5_parts(self.c, []), ["ZZ"])
+
+    def test_a_us_only_feature_connector_is_refused_for_a_pilot(self):
+        with self.assertRaises(ValueError) as ctx:
+            data_mod.build(self.c, snapshot_dir=self.root, features=["terrain"])
+        self.assertIn("US-only", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            data_mod.build(self.c, snapshot_dir=self.root, features=["nri"])
+
+
+class TestEmdatDispatch(PilotSnapshotCase):
+    """The other ground truth, through the same seam."""
+
+    def setUp(self):
+        super().setUp()
+        blob = (DATA / "emdat_sample.xlsx").read_bytes()
+        export = self.root / "records" / "zz_emdat.xlsx"
+        export.write_bytes(blob)
+        (self.root / "records" / "zz_emdat_regions.csv").write_bytes(
+            (DATA / "zz_emdat_regions.csv").read_bytes()
+        )
+        self.c = make_pilot_contract(
+            source="emdat", file="zz_emdat.xlsx", sha256=sha256_bytes(blob),
+            record_start_year=2000,
+            splits={"train": [2005, 2006], "validate": [2007, 2007], "test": [2008, 2008]},
+        )
+        manifest = Manifest.load(self.root / "manifest.json")
+        manifest.add(data_mod.regions_key(self.c),
+                     record("geoboundaries", sha256_bytes(self.geojson)))
+        manifest.add(data_mod.records_key(self.c), record("emdat", sha256_bytes(blob)))
+        manifest.save()
+
+    def test_the_export_and_the_crosswalk_build_the_panel(self):
+        ds = self.build()
+        self.assertEqual(data_mod.input_keys(self.c),
+                         ["geoboundaries/ZZ/ADM1", "emdat/ZZ/zz_emdat.xlsx"])
+        self.assertEqual(
+            sorted(u for u, y in ds.panel if y == 1),
+            [(shape_id(0), 2006, 1), (shape_id(1), 2006, 3), (shape_id(2), 2006, 3)],
+        )
+        self.assertTrue(data_mod.pinned(self.c, self.root))
+
+    def test_without_the_crosswalk_the_build_refuses_rather_than_guessing(self):
+        (self.root / "records" / "zz_emdat_regions.csv").unlink()
+        self.assertFalse(data_mod.pinned(self.c, self.root))
+        with self.assertRaises(ConnectorError) as ctx:
+            self.build()
+        self.assertIn("written down by a person", str(ctx.exception))
 if __name__ == "__main__":
     unittest.main()
