@@ -28,6 +28,9 @@ from readiness.connectors.base import Manifest
 from readiness.connectors.census import County
 from readiness.harness.contract import Check
 from readiness.harness.labels import diagnose
+from readiness.plans import gap_report as gap_report_mod
+from readiness.plans import reviews as reviews_mod
+from tests import fixtures_plans
 from tests.fixtures import make_panel
 from tests.test_features import FakeStatic
 from tests.test_issue import CANDIDATE, with_regions
@@ -1203,6 +1206,423 @@ class TestVerifyPhase2(Phase2Case):
         code, out = self.run_cli("verify", "--phase", "2")
         self.assertEqual(code, 1)
         self.assertIn("0/0 registered with scope 'every region'", out)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: scenarios, gap-report, review, verify --phase 3
+# ---------------------------------------------------------------------------
+
+
+class Phase3Case(CliCase):
+    """A temporary facility record, issued tree, reports tree and reviews tree."""
+
+    def setUp(self):
+        super().setUp()
+        self.issued_dir = self.dir / "issued"
+        self.reports_dir = self.dir / "reports"
+        self.reviews_dir = self.dir / "reviews"
+        fixtures_plans.make_issued().write(self.issued_dir)
+        self.facility = fixtures_plans.write_facility(self.dir / "facility.json")
+        self.env3 = mock.patch.dict(os.environ, {
+            issue_mod.ISSUED_DIR_ENV: str(self.issued_dir),
+            gap_report_mod.REPORTS_DIR_ENV: str(self.reports_dir),
+            reviews_mod.REVIEWS_DIR_ENV: str(self.reviews_dir),
+            data_mod.EXPERIMENTS_DIR_ENV: str(self.dir / "experiments"),
+        })
+        self.env3.start()
+
+    def tearDown(self):
+        self.env3.stop()
+        super().tearDown()
+
+    def gap_report(self, *extra, facility=None, period="2026-Q4"):
+        return self.run_cli(
+            "gap-report", "--facility", str(facility or self.facility),
+            "--period", period, *extra,
+        )
+
+
+class TestScenariosCommand(CliCase):
+    def test_list_prints_ids_titles_and_question_counts(self):
+        code, out = self.run_cli("scenarios", "list")
+        self.assertEqual(code, 0, out)
+        self.assertIn("96h-isolation-acute-care", out)
+        self.assertIn("6 question(s)", out)
+        self.assertIn("96-hour isolation of an acute-care facility", out)
+        self.assertIn("plans/scenarios/96h-isolation-acute-care.md", out)
+        for question_id in ("q1", "q2", "q3", "q4", "q5", "q6"):
+            self.assertIn(question_id, out)
+
+    def test_check_with_no_case_study_passes_and_says_why(self):
+        code, out = self.run_cli("scenarios", "check")
+        self.assertEqual(code, 0, out)
+        self.assertIn("none committed", out)
+        self.assertIn("published investigation", out)
+
+    def test_check_runs_a_directory_of_case_studies(self):
+        studies = self.dir / "case-studies"
+        fixtures_plans.write_case_study(studies / "synthetic.json")
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 0, out)
+        self.assertIn("synthetic-river-flood", out)
+        self.assertIn("1/1 case study/studies reproduce", out)
+
+    def test_check_exits_1_on_a_mismatch(self):
+        studies = self.dir / "case-studies"
+        study = fixtures_plans.synthetic_case_study()
+        study["expected_findings"]["q1"] = "answered"
+        fixtures_plans.write_case_study(studies / "synthetic.json", **study)
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL]", out)
+        self.assertIn("q1: expected 'answered', rules said 'failed'", out)
+
+    def test_a_scenario_that_cannot_be_read_is_exit_2_not_a_traceback(self):
+        from readiness.plans import scenarios as scenarios_mod
+
+        broken = self.dir / "scenarios"
+        broken.mkdir(parents=True, exist_ok=True)
+        (broken / "broken.json").write_text("null", encoding="utf-8")
+        with mock.patch.object(scenarios_mod, "SCENARIOS_DIR", broken):
+            code, out = self.run_cli("scenarios", "list")
+        self.assertEqual(code, 2, out)
+        self.assertIn("expected a JSON object", out)
+
+    def test_a_case_study_that_is_not_an_object_is_exit_1_not_a_traceback(self):
+        studies = self.dir / "case-studies"
+        studies.mkdir(parents=True, exist_ok=True)
+        (studies / "null.json").write_text("null", encoding="utf-8")
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1, out)
+        self.assertIn("expected a JSON object", out)
+
+    def test_check_exits_1_on_a_fact_without_a_source(self):
+        studies = self.dir / "case-studies"
+        fixtures_plans.write_case_study(
+            studies / "synthetic.json", event={"text": "something happened"}
+        )
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1)
+        self.assertIn("a fact without a source does not belong", out)
+
+
+class TestGapReportCommand(Phase3Case):
+    def blinded_path(self, slug="test-facility") -> pathlib.Path:
+        label = fixtures_plans.make_facility(slug=slug).blind_label
+        return self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+
+    def test_it_writes_three_files_and_prints_every_status(self):
+        code, out = self.gap_report()
+        self.assertEqual(code, 0, out)
+        directory = self.reports_dir / "test-facility"
+        for name in ("2026-Q4.html", "2026-Q4.json"):
+            self.assertTrue((directory / name).exists(), name)
+        self.assertTrue(self.blinded_path().exists())
+        self.assertFalse((directory / "2026-Q4.blind.html").exists())
+        for question_id in ("q1", "q2", "q3", "q4", "q5", "q6"):
+            self.assertIn(question_id, out)
+        self.assertIn("blinded sha256", out)
+        self.assertIn("A practising emergency manager reviews every finding", out)
+        self.assertIn("readiness review record --report", out)
+
+    def test_the_written_json_validates_and_names_nothing_below_a_county(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        path = self.reports_dir / "test-facility" / "2026-Q4.json"
+        doc = cite.from_json(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc.kind, gap_report_mod.KIND)
+        self.assertEqual(gap_report_mod.forbidden_keys(cite.to_dict(doc)), [])
+        text = " ".join(cite.strip_markers(s.text) for s in doc.sentences)
+        self.assertIn(cite.NOT_A_WARNING_SENTENCE, text)
+
+    def test_the_blinded_render_names_neither_the_facility_nor_a_partner(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        path = self.blinded_path()
+        page = path.read_text()
+        self.assertNotIn("test-facility", page)
+        self.assertNotIn("Far Ridge Hospital", page)
+        self.assertNotIn(fixtures_plans.COUNTY, page)
+        self.assertIn("FACILITY-", page)
+        self.assertIn("PARTNER-1", page)
+        self.assertIn("COUNTY-A", page)
+        # Nothing under blinded/ carries the slug, in a path or anywhere else.
+        self.assertNotIn(
+            "test-facility", str(path.relative_to(self.reports_dir))
+        )
+
+    def test_a_period_that_is_not_a_period_is_refused_with_exit_2(self):
+        for period in ("../../case-studies/leaked", "not/a/period", "2026-q4"):
+            with self.subTest(period=period):
+                code, out = self.gap_report("--period", period)
+                self.assertEqual(code, 2, out)
+                self.assertIn("is not a period label", out)
+                self.assertFalse(self.reports_dir.exists())
+
+    def test_rerunning_the_command_does_not_move_the_blinded_sha(self):
+        # Finding 17: the sha covered `generated_at`, so re-running with
+        # identical inputs orphaned every review of the report.
+        self.assertEqual(self.gap_report()[0], 0)
+        first = reviews_mod.sha256_of(self.blinded_path())
+        self.assertEqual(self.gap_report()[0], 0)
+        self.assertEqual(reviews_mod.sha256_of(self.blinded_path()), first)
+
+    def test_gap_report_refuses_unknown_fields(self):
+        broken = self.dir / "broken.json"
+        raw = fixtures_plans.facility_dict()
+        raw["sprinklers"] = True
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("unknown field 'sprinklers'", out)
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_gap_report_refuses_an_address_with_the_reason(self):
+        broken = self.dir / "addressed.json"
+        raw = fixtures_plans.facility_dict()
+        raw["address"] = "1 Example Street"
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("'address' is refused", out)
+        self.assertIn("Elevation Certificate", out)
+
+    def test_gap_report_refuses_a_record_missing_evidence(self):
+        broken = self.dir / "unevidenced.json"
+        raw = fixtures_plans.facility_dict()
+        del raw["evidence"]["power.fuel_hours"]
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("no evidence entry names it", out)
+
+    def test_gap_report_refuses_an_unknown_scenario(self):
+        code, out = self.gap_report("--scenario", "no-such-scenario")
+        self.assertEqual(code, 2)
+        self.assertIn("no-such-scenario", out)
+
+    def test_a_missing_intensity_reports_cannot_run_naming_the_document(self):
+        path = fixtures_plans.write_facility(
+            self.dir / "no-elevation.json", slug="no-elevation",
+            **{"design_intensity.flood_elevation_ft": None},
+        )
+        code, out = self.gap_report(facility=path)
+        self.assertEqual(code, 0, out)
+        self.assertIn("q1  cannot_run", out)
+        doc = cite.from_json(
+            (self.reports_dir / "no-elevation" / "2026-Q4.json").read_text()
+        )
+        text = " ".join(cite.strip_markers(s.text) for s in doc.sentences)
+        self.assertIn("cannot be run for the electrical equipment", text)
+        guidance = {c.source.ref for c in doc.claims if c.source.kind == "guidance"}
+        self.assertIn("fema-elevation-certificate", guidance)
+
+    def test_out_writes_elsewhere(self):
+        elsewhere = self.dir / "elsewhere"
+        code, out = self.gap_report("--out", str(elsewhere))
+        self.assertEqual(code, 0, out)
+        self.assertTrue((elsewhere / "test-facility" / "2026-Q4.json").exists())
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_a_document_with_a_violation_exits_1_and_prints_every_one(self):
+        # The local drafter cannot produce a violating document — that is the
+        # point of it — so the refusal is injected to check what the command
+        # does with one: exit 1, print the rules broken, write nothing.
+        violations = [
+            cite.Violation(cite.UNCITED, 3, "no claim cited: 'Evacuate now.'"),
+            cite.Violation(cite.NUMBER_WITHOUT_CLAIM, 4, "'44' is not a cited value"),
+        ]
+        refusal = gap_report_mod.GapReportRefused(violations, "refusing to write")
+        with mock.patch.object(gap_report_mod, "write", side_effect=refusal):
+            code, out = self.gap_report()
+        self.assertEqual(code, 1)
+        self.assertIn("not written", out)
+        self.assertIn(cite.UNCITED, out)
+        self.assertIn(cite.NUMBER_WITHOUT_CLAIM, out)
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_the_drafter_choices_are_local_and_claude(self):
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["gap-report", "--facility", "f", "--period", "2026-Q4",
+                               "--drafter", "gpt"])
+        args = parser.parse_args(["gap-report", "--facility", "f", "--period",
+                                  "2026-Q4", "--drafter", "claude"])
+        self.assertEqual(args.drafter, "claude")
+
+
+class TestReviewCommand(Phase3Case):
+    def blind_path(self) -> pathlib.Path:
+        self.assertEqual(self.gap_report()[0], 0)
+        label = fixtures_plans.make_facility(slug="test-facility").blind_label
+        return self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+
+    def test_it_records_a_rating_against_the_report_sha(self):
+        blind = self.blind_path()
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind), "--rating", "very useful",
+            "--role", "practising emergency manager", "--org-type", "county",
+            "--years", "12", "--comments", "found the seam finding useful",
+        )
+        self.assertEqual(code, 0, out)
+        sha = reviews_mod.sha256_of(blind)
+        written = sorted(self.reviews_dir.glob("*.json"))
+        self.assertEqual(len(written), 1)
+        path = written[0]
+        self.assertTrue(path.name.startswith(sha[:16] + "-"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["report_sha256"], sha)
+        self.assertEqual(record["rating"], "very useful")
+        self.assertTrue(record["blinded"])
+        self.assertRegex(record["facility_label"], r"^FACILITY-[0-9a-f]{12}$")
+        self.assertNotIn("test-facility", json.dumps(record))
+        self.assertIn("attestation", out)
+
+    def test_a_directory_passed_as_the_report_is_a_refusal_not_a_traceback(self):
+        blind = self.blind_path()
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind.parent), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "hospital",
+            "--years", "5",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be read", out)
+
+    def test_it_refuses_a_page_that_is_not_a_blinded_render(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        named = self.reports_dir / "test-facility" / "2026-Q4.html"
+        code, out = self.run_cli(
+            "review", "record", "--report", str(named), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "hospital",
+            "--years", "5",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not a blinded render", out)
+        self.assertFalse(self.reviews_dir.exists())
+
+    def test_the_rating_and_org_vocabularies_are_closed_in_the_parser(self):
+        parser = cli.build_parser()
+        base = ["review", "record", "--report", "r", "--role", "x",
+                "--org-type", "hospital", "--years", "1"]
+        parser.parse_args(base + ["--rating", "not useful"])
+        for bad in (["--rating", "brilliant"],
+                    ["--rating", "useful", "--org-type", "consultancy"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                parser.parse_args(base + bad)
+
+    def test_reviews_writes_elsewhere(self):
+        blind = self.blind_path()
+        elsewhere = self.dir / "elsewhere"
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "ngo",
+            "--years", "7", "--reviews", str(elsewhere),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(list(elsewhere.glob("*.json"))), 1)
+        self.assertFalse(self.reviews_dir.exists())
+
+
+class TestVerifyPhase3(Phase3Case):
+    def test_verify_phase3_takes_no_contract_and_reports_every_check(self):
+        code, out = self.run_cli("verify", "--phase", "3")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 3 exit criteria  (the gap reports and their reviews)", out)
+        for name in ("reviews", "reports", "case studies", "no coordinates"):
+            self.assertIn(name, out)
+        self.assertIn("attestation", out)
+
+    def test_verify_phase3_refuses_a_contract_rather_than_ignoring_it(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "3")
+        self.assertEqual(code, 2)
+        self.assertIn("takes no contract", out)
+
+    def test_verify_phase3_reads_the_directories_it_is_given(self):
+        for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
+            path = fixtures_plans.write_facility(self.dir / f"{slug}.json", slug=slug)
+            self.assertEqual(self.gap_report(facility=path)[0], 0)
+            label = fixtures_plans.make_facility(slug=slug).blind_label
+            blind = self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+            self.assertEqual(self.run_cli(
+                "review", "record", "--report", str(blind), "--rating", "useful",
+                "--role", "practising emergency manager", "--org-type", "county",
+                "--years", "9",
+            )[0], 0)
+        code, out = self.run_cli(
+            "verify", "--phase", "3", "--reports", str(self.reports_dir),
+            "--reviews", str(self.reviews_dir),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.rstrip().endswith("Phase 3 exit criteria met."))
+        self.assertIn("3/3 distinct facility", out)
+        # The output is pasted into pull requests: it may not pair a blinded
+        # label with the slug of the building it belongs to.
+        for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
+            self.assertNotIn(slug, out.split("reports", 1)[1])
+
+    def test_the_phase_flag_accepts_zero_to_three(self):
+        parser = cli.build_parser()
+        for phase in (0, 1, 2, 3):
+            self.assertEqual(parser.parse_args(
+                ["verify", "--phase", str(phase)]).phase, phase)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["verify", "--phase", "4"])
+
+
+class TestNoCommittedPlansJsonHasAddressOrLatLon(unittest.TestCase):
+    """The tripwire, over the committed tree, in the suite rather than in review."""
+
+    def test_no_committed_plans_json_has_address_or_latlon(self):
+        root = pathlib.Path(cli.data_mod.REPO_ROOT) / "plans"
+        scanned = 0
+        for path in sorted(root.rglob("*.json")):
+            scanned += 1
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(path=str(path)):
+                self.assertEqual(gap_report_mod.forbidden_keys(payload), [])
+        self.assertGreaterEqual(scanned, 3)
+
+    def test_the_scan_catches_a_place_in_a_value_as_well_as_a_key(self):
+        # Otherwise the tripwire above is vacuous over a tree whose keys
+        # nothing constrains: a case study is committed, and its free text is
+        # where an address actually ends up.
+        for payload, where in (
+            ({"event": {"text": "A flood at 412 Riverside Drive."}}, "a street address"),
+            ({"sources": [{"note": "27834-1234"}]}, "a ZIP+4"),
+            ({"event": "35.6127, -77.3664"}, "a coordinate pair"),
+            ({"note": "ZIP 27834"}, "the token ZIP"),
+            ({"Lat": "35.9"}, "a case-variant key"),
+        ):
+            with self.subTest(where=where):
+                self.assertTrue(gap_report_mod.forbidden_keys(payload), where)
+        # A bare five-digit number is a county FIPS.
+        self.assertEqual(
+            gap_report_mod.forbidden_keys({"event": {"text": "county 27834"}}), []
+        )
+
+    def test_the_only_committed_facility_is_the_fictional_example(self):
+        # git, not a glob: a glob over the working tree both misses what would
+        # be committed (a subdirectory, a .JSON) and trips over the planner's
+        # own, correctly ignored, records.
+        from tests.test_facility import tracked
+
+        self.assertEqual(
+            tracked("plans/facilities"),
+            ["plans/facilities/README.md",
+             "plans/facilities/example-rural-hospital.json"],
+        )
+
+    def test_no_report_or_review_is_committed(self):
+        from tests.test_facility import ignored, tracked
+
+        self.assertEqual(tracked("plans/reports"), ["plans/reports/README.md"])
+        self.assertEqual(tracked("plans/reviews"), ["plans/reviews/README.md"])
+        for path in ("plans/reports/slug/2026-Q4.html",
+                     "plans/reports/blinded/FACILITY-abc/2026-Q4.blind.html",
+                     "plans/reports/notes.md",
+                     "plans/reviews/2026/deadbeef.json",
+                     "plans/reviews/review.JSON"):
+            with self.subTest(path=path):
+                self.assertTrue(ignored(path), f"{path} would be committed")
 
 
 if __name__ == "__main__":

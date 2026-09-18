@@ -16,8 +16,8 @@ step-by-step tour with screenshots and a recording of a real run, see
 [website](#the-website), which walks through the design and runs the real
 code in your browser.
 
-**Status: Phase 0 complete; Phases 1 and 2 built; their exits need the
-real-data run.** The eval plane is built and its Phase 0 exit criteria are
+**Status: Phase 0 complete; Phases 1–3 built; their exits need the data run
+and, for Phase 3, the blinded reviews.** The eval plane is built and its Phase 0 exit criteria are
 met on real NOAA data. The whole loop is *contract-driven*: the hazard, the
 geography, the forecast period, the damage definition, the locked splits and
 the acceptance thresholds are all declared in a registered contract, and the
@@ -45,6 +45,25 @@ a card, an issued file, a pinned extract or a named guidance document, and
 which is written only when `readiness.cite` finds no violation
 ([docs/brief.md](docs/brief.md)). Its exit — four hazards passing
 nationally, ten spot-checked counties — needs the same real-data run.
+
+Phase 3 turns a county's risk into a document about one building:
+`readiness gap-report` stress-tests a facility's emergency plan against a
+hazard-agnostic 96-hour scenario, the facility's own record (no address or
+coordinate field exists — design intensity comes from the planner's
+elevation certificate or FIRM, cited as a facility document; both keys and
+string values are scanned for places) and the county's issued risk layer,
+answering each scenario question `answered`, `unanswered`, `failed` or
+`cannot_run`, fail-closed when the design intensity is missing. It is
+validated by the same `readiness.cite` rules and rendered twice: the plain
+page with a legend, and a blinded one under `blinded/<label>/` carrying no
+slug, no names, no county and no timestamp, because no rule ever writes a
+name — sentences say `PARTNER-1` and `COUNTY-A`, the names live in the claims
+they cite, and the render refuses rather than ship a page that still holds
+one. Real facility files and reports never enter git. `readiness review
+record` binds a practising emergency manager's rating to the sha256 of the
+blinded report they read. Its exit — three real facilities' blinded gap
+reports rated useful or better — needs both the data run and those reviews
+([docs/plans.md](docs/plans.md)).
 
 ---
 
@@ -519,7 +538,10 @@ readiness exposure show     print CountyExposure rows from the pinned extracts  
 readiness exposure spot-check  ours / assessor for every row of exposure_expected/assessor_counts.csv; exit 1 below ten in-band counties from three states  [--counts PATH]
 readiness issue MODEL       refit the promoted model, write issued/<contract>/<period>.json; exit 2 on a refusal  -c NAME --period YYYY-Qn|YYYY-Mnn|YYYY [--features ...] [--param k=v]* [--reissue]
 readiness brief             one cited, validated brief per county; exit 1 listing the violations  (--county FIPS | --state XX) --period YYYY-Qn [--out DIR]
-readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2] [--replay] [--bless]
+readiness scenarios         list the scenario library, or check every case study against its expected findings  {list|check} [--case-studies DIR]
+readiness gap-report        one cited, blinded gap report for a facility; exit 1 listing violations, exit 2 unreadable  --facility PATH --period YYYY-Qn [--scenario ID] [--out DIR] [--drafter local|claude]
+readiness review record     bind a rating to a blinded report's sha256, plans/reviews/<sha16>-<digest12>.json  --report PATH.blind.html --rating {not useful,somewhat useful,useful,very useful} --role ROLE --org-type hospital|county|state|ngo|other --years N [--comments TEXT] [--reviews DIR]
+readiness verify            check a phase's exit criteria  [-c NAME] [--phase 0|1|2|3] [--replay] [--bless] [--reports DIR] [--reviews DIR]
 readiness dashboard         render a contract's ledger as a static HTML page  [-c NAME | --all]
 readiness report            rebuild the static research report
 readiness mcp               run the read-only MCP data server on stdio  [-c NAME]
@@ -573,7 +595,8 @@ readiness/
   contracts.py       the contract schema, validation, digest and registry. Do not edit while iterating.
   config.py          harness-wide policy: the hazard catalogue, record start, canary ceilings
   data.py            builds a contract's dataset: snapshot, panel, provenance; input_keys/pinned
-  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only), phase2
+  verify.py          the exit criteria as a library: phase0 (fingerprints, canary), phase1 (ledger-only),
+                     phase2, phase3 (reviews, reports, case studies, no coordinates)
   backtest.py        the Phase 1 report, rendered from committed files only
   fleet.py           the loop over every registered contract in turn, and --status from the ledgers
   issue.py           refit the promoted model, write the issued probabilities per county; parse_period/period_label
@@ -587,9 +610,13 @@ readiness/
                      features.py (the feature channel and its temporal firewall)
   engine/            proposable models: climatologies, persistence, the canary target,
                      features.py (the catalogue), history.py, linear.py, boosting.py, calibrate.py
-  agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude)
+  agent/             orchestrator, subagent definitions, guard.py (the integrity guard around --backend claude),
+                     agent/planner.py (optional Claude Agent SDK drafter for `readiness gap-report --drafter claude`)
   dashboard.py       the ledger rendered as a self-contained HTML page
   cli.py             the `readiness` command
+readiness/plans/     facility record, scenario rules, the risk layer, gap report and its blinding,
+                     reviews, case-study checks — the Phase 3 package; see docs/plans.md. Not the same
+                     directory as plans/ below, which is committed data, not code.
 contracts/           registered contracts, one JSON file each; three examples and six national ship
 experiments/         one directory per contract: ledger, anchor, test-touch budget
 issued/              what `readiness issue` writes: issued/<contract>/<period>.json, one probability per
@@ -600,14 +627,17 @@ harness_expected/    blessed baseline fingerprints, one file per contract
 snapshots/           pinned data; only manifest.json is committed
 exposure_expected/   assessor_counts.csv, the person-collected half of the exposure spot-check (ships header-only)
 docs/                how-it-works.md (the walkthrough), contracts.md (the reference), features.md (the
-                     firewall), backtest.md (the report), brief.md (the county brief), plan.md and
-                     plan-design-annex.md, media/
+                     firewall), backtest.md (the report), brief.md (the county brief), plans.md (the
+                     gap report), plan.md and plan-design-annex.md, media/
 skills/              agent runbooks: verification-protocol.md, experiment-card.md, climada-recipe.md
 tools/               build_report.py (design -> report), build_site.py (the website), demo/capture.py (docs media),
                      climada/ (run_event_set.py, the GPL tool that writes a pinned layer, never imported)
 site/                the overview website: pages (briefs.html lists the fleet and the validated briefs), and the
                      browser sandbox that runs the package
-plans/               guidance.json (the documents a brief may cite), scenario library — the Phase 3 seed
+plans/               guidance.json (the documents a report may cite), scenarios/ (md beside json, one
+                     scenario), case-studies/ (worked examples with a source per fact; none ship).
+                     facilities/, reports/, reviews/ hold real inputs and outputs and are gitignored
+                     recursively: each carries its own README, and facilities/ one fictional example
 design/              the imported Claude Design source (.dc.html) — source of truth
 report/              index.html, compiled from design/ by tools/build_report.py
 tests/               unittest suite, no network required
@@ -642,9 +672,19 @@ redesign:
   collected by a person, with URLs, into `exposure_expected/`. *Exit: at
   least four hazards pass the contract nationally; exposure joins
   spot-validated against county assessor counts in ten sampled counties.*
-- **Phase 3 — the planning thought-partner.** Scenario stress-tests of a
-  facility's emergency plan against the validated risk layer. Case studies
-  become regression tests. Seeded in [`plans/`](plans/).
+- **Phase 3 — the planning thought-partner.** *Built:* the facility record
+  with no address or coordinate field and its two place scans, the committed
+  96-hour scenario and the six rules that answer its questions fail-closed,
+  the issued risk layer read from `issued/` alone, `readiness gap-report`
+  with its cited document, its legend and its blinded render, the optional
+  `--drafter claude` whose every sentence is re-validated and refused rather
+  than dropped, `readiness review record` binding a rating to one blinded
+  page's sha256, case studies as regression tests, and `verify --phase 3`.
+  *Remaining:* three real facilities, their gap reports, and blinded reviews
+  by practising emergency managers — none of which is knowable offline, and
+  none of which this repository can establish about itself. *Exit: three
+  facilities' blinded gap reports rated useful or better by practising
+  emergency managers.*
 - **Phase 4 — global scale-out.** Swap US layers for Open Buildings, Flood Hub,
   EM-DAT. The architecture does not change; the connectors do.
 
