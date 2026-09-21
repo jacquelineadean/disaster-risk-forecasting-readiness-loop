@@ -387,7 +387,7 @@ def _target_units(dataset: data_mod.Dataset, year: int, period: int) -> list[Uni
             "refusing to issue: the dataset carries no region universe, so there is "
             "nothing to forecast. Build it with `readiness panel` first."
         )
-    return [(region.fips, year, period) for region in dataset.regions]
+    return [(region.id, year, period) for region in dataset.regions]
 
 
 def _check_digests(model, card: ExperimentCard, contract: Contract) -> None:

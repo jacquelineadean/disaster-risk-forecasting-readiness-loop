@@ -628,7 +628,12 @@ def _national_check(
     known: dict[str, Contract], experiments_dir: pathlib.Path | None
 ) -> tuple[Check, list[str]]:
     """Which national contracts pass the Phase 1 checks, and whether four do."""
-    national = {name: c for name, c in known.items() if not c.states}
+    # `not c.states` alone would also match a Phase 4 pilot, whose state list
+    # is empty because it is not in the US at all; `readiness.fleet.national`
+    # makes the same exclusion for the same reason.
+    national = {
+        name: c for name, c in known.items() if not c.states and not c.is_pilot
+    }
     passing: list[str] = []
     notes: list[str] = []
     for name in sorted(national):
@@ -1161,3 +1166,288 @@ def _no_coordinates_check(plans_dir: pathlib.Path | None) -> Check:
         "a street address, a ZIP+4 or a coordinate pair"
     )
     return Check(name, not problems, "\n".join([head, *problems]))
+
+
+# ---------------------------------------------------------------------------
+# Phase 4
+# ---------------------------------------------------------------------------
+
+#: Plan §5's exit: "the Phase 1 contract passes in two non-US pilots using only
+#: globally available data".
+MIN_PILOTS = 2
+
+#: The three example contracts of Phase 0/1, and the one thing about them this
+#: phase asserts: their digests have not moved. Read from the blessed
+#: fingerprint files rather than from a test, because the fingerprints are the
+#: artefact a reader with a clone actually checks against.
+US_EXAMPLE_CONTRACTS: tuple[str, ...] = (
+    "inland-flood-la",
+    "tornado-ok",
+    "tropical-cyclone-gulf",
+)
+
+#: Connectors that read a US-only source. Named here so the "global inputs"
+#: check can state, rather than assume, that the swap in plan §5 actually
+#: happened: if any of these ever claimed global coverage the check would pass
+#: vacuously, so it is asserted.
+US_ONLY_CONNECTORS: tuple[str, ...] = (
+    "census",
+    "storm_events",
+    "nws_zones",
+    "nri",
+    "usa_structures",
+    "gazetteer",
+)
+
+
+@dataclass(frozen=True)
+class Phase4Result:
+    """The Phase 4 exit criteria, each as a check with its evidence.
+
+    Registry-wide like Phase 2, and for the same reason: the criterion is about
+    *two* pilots, which no single contract can answer. Committed files only —
+    the pilots' ledgers, their test cards' input lists, the manifest and the
+    blessed US fingerprints. Nothing here builds a panel, which matters more
+    here than anywhere else: a pilot's ground truth is a file that is not in
+    the repository and never will be.
+    """
+
+    checks: tuple[Check, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(check.passed for check in self.checks)
+
+    def failures(self) -> list[str]:
+        """One line per failed check: the first line of its detail."""
+        return [c.detail.splitlines()[0] for c in self.checks if not c.passed]
+
+
+def phase4(
+    *,
+    registry: dict[str, Contract] | None = None,
+    experiments_dir: pathlib.Path | None = None,
+    snapshot_dir: pathlib.Path | None = None,
+    expected_dir: pathlib.Path | None = None,
+) -> Phase4Result:
+    """Evaluate the Phase 4 exit criteria across the registry."""
+    from readiness import contracts as contracts_mod
+
+    known = contracts_mod.registered() if registry is None else dict(registry)
+    snapshot_dir = snapshot_dir or data_mod.SNAPSHOT_DIR
+    pilots = {name: c for name, c in sorted(known.items()) if c.is_pilot}
+
+    pilot_check, cards = _pilot_check(pilots, experiments_dir)
+    return Phase4Result(
+        (
+            pilot_check,
+            _global_inputs_check(cards),
+            _ground_truth_check(pilots, snapshot_dir),
+            _us_digest_check(expected_dir),
+        )
+    )
+
+
+def _pilot_check(
+    pilots: dict[str, Contract], experiments_dir: pathlib.Path | None
+) -> tuple[Check, dict[str, ExperimentCard]]:
+    """Which pilots pass the Phase 1 checks, and the test cards they passed on."""
+    cards: dict[str, ExperimentCard] = {}
+    notes: list[str] = []
+    for name, contract in pilots.items():
+        where = data_mod.paths(contract, experiments_dir=experiments_dir)
+        result = phase1(
+            contract,
+            ledger_path=where.ledger,
+            touch_path=where.touch_budget,
+            backtest_path=where.directory / "backtest.html",
+        )
+        if result.passed and result.card is not None:
+            cards[name] = result.card
+            card = result.card
+            notes.append(
+                f"  [pass] {name:<18} {contract.country} "
+                f"{contract.admin_level} x {contract.period}, "
+                f"{card.model}@{card.version} "
+                f"(BSS {card.scorecard['brier_skill_score']:+.4f}, "
+                f"{card.experiment_id})"
+            )
+        else:
+            failed = result.failures()
+            notes.append(
+                f"  [ .. ] {name:<18} {failed[0] if failed else 'no test card'}"
+            )
+    head = (
+        f"pilots: {len(cards)}/{len(pilots)} registered contract(s) outside the US "
+        f"pass the Phase 1 checks; the exit needs >= {MIN_PILOTS}"
+    )
+    if not pilots:
+        head += (
+            "\n  none registered; `readiness register NAME --hazard H --country ZZ "
+            "--ground-truth national_records --records PATH` registers one"
+        )
+    return Check("pilots", len(cards) >= MIN_PILOTS, "\n".join([head, *notes])), cards
+
+
+def _global_inputs_check(cards: dict[str, ExperimentCard]) -> Check:
+    """Every input of every passing pilot resolves to a globally available source.
+
+    This is the operative half of the exit: "using only globally available
+    data". The key lists are on the card itself (`data_snapshot.inputs` and
+    `feature_inputs`, recorded since the provenance change), so the question is
+    answered from the committed ledger rather than by rebuilding anything.
+    """
+    from readiness.connectors import CONNECTORS, connector_for_key
+
+    name = "global inputs"
+    wrongly_global = [c for c in US_ONLY_CONNECTORS if CONNECTORS[c].global_coverage]
+    if wrongly_global:
+        return Check(
+            name, False,
+            f"global inputs: connector(s) {wrongly_global} are marked "
+            "global_coverage=True, so this check could not fail — the US-only "
+            "layers must be registered as US-only for it to mean anything",
+        )
+    if not cards:
+        return Check(
+            name, False,
+            "global inputs: no passing pilot test card to read inputs from",
+        )
+    notes: list[str] = []
+    offenders: list[str] = []
+    for contract_name, card in sorted(cards.items()):
+        snapshot = card.data_snapshot or {}
+        keys = list(snapshot.get("inputs") or []) + list(
+            snapshot.get("feature_inputs") or []
+        )
+        if not keys:
+            offenders.append(f"{contract_name}: the test card names no inputs")
+            continue
+        bad: list[str] = []
+        for key in keys:
+            try:
+                info = connector_for_key(key)
+            except KeyError:
+                bad.append(f"{key} (no registered connector)")
+                continue
+            if not info.global_coverage:
+                bad.append(f"{key} ({info.source})")
+        if bad:
+            offenders.append(f"{contract_name}: {', '.join(sorted(set(bad)))}")
+        notes.append(
+            f"  {contract_name:<18} {len(keys)} input(s), "
+            + ("all globally available" if not bad else f"{len(bad)} US-only")
+        )
+    if offenders:
+        head = (
+            "global inputs: a pilot's test card names input(s) that are not "
+            "globally available, so its result does not demonstrate the swap"
+        )
+        return Check(name, False, "\n".join([head, *[f"  {o}" for o in offenders]]))
+    head = (
+        f"global inputs: every input of {len(cards)} pilot test card(s) resolves to a "
+        f"connector with global coverage ({', '.join(US_ONLY_CONNECTORS)} are all "
+        "US-only)"
+    )
+    return Check(name, True, "\n".join([head, *notes]))
+
+
+def _ground_truth_check(
+    pilots: dict[str, Contract], snapshot_dir: pathlib.Path
+) -> Check:
+    """Each pilot's pinned record is the file its contract was registered against.
+
+    The bytes are not in the repository and must never be, so this compares the
+    hash the contract carries as a criterion with the hash the manifest pinned
+    when the panel was built. A mismatch means the panel was built from a
+    different export than the contract names — which is a different experiment
+    wearing this one's digest.
+    """
+    from readiness.connectors.base import Manifest
+
+    name = "ground truth pinned"
+    if not pilots:
+        return Check(name, False, "ground truth pinned: no pilot contract registered")
+    manifest = Manifest.load(snapshot_dir / "manifest.json")
+    notes: list[str] = []
+    bad: list[str] = []
+    for contract_name, contract in pilots.items():
+        key = data_mod.records_key(contract)
+        expected = str(contract.ground_truth.get("sha256", ""))
+        record = manifest.records.get(key)
+        if record is None:
+            bad.append(f"{contract_name}: {key} is not pinned in the manifest")
+            continue
+        if record.sha256 != expected:
+            bad.append(
+                f"{contract_name}: {key} pins sha256:{record.sha256[:16]}..., the "
+                f"contract names sha256:{expected[:16]}..."
+            )
+            continue
+        notes.append(
+            f"  {contract_name:<18} {key}  sha256:{expected[:16]}...  "
+            f"({record.license})"
+        )
+    if bad:
+        head = "ground truth pinned: a pilot's record does not match its contract"
+        return Check(name, False, "\n".join([head, *[f"  {b}" for b in bad]]))
+    return Check(
+        name, True,
+        "\n".join([
+            f"ground truth pinned: {len(pilots)} pilot record(s) hash to the sha256 "
+            "their contract pins; the bytes are never committed",
+            *notes,
+        ]),
+    )
+
+
+def _us_digest_check(expected_dir: pathlib.Path | None) -> Check:
+    """The three US example contracts still hash to what their fingerprints say.
+
+    Phase 4 adds two fields to the contract schema. The hard constraint is that
+    it adds nothing to a contract that does not use them, so this reads the
+    digest recorded in each blessed fingerprint file — the artefact a reader
+    with a clone checks against — and recomputes it from the committed contract.
+    """
+    from readiness import contracts as contracts_mod
+
+    name = "us digests"
+    expected_dir = expected_dir or data_mod.EXPECTED_DIR
+    # The committed registry, not whatever registry this call was given: these
+    # three are a fact about the repository.
+    known = contracts_mod.registered(contracts_mod.DEFAULT_CONTRACTS_DIR)
+    notes: list[str] = []
+    bad: list[str] = []
+    for contract_name in US_EXAMPLE_CONTRACTS:
+        path = expected_dir / f"{contract_name}.json"
+        contract = known.get(contract_name)
+        if contract is None:
+            bad.append(f"{contract_name}: no longer registered")
+            continue
+        if not path.exists():
+            bad.append(f"{contract_name}: no blessed fingerprints at {path}")
+            continue
+        blessed = json.loads(path.read_text()).get("_contract")
+        observed = contract.digest()
+        if blessed != observed:
+            bad.append(
+                f"{contract_name}: contract now hashes to sha256:{observed}, "
+                f"{data_mod.relative(path)} records sha256:{blessed}"
+            )
+            continue
+        notes.append(f"  {contract_name:<22} sha256:{observed}")
+    if bad:
+        head = (
+            "us digests: a US example contract's digest moved, so every experiment "
+            "committed against it is now incomparable"
+        )
+        return Check(name, False, "\n".join([head, *[f"  {b}" for b in bad]]))
+    return Check(
+        name, True,
+        "\n".join([
+            f"us digests: {len(US_EXAMPLE_CONTRACTS)} US example contract(s) hash to "
+            "exactly what their blessed fingerprints record; the two schema fields "
+            "are elided at their defaults",
+            *notes,
+        ]),
+    )

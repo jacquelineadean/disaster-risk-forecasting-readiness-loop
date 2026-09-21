@@ -1,0 +1,55 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "shapeName": "Northern Province",
+    "shapeISO": "ZZ-N",
+    "shapeID": "ZZ-ADM1-001",
+    "shapeGroup": "ZZ",
+    "shapeType": "ADM1"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [0.0, 0.0]],
+     [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "shapeName": "Central Province",
+    "shapeISO": "ZZ-C",
+    "shapeID": "ZZ-ADM1-002",
+    "shapeGroup": "ZZ",
+    "shapeType": "ADM1"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [[10.0, 20.0], [12.0, 20.0], [12.0, 24.0], [10.0, 24.0], [10.0, 20.0]]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "shapeName": "Windward Islands",
+    "shapeISO": "ZZ-W",
+    "shapeID": "ZZ-ADM1-003",
+    "shapeGroup": "ZZ",
+    "shapeType": "ADM1"
+   },
+   "geometry": {
+    "type": "MultiPolygon",
+    "coordinates": [
+     [[[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0]]],
+     [[[3.0, 3.0], [5.0, 3.0], [5.0, 5.0], [3.0, 5.0], [3.0, 3.0]]]
+    ]
+   }
+  }
+ ]
+}

@@ -10,7 +10,7 @@ records what was decided, what was built, and what each phase still owes.
 | 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
 | 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
 | 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | built; exit needs three real facilities and their blinded reviews (see §4.1, review §4.2) |
-| 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | pending |
+| 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | built; exit needs the pilots' data run (see §5.1, review §5.2) |
 
 ## 0. How the audit was done, and what it found
 
@@ -622,6 +622,162 @@ available data.
 **Needs the data run:** the partner records or EM-DAT export, a geoBoundaries
 release, the ERA5 pulls, and whether the contracts pass.
 
+### 5.1. Phase 4 status
+
+Built, on the branch stacked above Phase 3, green with the guard (1,385
+tests, no skips, after the review round in §5.2):
+
+- `readiness/contracts.py`: `ground_truth` and `regions` sources on
+  `Contract`, `SCHEMA_V1_DEFAULTS` eliding each from `criteria()` at its US
+  default so every contract registered before this phase — nine of them,
+  three examples and six national — still hashes to what it did;
+  `_validate_sources` enforces the full pilot schema (source, file, sha256,
+  record_start_year; geoBoundaries admin level and release; empty
+  `scope.states`; `zone_policy: drop`; a hazard with a global mapping) and
+  the US contract's "source only" rule; `pilot_sources()` builds the
+  `(ground_truth, regions)` pair in one place.
+- Connectors: `readiness/connectors/geoboundaries.py` (gbOpen ADM1/ADM2
+  GeoJSON, `READINESS_GEOBOUNDARIES_URL` override, the vertex-mean centroid
+  as a weather-lookup point only), `national_records.py` (a partner's CSV,
+  the `# record_start_year:` header, hazard values normalised and matched
+  through `config.HAZARD_CATEGORIES`), and `emdat.py` (an `.xlsx` export
+  read with `zipfile`/`xml.etree`, standard library only so Pyodide keeps
+  working, plus the committed admin-name crosswalk). Open-Meteo and the
+  firewall needed no change; they were already global.
+- `readiness/harness/labels.py`: `RecordEvent` beside `StormEvent`,
+  `Event = StormEvent | RecordEvent`, one panel walk (`_walk_events`) for
+  both — a `RecordEvent` names its own regions and arrives with its hazard
+  already matched, so nothing in the walk branches on which ground truth
+  built it except a single `isinstance` in `_regions_hit`. Every US panel
+  this project has built stays bit-identical, because a `StormEvent` walk
+  never touches the new code.
+- `readiness/data.py`: `RECORDS_DIRNAME`, `records_path`
+  (`snapshots/records/<CC>/<basename>`, the country from the contract and
+  the basename from it, never an operator's path), `records_key`/`regions_key`, `input_keys` and
+  `_build_pilot` as the pilot half of `build`; `US_ONLY_FEATURES =
+  ("terrain", "nri")` refused by name in `_load_features` before a frame is
+  ever built.
+- `readiness/verify.py::phase4`: four checks — `pilots`, `global inputs`,
+  `ground truth pinned`, `us digests` — registry-wide like Phase 2 and 3,
+  reading committed ledgers, cards and the manifest, never a partner's
+  bytes. `readiness/fleet.py::national()` excludes `is_pilot` contracts
+  explicitly, so a pilot cannot satisfy Phase 2's national count by
+  accident.
+- `tools/build_site.py`: `PRIVATE_SNAPSHOT_DIR` refuses to pack anything
+  under `snapshots/records/` by path, and `PRIVATE_KEY_PREFIXES` strips
+  `records/` and `emdat/` manifest entries out of the packed public
+  manifest — both checked by `tests/test_site.py`.
+- `readiness/cli.py`: `register`'s seven new flags (`--country`,
+  `--ground-truth`, `--records`, `--record-start-year`, `--admin-level`,
+  `--regions-release`, `--regions-sha256`) and `verify --phase 4`; `docs/global.md`,
+  how-it-works §14, `tests/test_global.py` (the Phase 1 queue, the firewall,
+  the canary, promotion and `verify --phase 1`/`--phase 4`, all on a
+  synthetic pilot).
+
+Decisions taken while building:
+
+- A pilot's `ground_truth.file` is the records file's *basename*, never a
+  path: a committed contract must not record one operator's filesystem, and
+  `data.records_path` is the one place the directory
+  (`snapshots/records/<CC>/`) is policy rather than something the contract
+  says. The basename is a hashed criterion and is therefore published
+  (the contract, the cards, the site); `register` says so and DATA-LICENSES
+  asks for a neutral name.
+- `terrain` and `nri` are refused by name for a pilot rather than handed an
+  empty source — "the model had no terrain features" is a different,
+  honest experiment from "the model had terrain features that were all
+  missing" — so a pilot runs the Phase 1 queue on the `era5-antecedent` set
+  alone, plus the history-only baseline; the four candidates that need
+  terrain are skipped with a progress line and no card. A global terrain
+  source (geoBoundaries centroids carry latitude; the ERA5 extract already
+  carries elevation) is the obvious next connector and is deliberately not
+  invented here.
+- Pilots are excluded from `fleet.national()`'s count on purpose: a pilot
+  also has an empty `states` list, so without the explicit `is_pilot`
+  exclusion it would satisfy Phase 2's "four national contracts" by
+  accident rather than by being a US contract at all.
+- EM-DAT's record-start floor is 2000, not a licence date but CRED's own
+  guidance that pre-2000 entries are sparse and inconsistently geocoded; a
+  partner's national record carries no fixed floor at all — only the
+  contract can say, because a partner's archive starts where their archive
+  starts.
+- The EM-DAT admin-name crosswalk is the one file under `snapshots/records/`
+  that *is* committed: `.gitignore` excludes the directory's contents except
+  `??_emdat_regions.csv` (two letters, the country code), because it is a person's own judgement about which
+  geoBoundaries region an EM-DAT name means, and a panel cannot be
+  reproduced without it — unlike the partner or EM-DAT bytes themselves,
+  which are never committed under any exception.
+
+What Phase 4 still owes is the real-data run: a geoBoundaries release, a
+partner file or an EM-DAT export with its crosswalk, the ERA5 pulls for two
+candidate countries, and whether two pilots actually pass. The geoBoundaries
+URL pattern and the EM-DAT column names above come from published
+documentation and are confirmed on the first real pull, not before; no real
+pull has been made against this branch.
+
+### 5.2. Phase 4 review outcome
+
+Three lenses (leakage and provenance, correctness and robustness, tests
+and documentation) over the whole Phase 4 diff; thirty-six findings
+confirmed with reproductions, all fixed on the same branch (1,385 tests,
+no skips). Fixed:
+
+- **Pilot labels published by the site (high).** The partner's bytes were
+  never packed, but `build_tapes` and `build_panels` published the full
+  region-by-period label bitmap, the positive counts and the base rate of
+  every built dataset, a pilot's included — the substance of the partner's
+  archive at panel resolution. Pilots are now skipped by the tapes and
+  reduced to digest, unit count and data version in the panels; the
+  manifest's `notes` carry counts only, never the hazard strings or admin
+  names lifted from the private file; and the crosswalk's re-inclusion in
+  `.gitignore` is the exact two-letter shape, so a crafted basename can no
+  longer commit the partner file.
+- **A pinned pilot unusable by default (high).** `pinned()` answered True
+  for the US-only `terrain` set on a pilot, so the default feature selection
+  chose it and `data.build` aborted instead of skipping the candidate as
+  §5.1 describes. `pinned()` now answers False for a US-only set on a pilot,
+  the loop and the fleet skip those candidates with a progress line, an
+  explicit `--features terrain` is a usage error, and a CLI test runs
+  `panel`, `loop` and `fleet` on a fully pinned synthetic pilot with no flag.
+- **EM-DAT rows from other countries (high).** The reader tallied the
+  `Country` column and never filtered on it, so a row from a neighbouring
+  country whose admin name collided with a crosswalk key became a damaging
+  event in the pilot's region. An export naming more than one country is
+  refused.
+- **Contract validation.** Pilot source blocks refuse unknown keys (an
+  operator's path could be committed and hashed); every regex ends in `\Z`
+  (a trailing newline validated and reached manifest keys and the
+  geoBoundaries URL); `record_start_year` must be an integer; the
+  geoBoundaries release is checked at registration against the connector's
+  own pattern; `--event-type` outside the US is refused; a hazard must map
+  for the contract's own ground-truth source; explicit `--admin-level` or
+  `--regions-release` on a US contract is refused rather than dropped.
+- **Connectors.** Only the leading comment block of a partner CSV is
+  stripped (a `#`-leading event id and a quoted `#` continuation were
+  dropped silently), and error rows are file line numbers; `nan` and `inf`
+  are refused in every numeric column; worksheet parts sort numerically and
+  the EM-DAT header is detected rather than assumed; zip members are
+  bounded by size and compression ratio and boundary files by size;
+  `geoboundaries.parse` refuses a feature whose level or country is not the
+  one requested; the URL override must be `https://` and an optional
+  `regions.sha256` pins the boundary file the way the record is pinned.
+- **Labels and plumbing.** `Diagnostics` reports rows the crosswalk could
+  not place and named regions outside the universe (both printed only when
+  non-zero, so the US string is byte-identical); the pilot `pinned()` check
+  hashes the boundary cache; `RecordEvent` validates its month, year and
+  regions.
+- **Boundaries.** `tests/test_boundaries.py` gained a `readiness/connectors`
+  row and the engine row forbids the connectors and `data`; the one genuine
+  violation it surfaced — the MCP server importing the engine to list
+  models — is fixed by having the CLI wire a `describe_models` callable.
+- Tests now execute the packer's private-path guard directly, the
+  record-start floor at its boundary, the empty-region and malformed-value
+  refusals; `docs/global.md` quotes a digest a test recomputes.
+
+Not changed by the round: the real-data run is still owed, and the
+geoBoundaries URL pattern and EM-DAT column names remain confirmed on the
+first real pull.
+
 ## 6. Order of work, and how it is delivered
 
 1. Phase R, in the cluster order above; the guard stays green throughout.
@@ -641,6 +797,6 @@ based on the one below it:
 | #11 | `claude/affectionate-lovelace-bnu9tz` | the guard, this plan, Phase R and Phase 1 | `main` |
 | #12 | `…-phase2` | Phase 2: national contracts, fleet, exposure, citations, issuance, the brief | #11 |
 | #13 | `…-phase3` | Phase 3: facility record, scenarios, rules, gap report, blinded reviews, case studies | #12 |
-| next | `…-phase4` | Phase 4: contract schema, global connectors, pilots | the Phase 3 branch |
+| #14 | `…-phase4` | Phase 4: contract schema, global connectors, pilots | #13 |
 
 A fix to a lower PR is made there and the branches above it are rebased.

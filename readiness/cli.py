@@ -26,7 +26,7 @@ refuses and lists the choices.
     readiness scenarios         list the scenario library, or run the case studies
     readiness gap-report        one cited, validated gap report for a facility
     readiness review            record a rating of a blinded gap report
-    readiness verify            check the Phase 0, 1, 2 or 3 exit criteria
+    readiness verify            check the Phase 0, 1, 2, 3 or 4 exit criteria
     readiness backtest          write the backtest report from committed files
     readiness dashboard         render a contract's ledger as a static HTML page
     readiness report            rebuild the static research report
@@ -42,8 +42,8 @@ import subprocess
 import sys
 
 from readiness import config, contracts, data as data_mod, verify
-from readiness.connectors import usa_structures
-from readiness.connectors.base import ConnectorError
+from readiness.connectors import national_records, usa_structures
+from readiness.connectors.base import ConnectorError, sha256_bytes
 from readiness.contracts import Contract, ContractError
 from readiness.engine import REGISTRY, build_model, describe_registry
 from readiness.engine.features import FEATURE_SETS
@@ -98,7 +98,25 @@ def _features(args, contract: Contract) -> list[str]:
                 f"unknown feature connector(s) {unknown}; known: "
                 f"{', '.join(data_mod.FEATURE_CONNECTORS)}"
             )
+        blocked = [f for f in data_mod.US_ONLY_FEATURES if f in names]
+        if blocked and contract.is_pilot:
+            # `data.build` refuses this too, by name — but asking for it is a
+            # usage error, and a usage error prints as a refusal rather than
+            # as a traceback out of the data plane.
+            raise UsageError(
+                f"feature connector(s) {blocked} read a US-only source (the Census "
+                f"Gazetteer, the FEMA National Risk Index) and contract "
+                f"{contract.name!r} is scored in {contract.country}; there is "
+                "nothing for them to read. Outside the US the catalogue is "
+                f"{[f for f in data_mod.FEATURE_CONNECTORS if f not in data_mod.US_ONLY_FEATURES]}."
+            )
         return names
+    # Everything already pinned, and nothing else: a command never pulls a
+    # feature source the user did not ask for, and never silently ignores one
+    # that is there. `pinned` answers False for a US-only connector outside
+    # the US, so a pilot auto-selects the global ones alone and the candidates
+    # that need the others are skipped by the orchestrator, with a progress
+    # line and no card.
     return [
         f for f in data_mod.FEATURE_CONNECTORS if data_mod.pinned(contract, features=[f])
     ]
@@ -212,11 +230,96 @@ def cmd_contract(args) -> int:
     return 0
 
 
+def _pilot_sources(args) -> tuple[dict | None, dict | None]:
+    """The `(ground_truth, regions)` a non-US `--country` needs, else `(None, None)`.
+
+    The records file's sha256 is computed here, at registration, and written
+    into the contract. The file itself is never copied: it is a partner's
+    archive or an EM-DAT export, and what this repository keeps is the hash
+    that says which one the contract means.
+    """
+    country = str(args.country or contracts.DEFAULTS["country"]).upper()
+    if country == "US":
+        if args.ground_truth != "storm_events" or args.records:
+            raise UsageError(
+                "--ground-truth and --records describe a contract outside the US; "
+                "in the US the ground truth is NOAA Storm Events, which the "
+                "connector pins for itself. Name the country with --country."
+            )
+        # The same rule for the region universe. These two default to None so
+        # that "not given" can be told from "given", and a flag that does not
+        # apply is refused rather than silently ignored.
+        given = [
+            flag
+            for flag, value in (
+                ("--admin-level", args.admin_level),
+                ("--regions-release", args.regions_release),
+                ("--regions-sha256", args.regions_sha256),
+            )
+            if value is not None
+        ]
+        if given:
+            raise UsageError(
+                f"{', '.join(given)} describe a geoBoundaries region universe, "
+                "which exists outside the US; a US contract is scored over the "
+                "Census county universe. Name the country with --country."
+            )
+        return None, None
+    if args.event_type:
+        raise UsageError(
+            f"--event-type names NOAA Storm Events EVENT_TYPEs, which is a US "
+            f"vocabulary; a contract for {country} matches its record through "
+            "config.HAZARD_CATEGORIES instead (`readiness hazards` marks which "
+            "hazards can be registered outside the US). Drop --event-type."
+        )
+    if args.ground_truth == "storm_events":
+        raise UsageError(
+            f"--country {country} needs its own ground truth: pass "
+            "--ground-truth national_records --records PATH, or --ground-truth "
+            "emdat --records PATH. Storm Events is a US archive."
+        )
+    if not args.records:
+        raise UsageError(
+            f"--ground-truth {args.ground_truth} needs --records PATH: the file's "
+            "sha256 is written into the contract as a criterion. The file itself "
+            "is never committed or copied."
+        )
+    path = pathlib.Path(args.records).expanduser()
+    if not path.is_file():
+        raise UsageError(f"no records file at {path}")
+    data = path.read_bytes()
+    start_year = args.record_start_year
+    if start_year is None and args.ground_truth == "national_records":
+        start_year = national_records.read_start_year(data)
+    if start_year is None:
+        start_year = config.GROUND_TRUTH_SOURCES.get(args.ground_truth)
+    if start_year is None:
+        raise UsageError(
+            f"{path.name} carries no `# record_start_year: YYYY` header, so the "
+            "first year the record is complete has to be given with "
+            "--record-start-year. A split that starts before the archive does "
+            "reads its silence as an absence of events."
+        )
+    return contracts.pilot_sources(
+        source=args.ground_truth,
+        file=path.name,
+        sha256=sha256_bytes(data),
+        record_start_year=int(start_year),
+        admin_level=args.admin_level,
+        release=args.regions_release,
+        regions_sha256=args.regions_sha256,
+    )
+
+
 def cmd_register(args) -> int:
+    ground_truth, regions = _pilot_sources(args)
     c = contracts.new(
         args.name,
         hazard=args.hazard,
+        country=args.country,
         states=args.state or (),
+        ground_truth=ground_truth,
+        regions=regions,
         period=args.period,
         event_types=args.event_type,
         property_usd_min=args.damage_usd,
@@ -239,7 +342,7 @@ def cmd_register(args) -> int:
     path = c.save(contracts.contracts_dir(), force=args.force)
     _rule(f"registered  {data_mod.relative(path)}")
     _p(c.describe())
-    hazard = config.HAZARDS.get(c.hazard)
+    hazard = None if c.is_pilot else config.HAZARDS.get(c.hazard)
     if hazard is not None and hazard.coding != "county" and c.zone_policy == "drop":
         _p()
         _p(
@@ -249,6 +352,29 @@ def cmd_register(args) -> int:
             "event to every county in its zone via the NWS crosswalk "
             "(docs/contracts.md). `readiness panel` reports the counts either way."
         )
+    if c.is_pilot:
+        _p()
+        _p(
+            f"note: place the records file at "
+            f"snapshots/records/{c.country}/{c.ground_truth['file']} "
+            f"(sha256:{c.ground_truth['sha256'][:16]}...). It is never committed, "
+            "never copied and never packed into the browser sandbox; only its hash "
+            "is, here and in snapshots/manifest.json."
+        )
+        _p(
+            f"      its basename ({c.ground_truth['file']}) is a criterion: it is "
+            "written into the committed contract, into every ledger card's inputs "
+            "and into the published site, because a panel cannot be reproduced "
+            "without knowing which file it means. Name the file neutrally — not "
+            "after the partner, the agreement or the case (DATA-LICENSES.md)."
+        )
+        if c.ground_truth_source == "emdat":
+            _p(
+                "      EM-DAT names admin units in prose: write the crosswalk at "
+                f"snapshots/records/{c.country.lower()}_emdat_regions.csv "
+                "(emdat_name,shape_id) before building the panel. The export must "
+                "cover one country; an export naming several is refused."
+            )
     _p()
     _p("next:")
     _p(f"  readiness panel -c {c.name}     # pull the data and inspect the panel")
@@ -262,6 +388,13 @@ def cmd_hazards(args) -> int:
     _p()
     _p("A contract may also name a hazard outside the catalogue by listing its")
     _p("event types explicitly (`readiness register ... --event-type ...`).")
+    _p()
+    _p("Registrable outside the US (a `config.HAZARD_CATEGORIES` entry maps the")
+    _p("hazard onto EM-DAT's disaster types and a partner file's hazard values):")
+    _p(f"  {', '.join(config.global_hazards())}")
+    missing = [h for h in config.HAZARDS if h not in config.global_hazards()]
+    if missing:
+        _p(f"  not mapped, so US-only: {', '.join(missing)}")
     return 0
 
 
@@ -629,6 +762,10 @@ def cmd_verify(args) -> int:
         # Phase 2 is a statement about the whole registry ("at least four
         # hazards pass nationally"), so it takes no contract at all.
         return _verify_phase2(args)
+    if args.phase == 4:
+        # Phase 4 likewise: the criterion is "two non-US pilots", which no one
+        # contract can answer.
+        return _verify_phase4(args)
     c = _contract(args)
     where = data_mod.paths(c)
     if args.phase == 1:
@@ -716,6 +853,18 @@ def _verify_phase3(args) -> int:
         reviews_dir=pathlib.Path(args.reviews) if args.reviews else None,
     )
     return _print_phase(3, "", result.checks)
+def _verify_phase4(args) -> int:
+    """The registry-wide Phase 4 criteria: two pilots, on global data only."""
+    if getattr(args, "contract", None):
+        raise UsageError(
+            f"`verify --phase 4` takes no contract (got -c {args.contract}): its "
+            "criterion is that the Phase 1 contract passes in *two* non-US pilots "
+            "using only globally available data, which no single contract can "
+            "answer."
+        )
+    _rule("Phase 4 exit criteria  (the registry)")
+    result = verify.phase4(registry=contracts.registered())
+    return _print_phase(4, "", result.checks)
 
 
 # ---------------------------------------------------------------------------
@@ -1227,9 +1376,14 @@ def cmd_report(args) -> int:
 
 
 def cmd_mcp(args) -> int:
+    # The composition root: `readiness/connectors` may not import the engine
+    # (tests/test_boundaries.py), so the CLI — which sits above both planes —
+    # hands the server the registry description its `list_models` tool answers
+    # with. Nothing about a model reaches the data plane by any other route.
     from readiness.connectors.mcp_server import serve
+    from readiness.engine import describe_registry
 
-    serve(contract=_contract(args))
+    serve(contract=_contract(args), describe_models=describe_registry)
     return 0
 
 
@@ -1308,7 +1462,45 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--hazard", required=True,
                     help="a catalogue hazard (see `readiness hazards`) or a new name")
     sp.add_argument("--state", action="append", metavar="XX",
-                    help="two-letter state; repeatable; omit for the whole country")
+                    help="two-letter state; repeatable; omit for the whole country "
+                         "(US only)")
+    sp.add_argument("--country", default=d["country"], metavar="CC",
+                    help="ISO 3166-1 alpha-2 country code; outside the US the "
+                         "contract must also name --ground-truth and --records "
+                         f"(default {d['country']})")
+    sp.add_argument("--ground-truth", default=d["ground_truth"],
+                    choices=sorted(config.GROUND_TRUTH_SOURCES),
+                    help="which record the labels come from; storm_events is the "
+                         "US default and is refused elsewhere "
+                         f"(default {d['ground_truth']})")
+    sp.add_argument("--records", metavar="PATH",
+                    help="the partner CSV or EM-DAT .xlsx this contract is judged "
+                         "against. Its sha256 is computed now and written into the "
+                         "contract; the file is never committed or copied")
+    sp.add_argument("--record-start-year", type=int, metavar="YYYY",
+                    help="first year the record is complete enough to read silence "
+                         "as a zero; read from a partner file's "
+                         "`# record_start_year:` header when it has one, else "
+                         "required (EM-DAT defaults to "
+                         f"{config.GROUND_TRUTH_SOURCES['emdat']})")
+    # These three default to None rather than to their documented values so
+    # that `register` can tell "not given" from "given" and refuse one that
+    # does not apply to a US contract; `contracts.pilot_sources` is where the
+    # defaults live.
+    sp.add_argument("--admin-level", default=None,
+                    choices=list(contracts.ADMIN_LEVELS),
+                    help="the geoBoundaries level a pilot's regions come from "
+                         f"(default {d['admin_level']}; outside the US only)")
+    sp.add_argument("--regions-release", default=None,
+                    metavar="RELEASE",
+                    help="the geoBoundaries release the universe is read from; it is "
+                         "a hashed criterion because shapeIDs change between "
+                         f"releases (default {contracts.GEOBOUNDARIES_RELEASE!r}; "
+                         "outside the US only)")
+    sp.add_argument("--regions-sha256", default=None, metavar="HEX",
+                    help="optional: the boundary file's sha256, pinned as a "
+                         "criterion so a mirror cannot serve a different universe "
+                         "under the same release name (outside the US only)")
     sp.add_argument("--period", default=d["period"], choices=sorted(contracts.PERIODS))
     sp.add_argument("--event-type", action="append", metavar="TYPE",
                     help="Storm Events EVENT_TYPE; repeatable; required for an "
@@ -1590,12 +1782,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(review_func=cmd_review_record)
 
     sp = features_flag(data_flags(
-        sub.add_parser("verify", help="check the Phase 0, 1, 2 or 3 exit criteria")
+        sub.add_parser("verify", help="check the Phase 0, 1, 2, 3 or 4 exit criteria")
     ))
-    sp.add_argument("--phase", type=int, default=0, choices=[0, 1, 2, 3],
+    sp.add_argument("--phase", type=int, default=0, choices=[0, 1, 2, 3, 4],
                     help="0 scores the baselines against the pinned data; 1 reads one "
-                         "contract's ledger; 2 reads the whole registry and 3 the gap "
-                         "reports and their reviews, both taking no -c (default 0)")
+                         "contract's ledger; 2 and 4 read the whole registry and 3 the "
+                         "gap reports and their reviews, all taking no -c (default 0)")
     sp.add_argument("--reports", metavar="DIR",
                     help="with --phase 3: the blinded reports the reviews name "
                          "(default plans/reports/; real reports are never committed)")
