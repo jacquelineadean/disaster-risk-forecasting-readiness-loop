@@ -192,6 +192,9 @@ def attribution(
         "[if zone events expanded]": contract.zone_policy == "expand",
         "[if NRI shown]": nri_shown,
         "[if exposure joined]": False,
+        # Footprints are an ODbL layer this repository never downloads; the
+        # exposure join is USA Structures county counts and nothing else.
+        "[if footprints joined]": False,
         "[if risk engine used]": climada_used,
     }
     out = []

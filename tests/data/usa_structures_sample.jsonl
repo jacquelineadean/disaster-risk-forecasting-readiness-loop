@@ -1,0 +1,5 @@
+{"fips":"99001","occ_cls":"Commercial","prim_occ":"Hospital","n":2}
+{"fips":"99001","occ_cls":"Education","prim_occ":"Grade Schools","n":4}
+{"fips":"99001","occ_cls":"Residential","prim_occ":"Single Family Dwelling","n":300}
+{"fips":"99003","occ_cls":"Residential","prim_occ":"Single Family Dwelling","n":120}
+{"fips":"99003","occ_cls":"Weird","prim_occ":"Spaceport","n":5}

@@ -132,6 +132,34 @@ If the test score is much worse than validate, that is information about how
 much you overfitted validate, and it belongs on a card. It is not an invitation
 to iterate further and re-test under a new version number.
 
+## The fleet, issuing and the brief (Phase 2)
+
+The fleet is this protocol, per contract, nothing more. `readiness fleet
+--national --queue phase2 --promote` runs the six national contracts in
+turn, and each one owns its ledger and its test-touch budget: a pass on
+`tornado-us` says nothing about `hail-us`, and a spent touch on one is not
+a touch on another. `readiness fleet --status` reads the ledgers back —
+cards, validate passes, the test card, whether Phase 1 is met — without
+fitting anything; read it before proposing work on any contract.
+
+Issuing needs a passing test card. `readiness issue MODEL -c <contract>
+--period <label>` refuses (exit 2) unless the ledger holds a passing,
+canary-clear test card for exactly that model, version and arguments under
+the current digest; it refits through `TrainingView` and refuses if the
+training or feature digest differs from the card; and it refuses a period
+the pinned series do not reach. A refusal is information about the record,
+never a reason to reissue from a different fit or relax a check. Nothing
+you pass to `issue` can be a label, and nothing should try to be.
+
+The brief is validated prose. `readiness brief` writes a county document
+only when `readiness.cite.validate` returns no violation: every sentence
+cites a claim, every claim resolves to a card, an issued file, a manifest
+key or a registered guidance document, every number is a cited value, and
+no warning language appears outside the fixed disclaimer. Nothing below
+the county appears, and a probability of occurrence is never written as
+what an event "would touch". The validator proves a number was not
+invented; whether the citation supports the sentence is yours to read.
+
 ## Failure modes to watch for
 
 - **Reliability good, sharpness ~0** — you have reinvented climatology. Check

@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Readiness Loop · briefs</title>
+<meta name="description" content="Every validated county brief of the Readiness Loop, the fleet status of its nine contracts and the pinned USA Structures exposure counts, read from the repository's own artefacts.">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3Cpath d='M9 16l5 5 9-10' fill='none' stroke='%232b5aa8' stroke-width='3'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body data-page="briefs">
+
+<header class="top" id="top">
+  <div class="top__bar">
+    <a class="brand" href="index.html">The Readiness Loop<span class="brand__tag">Phase 0</span></a>
+    <button class="top__menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="site-nav"><i></i><i></i><i></i></button>
+    <nav class="top__nav" id="site-nav" aria-label="Site">
+      <a data-page="index" href="index.html">Overview</a>
+      <a data-page="design" href="design.html">System design</a>
+      <a data-page="walkthrough" href="walkthrough.html">Walkthrough</a>
+      <a data-page="ledgers" href="ledgers.html">Ledgers</a>
+      <a data-page="briefs" href="briefs.html">Briefs</a>
+      <a data-page="playground" href="playground.html">Sandbox</a>
+      <a data-report href="generated/report/index.html">Research briefing</a>
+      <a class="ext" href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero hero--plain"><div class="col">
+  <p class="eyebrow">County briefs<span class="n">read from briefs/&lt;fips&gt;/&lt;period&gt;.json</span></p>
+  <h1>Every sentence cites something.</h1>
+  <p class="lede">A county brief turns a validated probability into a paragraph a planner can read: the chance of at least one damaging event in the county this period, the score the model earned on the untouched test years, and what the county holds. Every sentence cites a card, an issued file, a pinned extract or a named guidance document, and the brief is written only when <code>readiness.cite</code> finds no violation.</p>
+  <p class="small">Briefs are built by <code>readiness brief --county FIPS --period 2026-Q4</code> (or <code>--state XX</code>) from <code>issued/</code> files and the pinned USA Structures counts; none ship in the repository, because every one depends on a passing test card that only the real-data run can write. A brief names nothing below the county, never says what an event "would touch", and is never a warning product: official alerts come from the NWS and IPAWS. The rules are in <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/docs/brief.md">docs/brief.md</a>.</p>
+</div></section>
+
+<main id="briefs"><section class="section"><div class="col"><p class="muted">Loading the briefs…</p></div></section></main>
+
+<section class="section" id="fleet"><div class="col">
+  <p class="eyebrow">The fleet<span class="n">readiness fleet --status, from the ledgers alone</span></p>
+  <h2>Nine contracts, one harness.</h2>
+  <p>Three example contracts and six national ones (plan §3, "six so four can pass"). Nothing here is recomputed: each row is what <code>verify --phase 1</code> reads for that contract — its ledger, its test-touch file and its backtest report. A brief can be issued for a contract only once its row shows a passing test card.</p>
+  <div id="fleet-table" class="table-wrap"><p class="muted">Loading the fleet status…</p></div>
+</div></section>
+
+<section class="section" id="exposure"><div class="col">
+  <p class="eyebrow">Exposure<span class="n">FEMA / ORNL USA Structures, pinned per state</span></p>
+  <h2>County counts, nothing finer.</h2>
+  <p>The exposure table has no sub-county field by construction; this page goes coarser still and shows, per pinned state, how many counties and structures the extract holds and the layer vintage it declares. <code>readiness exposure spot-check</code> compares ten sampled counties against assessor counts collected by a person.</p>
+  <div id="exposure-table" class="table-wrap"><p class="muted">Loading the exposure pins…</p></div>
+</div></section>
+
+<footer class="site">
+  <p class="credits">Exposure: FEMA / Oak Ridge National Laboratory USA Structures (public domain), county counts only. Exposure outputs are a separate artefact from the forecast; see <a href="https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/blob/main/DATA-LICENSES.md">DATA-LICENSES.md</a>.</p>
+  <p class="links"><span data-built>…</span></p>
+</footer>
+
+<script src="assets/site.js"></script>
+<script src="assets/briefs.js"></script>
+</body>
+</html>

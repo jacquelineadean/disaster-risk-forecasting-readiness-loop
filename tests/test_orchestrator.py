@@ -306,6 +306,25 @@ class TestCandidate(unittest.TestCase):
         self.assertEqual(orchestrator.QUEUES["phase1"][:n_baseline],
                          orchestrator.BASELINE_QUEUE)
 
+    def test_the_phase2_queue_is_four_capped_candidates_after_the_baselines(self):
+        labels = [c.model for c in orchestrator.PHASE2_QUEUE]
+        self.assertEqual(labels, ["logistic", "logistic+iso", "gbm", "gbm+iso"])
+        for c in orchestrator.PHASE2_QUEUE:
+            with self.subTest(candidate=c.label):
+                self.assertEqual(c.requires, ("era5-antecedent", "terrain"))
+                self.assertGreater(len(c.changed), 80)
+                self.assertGreater(len(c.hypothesis), 120)
+                self.assertIn("Falsified", c.hypothesis)
+                if c.model.startswith("gbm"):
+                    self.assertEqual((c.kwargs["rounds"], c.kwargs["bins"]), (60, 16))
+                else:
+                    self.assertNotIn("rounds", c.kwargs)
+        n_baseline = len(orchestrator.BASELINE_QUEUE)
+        self.assertEqual(orchestrator.QUEUES["phase2"],
+                         orchestrator.BASELINE_QUEUE + orchestrator.PHASE2_QUEUE)
+        self.assertEqual(orchestrator.QUEUES["phase2"][n_baseline:],
+                         orchestrator.PHASE2_QUEUE)
+
 
 class TestPhase1Queue(unittest.TestCase):
     def setUp(self):
@@ -382,6 +401,64 @@ class TestPhase1Queue(unittest.TestCase):
                          .touch_budget.exists())
         self.assertIn("promote      nothing to promote: no candidate passed on validate",
                       self.lines)
+
+
+class TestPhase2Queue(unittest.TestCase):
+    """The national queue runs to the end on a synthetic panel with fake sources."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.contract = make_contract(name="flood-us", scope={"states": []})
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_runs_every_candidate_with_the_capped_gbm_budget_on_the_cards(self):
+        sources = {"era5": FakeSeries(), "gazetteer": FakeStatic(),
+                   "elevation": FakeStatic("elevation")}
+        dataset = feature_dataset(self.contract, self.dir, sources)
+        # The linear iterations are reduced for speed; the GBM budget is the
+        # queue's own, because that budget is what the card must record.
+        queue = [
+            dataclasses.replace(c, kwargs={**c.kwargs, "iters": 60})
+            if c.model.startswith("logistic") else c
+            for c in orchestrator.PHASE2_QUEUE
+        ]
+        result = orchestrator.run_local(
+            self.contract, experiments_dir=self.dir, dataset=dataset, queue=queue,
+            include_canary=False, progress=lambda _m: None,
+        )
+        self.assertEqual(result.skipped, [])
+        self.assertEqual([c.model for c in result.cards],
+                         ["logistic", "logistic+iso", "gbm", "gbm+iso"])
+        for card in result.cards:
+            with self.subTest(model=card.model):
+                self.assertEqual(card.data_snapshot["scope"], "US:all")
+                self.assertEqual(card.data_snapshot["model_kwargs"]["feature_sets"],
+                                 ["era5-antecedent", "terrain"])
+                self.assertTrue(card.scorecard["feature_audit"]["clean"])
+                if card.model.startswith("gbm"):
+                    kwargs = card.data_snapshot["model_kwargs"]
+                    self.assertEqual((kwargs["rounds"], kwargs["bins"]), (60, 16))
+        where = data_mod.paths(self.contract, experiments_dir=self.dir)
+        self.assertTrue(Ledger(where.ledger).verify().valid)
+
+    def test_every_card_records_its_wall_clock_as_provenance(self):
+        dataset = synthetic_dataset(self.contract, self.dir)
+        result = orchestrator.run_local(
+            self.contract, experiments_dir=self.dir, dataset=dataset,
+            progress=lambda _m: None,
+        )
+        for card in result.cards:
+            with self.subTest(model=card.model):
+                seconds = card.data_snapshot["wall_clock_s"]
+                self.assertIsInstance(seconds, float)
+                self.assertGreaterEqual(seconds, 0.0)
+                self.assertEqual(seconds, round(seconds, 3))
+                # Provenance only: not in the scorecard, so not in any
+                # fingerprint `verify` compares.
+                self.assertNotIn("wall_clock_s", card.scorecard)
 
 
 class TestPromote(unittest.TestCase):

@@ -65,10 +65,11 @@ def _fail(exc: BaseException) -> str:
 #: Commands the browser refuses outright, and why. `promote` is the one
 #: atomic test touch and writes a card the repository is meant to commit; a
 #: touch spent in a tab is a spent budget with no record, so it is refused
-#: here rather than budgeted — and so is `loop --promote`, which ends in the
-#: same touch by another route (see `_promotes`). `backtest` reads only
-#: committed files, but its report is the published record of that touch and
-#: belongs beside the ledger in git, not in a browser's memory.
+#: here rather than budgeted — and so are `loop --promote` and
+#: `fleet --promote`, which end in the same touch by another route (see
+#: `_promotes`). `backtest` reads only committed files, but its report is the
+#: published record of that touch and belongs beside the ledger in git, not in
+#: a browser's memory.
 NOT_IN_BROWSER = {
     "snapshot": "a network connection",
     "mcp": "a process",
@@ -77,6 +78,14 @@ NOT_IN_BROWSER = {
                "would be a spent budget with no card in the repository",
     "backtest": "the committed ledger and backtest report of a real-data run; "
                 "there is nothing to publish from a browser",
+    # Phase 2. `issue` refits a promoted model and writes the file a brief
+    # cites; `brief` writes the county document; both are records the
+    # repository commits, and neither can be produced from packed extracts.
+    "issue": "a passing test card, the pinned feature data for the target period and "
+             "a place to commit issued/<contract>/<period>.json",
+    "brief": "committed issued files and pinned USA Structures counts; a brief is "
+             "written only where it can be validated and committed",
+    "exposure snapshot": "a network connection to the USA Structures FeatureServer",
 }
 
 
@@ -86,17 +95,34 @@ def _refuse(command: str, needs: str | None = None) -> int:
     return 2
 
 
-def _promotes(argv: list[str]) -> bool:
-    """True when this `loop` would spend the test touch.
+def _refused_command(argv: list[str]) -> str | None:
+    """The `NOT_IN_BROWSER` key `argv` names, if any: a subcommand, or a
+    subcommand plus its first word for the two-word ones (`exposure snapshot`)."""
+    for n in (2, 1):
+        key = " ".join(argv[:n])
+        if key in NOT_IN_BROWSER:
+            return key
+    return None
+
+
+#: The subcommands that take `--promote` and end in the one test touch.
+PROMOTING_COMMANDS = ("loop", "fleet")
+
+
+def _promotes(argv: list[str]) -> str | None:
+    """The command spelling to refuse when this would spend the test touch.
 
     `loop --promote` ends in the very same atomic touch as `promote` — one
     test card, one line in the committed budget file — so the browser has to
     refuse it for the same reason, and has to do so for every spelling
-    argparse would accept, abbreviations included.
+    argparse would accept, abbreviations included. `fleet --promote` is the
+    same touch once per contract, which is worse, not better.
     """
-    return argv[:1] == ["loop"] and any(
+    if argv[:1] and argv[0] in PROMOTING_COMMANDS and any(
         len(arg) > 2 and "--promote".startswith(arg) for arg in argv
-    )
+    ):
+        return f"{argv[0]} --promote"
+    return None
 
 
 def _requested_features(argv: list[str]) -> list[str]:
@@ -144,10 +170,12 @@ def _features_in_browser(argv: list[str]) -> int:
 def run_cli(argv_json: str) -> int:
     """Run `readiness <argv>` exactly as the console script would."""
     argv = json.loads(argv_json)
-    if argv and argv[0] in NOT_IN_BROWSER:
-        return _refuse(argv[0])
-    if _promotes(argv):
-        return _refuse("loop --promote", NOT_IN_BROWSER["promote"])
+    refused = _refused_command(argv)
+    if refused:
+        return _refuse(refused)
+    promoting = _promotes(argv)
+    if promoting:
+        return _refuse(promoting, NOT_IN_BROWSER["promote"])
     if argv and argv[0] == "features":
         return _features_in_browser(argv)
     try:
