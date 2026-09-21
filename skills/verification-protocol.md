@@ -174,6 +174,69 @@ invented; whether the citation supports the sentence is yours to read.
 - **A thin panel** — a base rate near zero usually means the hazard is
   zone-coded, not that it is rare. `readiness panel` says which.
 
+## The gap report and the reviews (Phase 3)
+
+A gap report is not a forecast; it is a stress test of one facility's plan
+against a scenario and the county's issued risk. The same discipline that
+governs the loop governs it: never invent a number, never silently
+substitute one fact for another, and let a person — here, the reviewer —
+be the check nothing mechanical can be.
+
+**Propose no rules; read the record.** `readiness/plans/rules.py` answers
+each scenario question from the facility record and the risk layer alone.
+There is no channel through which a hand-computed answer reaches a finding.
+Every finding carries one of four statuses: `answered` (the record and the
+risk layer together answer it, with a citation for each sentence),
+`unanswered` (the record does not say — a finding, not a gap in the test),
+`failed` (the record answers, and the answer fails the scenario's pass
+condition), or `cannot_run` (a fact the rule depends on is missing).
+
+**Fail-closed is not optional.** A facility record with no address or
+coordinate field cannot fall back on a county-level number when its own
+design flood elevation or wind speed is missing — the switchgear rule
+returns `cannot_run`, naming the elevation-certificate guidance entry, and
+there is no code path that substitutes a regional figure instead. If you
+find yourself wanting to fill in a missing design intensity with something
+"close enough" from the county's own risk numbers, that is exactly the
+moment this rule exists for: report the `cannot_run` finding and move on.
+A region-level answer to a switchgear question is worse than no answer,
+because it looks like one.
+
+**Prose still passes the five citation rules.** `readiness gap-report`
+validates its output with the same `readiness.cite` rules the county brief
+passes (`docs/brief.md`), over a claim set that additionally resolves
+facility field paths and scenario questions. `--drafter claude` may rewrite
+the wording; it may not add a fact. Every sentence the model writes must
+still carry a citation marker into the same claim set, `cite.validate` runs
+on its output exactly as it does on the local drafter's, and any sentence
+that fails is **refused** — the local wording stays in its place and the
+refusal is counted on the report's provenance line, so no model can delete a
+finding by returning rubbish. Numbers never come from the model.
+
+**Blinding is not a courtesy; it is the review protocol.** No rule writes a
+name: a sentence says `PARTNER-1`, `COUNTY-A` or `DOCUMENT-3`, and the name
+lives in the claim it cites. A gap report is reviewed only in its blinded form
+— `FACILITY-<12 hex of the record's own random blind_id>`, no slug, no names,
+no county FIPS, no timestamp, written under `blinded/<label>/` rather than
+beside the named pair — and the render refuses to return a page in which any
+of those survived. `readiness review record` binds a rating to the sha256 of
+that specific blinded file: change what the report says and every review of
+the version before it is orphaned, on purpose; re-run the command on an
+unchanged record and nothing moves. Real facility files and real gap reports
+never enter git; there is no flag that commits one by accident, and a test
+refuses any committed plan JSON that carries a key
+`facility.FORBIDDEN_KEYS` lists, or any string value that reads as a street
+address, a ZIP+4 or a latitude/longitude pair.
+
+**A review record is an attestation, not proof.** `verify --phase 3` checks
+that at least three reviews of distinct blinded facilities, rated useful or
+better by a role naming "emergency manager", each name a report that still
+validates with zero citation violations, that the committed case studies
+still reproduce their expected findings, and that no coordinate key exists
+anywhere under `plans/`. It cannot check that the facility is real or that
+the reviewer is who they say — that is the one thing here that stays a
+person's job, on purpose, and the check says so rather than implying more.
+
 ## The canary
 
 Every scored run is screened for leakage: implausible skill, implausible AUC,

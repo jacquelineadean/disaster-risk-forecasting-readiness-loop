@@ -357,7 +357,11 @@ def _normalise(token: str) -> str:
 
 
 def numbers_in(
-    text: str, aliases: Iterable[str] = (), identifiers: Iterable[str] = ()
+    text: str,
+    aliases: Iterable[str] = (),
+    identifiers: Iterable[str] = (),
+    *,
+    exempt_identifiers: bool = True,
 ) -> list[str]:
     """Numeric tokens in prose, once markers and identifiers are set aside.
 
@@ -368,16 +372,23 @@ def numbers_in(
     number depends on the document, not on the shape of the digits. A scenario
     constant ("96" in "96-hour") is deliberately not an identifier — it is a
     number the plan leans on, so it must be a claim.
+
+    `exempt_identifiers=False` turns every exemption off and returns the raw
+    digit runs. That is what a caller scanning **model output** wants: a ZIP
+    code reads as a county FIPS and an invented date reads as a year, so a
+    rewriter checked with the exemptions on can introduce either. The
+    document's own validation keeps them on; the rewrite gate turns them off.
     """
     clean = strip_markers(text)
-    for alias in aliases:
-        clean = re.sub(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", " ", clean)
-    for name in identifiers:
-        clean = re.sub(
-            r"(?<![\w.,])" + re.escape(str(name)) + r"(?![\w]|[.,]\d)", " ", clean
-        )
-    for pattern in _IDENTIFIERS:
-        clean = pattern.sub(" ", clean)
+    if exempt_identifiers:
+        for alias in aliases:
+            clean = re.sub(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", " ", clean)
+        for name in identifiers:
+            clean = re.sub(
+                r"(?<![\w.,])" + re.escape(str(name)) + r"(?![\w]|[.,]\d)", " ", clean
+            )
+        for pattern in _IDENTIFIERS:
+            clean = pattern.sub(" ", clean)
     tokens = (_normalise(m.group(0)) for m in _NUMBER.finditer(clean))
     return [t for t in tokens if t]
 

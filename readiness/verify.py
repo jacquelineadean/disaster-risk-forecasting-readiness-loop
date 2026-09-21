@@ -862,3 +862,302 @@ def _brief_check(
             f"`readiness brief --county {counties[0]} --period {label}`"
         )
     return Check(name, False, "\n".join(detail))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 (plan §4)
+# ---------------------------------------------------------------------------
+
+#: How many distinct facilities the exit criterion needs a useful-or-better
+#: blinded review for. Report §6: "at least three real facilities".
+MIN_USEFUL_REVIEWS = 3
+
+
+@dataclass(frozen=True)
+class Phase3Result:
+    """The Phase 3 exit criteria, each as a check with its evidence.
+
+    Like Phase 2 it takes no contract: the criteria are about the gap reports
+    and their reviews, not about one hazard. Two of the four are honest about
+    what a machine cannot establish. Nothing here can know that a facility is
+    real or that a reviewer is a practising emergency manager; what it checks
+    is that each rating is bound to the sha256 of a blinded rendering that
+    still exists and still validates, that every committed case study still
+    reproduces its expected findings, and that no committed plan JSON has
+    grown an address or a coordinate.
+    """
+
+    checks: tuple[Check, ...]
+
+    @property
+    def passed(self) -> bool:
+        return all(check.passed for check in self.checks)
+
+    def failures(self) -> list[str]:
+        return [c.detail.splitlines()[0] for c in self.checks if not c.passed]
+
+
+def phase3(
+    *,
+    reports_dir: pathlib.Path | None = None,
+    reviews_dir: pathlib.Path | None = None,
+    case_studies_dir: pathlib.Path | None = None,
+    plans_dir: pathlib.Path | None = None,
+) -> Phase3Result:
+    """Evaluate the Phase 3 exit criteria from committed and supplied files.
+
+    Real facility files, gap reports and review records are never committed
+    (plan §4), so `reports_dir` and `reviews_dir` point at the planner's own
+    tree; the case studies and the no-coordinates scan read `plans/` itself.
+    """
+    from readiness.plans import reviews as reviews_mod
+
+    try:
+        reviews = reviews_mod.load_all(reviews_dir)
+        read_error = ""
+    except reviews_mod.ReviewError as exc:
+        reviews, read_error = [], str(exc)
+
+    reviews_check, counted = _reviews_check(reviews, reviews_dir, read_error)
+    reports_check = _reports_check(counted, reports_dir)
+    studies_check = _case_studies_check(case_studies_dir)
+    coordinates_check = _no_coordinates_check(plans_dir)
+    return Phase3Result(
+        (reviews_check, reports_check, studies_check, coordinates_check)
+    )
+
+
+def _blinded_renders(reports_dir: pathlib.Path | None) -> tuple[dict, list[str]]:
+    """sha256 -> the document that renders to it, over every JSON under the tree.
+
+    A blinded page is found by **content**, never by path. `<period>.json`
+    beside `<period>.blind.html` was a file-name convention and nothing more:
+    the JSON could be replaced wholesale with a document saying the opposite
+    of the page a reviewer rated, and this check would still have re-validated
+    the replacement and called it the reviewed report. Re-rendering every
+    document and keying on the sha closes document -> page -> sha, which is
+    the binding a review record actually asserts.
+    """
+    from readiness import cite
+    from readiness.plans import gap_report as gap_report_mod
+
+    root = gap_report_mod.reports_root(reports_dir)
+    found: dict[str, object] = {}
+    notes: list[str] = []
+    for path in sorted(root.rglob("*.json")) if root.exists() else []:
+        try:
+            doc = cite.from_json(path.read_text(encoding="utf-8"))
+            _page, sha = gap_report_mod.render_blinded(doc)
+        except (OSError, ValueError, KeyError, TypeError,
+                gap_report_mod.GapReportError):
+            notes.append(str(path))
+            continue
+        found.setdefault(sha, doc)
+    return found, notes
+
+
+def _reviews_check(
+    reviews: list, reviews_dir: pathlib.Path | None, read_error: str
+) -> tuple[Check, list]:
+    """At least three distinct facilities rated useful or better, blinded."""
+    from readiness.plans import reviews as reviews_mod
+
+    name = "reviews"
+    root = reviews_mod.reviews_root(reviews_dir)
+    if read_error:
+        return Check(name, False, f"reviews: {read_error}"), []
+    counted = reviews_mod.counting(reviews)
+    facilities = reviews_mod.distinct_facilities(counted)
+    lines = [
+        f"reviews: {len(facilities)}/{MIN_USEFUL_REVIEWS} distinct facility/facilities "
+        f"with a blinded review by a practising emergency manager rated "
+        f"{' or '.join(sorted(reviews_mod.USEFUL_OR_BETTER))} "
+        f"({len(reviews)} review(s) read from {data_mod.relative(root)})"
+    ]
+    for review in counted:
+        lines.append(
+            f"  [ok]  {review.facility_label} {review.period}: {review.rating!r} from "
+            f"{review.reviewer_role!r} ({review.organisation_type}, "
+            f"{review.years_in_role} year(s))"
+        )
+    for review in reviews:
+        if review.counts:
+            continue
+        why = []
+        if not review.blinded:
+            why.append("not blinded")
+        if not review.by_emergency_manager:
+            why.append(f"role {review.reviewer_role!r} is not an emergency manager")
+        if not review.useful:
+            why.append(f"rated {review.rating!r}")
+        lines.append(f"  [ .. ] {review.facility_label}: {'; '.join(why)}")
+    lines.append(
+        "  the record is an attestation: nothing here can establish that a facility "
+        "is real or that a reviewer practises emergency management"
+    )
+    return Check(name, len(facilities) >= MIN_USEFUL_REVIEWS, "\n".join(lines)), counted
+
+
+def _reports_check(counted: list, reports_dir: pathlib.Path | None) -> Check:
+    """Each counted review names a document that renders to exactly its sha.
+
+    No path under the reports tree is ever printed. A line pairing a blinded
+    label with `plans/reports/<slug>/...` is a de-blinding table, and this
+    command's output is pasted into pull requests and reports. What is printed
+    is the label, the first sixteen hex of the sha, and the shape of the
+    document — which is what a reader needs and all a reviewer may have.
+    """
+    from readiness.plans import gap_report as gap_report_mod
+
+    name = "reports"
+    root = gap_report_mod.reports_root(reports_dir)
+    if not counted:
+        return Check(name, False, "reports: no review counts yet, so none can be traced "
+                     f"to a blinded report under {data_mod.relative(root)}")
+    rendered, unreadable = _blinded_renders(reports_dir)
+    lines: list[str] = []
+    ok = True
+    for review in counted:
+        short = review.report_sha256[:16]
+        doc = rendered.get(review.report_sha256)
+        if doc is None:
+            ok = False
+            lines.append(
+                f"  [FAIL] {review.facility_label}: no document under "
+                f"{data_mod.relative(root)} renders to sha256 {short}..., so the "
+                "rating is of a document this tree does not hold"
+            )
+            continue
+        page, _sha = gap_report_mod.render_blinded(doc)
+        details = gap_report_mod.blind_details(page)
+        wanted = (review.facility_label, review.period, gap_report_mod.KIND)
+        if details != wanted:
+            ok = False
+            lines.append(
+                f"  [FAIL] {review.facility_label}: the document with sha256 "
+                f"{short}... is {details}, not {wanted}, so the review names a "
+                "report about another facility, period or kind"
+            )
+            continue
+        violations = _gap_report_violations(doc)
+        if violations:
+            ok = False
+            lines.append(
+                f"  [FAIL] {review.facility_label} ({short}...): "
+                f"{len(violations)} violation(s), first: {violations[0]}"
+            )
+            continue
+        lines.append(
+            f"  [ok]  {review.facility_label} ({short}...): "
+            f"{len(doc.sentences)} sentences, {len(doc.claims)} claims, "
+            "validates with zero violations"
+        )
+    if unreadable:
+        lines.append(
+            f"  [ .. ] {len(unreadable)} file(s) under {data_mod.relative(root)} are "
+            "not gap-report documents and were not considered"
+        )
+    head = (
+        f"reports: {sum(1 for line in lines if line.startswith('  [ok]'))}/"
+        f"{len(counted)} counted review(s) trace to a blinded render that still "
+        f"validates under {data_mod.relative(root)}"
+    )
+    return Check(name, ok, "\n".join([head, *lines]))
+
+
+def _gap_report_violations(doc) -> list:
+    """Re-validate a written gap report against **its own** claim set.
+
+    Say what this is, because it is easy to read as more. The facility record
+    and the scenario a real report was built from are the planner's, not this
+    repository's, and neither is committed — so nothing here can re-resolve
+    `power.fuel_hours` to a building. What this checks is that the document is
+    internally sound: every sentence cites, every citation exists in the
+    document, every number is the rendered value of a cited claim, no
+    forbidden phrasing, no place named by a key or a value anywhere in the
+    JSON, and the kind is a gap report. A document that passed these when it
+    was written and fails them now has been edited since.
+    """
+    from readiness import cite
+    from readiness.plans import gap_report as gap_report_mod
+    from readiness.plans import scenarios as scenarios_mod
+
+    try:
+        library = scenarios_mod.as_known(scenarios_mod.load_all())
+    except scenarios_mod.ScenarioError:
+        library = set()
+    known: dict[str, object] = {
+        "facility": {c.source.ref for c in doc.claims if c.source.kind == "facility"},
+        "scenario": library
+        | {c.source.ref for c in doc.claims if c.source.kind == "scenario"},
+        "issued": {c.source.ref.split("#")[0] for c in doc.claims
+                   if c.source.kind == "issued"},
+        "ledger": {c.source.ref for c in doc.claims if c.source.kind == "ledger"},
+        "manifest": {c.source.ref for c in doc.claims if c.source.kind == "manifest"},
+    }
+    found = gap_report_mod.check(doc, cite.DictResolver(known))
+    if doc.kind != gap_report_mod.KIND:
+        found.append(cite.Violation(
+            cite.UNRESOLVED, None,
+            f"the document is a {doc.kind!r}, not a {gap_report_mod.KIND!r}",
+        ))
+    return found
+
+
+def _case_studies_check(case_studies_dir: pathlib.Path | None) -> Check:
+    """Every committed case study reproduces the findings it expects."""
+    from readiness.plans import case_studies as case_studies_mod
+
+    name = "case studies"
+    root = case_studies_mod.case_studies_dir(case_studies_dir)
+    try:
+        results = case_studies_mod.check_all(case_studies_dir)
+    except (case_studies_mod.CaseStudyError, ValueError) as exc:
+        return Check(name, False, f"case studies: {exc}")
+    if not results:
+        return Check(
+            name, True,
+            f"case studies: none committed under {data_mod.relative(root)}, which is "
+            "the default — each is an example added deliberately, with a published "
+            "investigation cited for every fact",
+        )
+    failed = [r for r in results if not r.passed]
+    head = (
+        f"case studies: {len(results) - len(failed)}/{len(results)} reproduce their "
+        f"expected findings"
+    )
+    return Check(name, not failed, "\n".join([head, *(r.format() for r in results)]))
+
+
+def _no_coordinates_check(plans_dir: pathlib.Path | None) -> Check:
+    """No committed JSON under plans/ names a place, by key or by value.
+
+    The same scan `gap_report.check` runs over a rendered document, so the
+    rule is one rule rather than two that can drift — and so the no-coordinate
+    guard is live over a tree whose keys nothing constrains.
+    """
+    from readiness.plans import facility as facility_mod
+    from readiness.plans import gap_report as gap_report_mod
+
+    name = "no coordinates"
+    root = pathlib.Path(plans_dir) if plans_dir else data_mod.REPO_ROOT / "plans"
+    if not root.exists():
+        return Check(name, False, f"no coordinates: {data_mod.relative(root)} does not exist")
+    scanned = 0
+    problems: list[str] = []
+    for path in sorted(root.rglob("*.json")):
+        scanned += 1
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            problems.append(f"  [FAIL] {data_mod.relative(path)}: unreadable ({exc})")
+            continue
+        for key in gap_report_mod.forbidden_keys(payload):
+            problems.append(f"  [FAIL] {data_mod.relative(path)}: carries {key}")
+    head = (
+        f"no coordinates: {scanned} committed JSON file(s) under "
+        f"{data_mod.relative(root)} carry none of the keys "
+        f"{list(facility_mod.FORBIDDEN_KEYS)} and no value that reads as "
+        "a street address, a ZIP+4 or a coordinate pair"
+    )
+    return Check(name, not problems, "\n".join([head, *problems]))
