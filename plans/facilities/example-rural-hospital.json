@@ -1,0 +1,160 @@
+{
+  "slug": "example-rural-hospital",
+  "blind_id": "3049ff11b632f8d2e54d1da85cc8d7ad",
+  "occupancy_type": "hospital",
+  "county_fips": "99001",
+  "census": 24,
+  "staff_on_shift": 11,
+  "power": {
+    "generator": true,
+    "fuel_hours": 72,
+    "switchgear_elevation_ft": 6.5,
+    "transfer_switch_elevation_ft": 6.5,
+    "load_test_interval_days": 30
+  },
+  "water": {
+    "on_site_storage_hours": 18
+  },
+  "design_intensity": {
+    "flood_elevation_ft": 9.5,
+    "flood_elevation_source": "Elevation Certificate, Section C, for this building",
+    "design_wind_mph": 115
+  },
+  "evacuation": {
+    "trigger_written": true,
+    "trigger_text": "Evacuate when the county emergency manager declares a mandatory evacuation for this zone, or when river stage is forecast to exceed the levee crest within 24 hours.",
+    "authority": "the administrator on call, with the chief nursing officer as alternate",
+    "transport_lead_hours": 18,
+    "priority_order_written": false,
+    "priority_decided_on": null
+  },
+  "transfer_agreements": [
+    {
+      "name": "Zzyzx Regional Medical Center",
+      "county_fips": "99001",
+      "signed": true,
+      "same_floodplain": true,
+      "same_grid_feeder": true
+    },
+    {
+      "name": "Fictional Valley Hospital",
+      "county_fips": "99007",
+      "signed": false,
+      "same_floodplain": false,
+      "same_grid_feeder": null
+    }
+  ],
+  "co_located_operators": [
+    {
+      "name": "Example Dialysis Partners",
+      "occupants": 12
+    }
+  ],
+  "evidence": {
+    "slug": {
+      "text": "Identifier this planning record uses for the facility. Not a name, not a place: the blinded rendering replaces it with the label built from blind_id.",
+      "source_doc": "This planning record (fictional, for documentation only)",
+      "page": null
+    },
+    "occupancy_type": {
+      "text": "Critical access hospital, twenty-five licensed beds.",
+      "source_doc": "Emergency operations plan, cover page (fictional)",
+      "page": 1
+    },
+    "county_fips": {
+      "text": "County FIPS 99001, a county that does not exist, in the fixture state the test suite uses.",
+      "source_doc": "Emergency operations plan, cover page (fictional)",
+      "page": 1
+    },
+    "census": {
+      "text": "Average midnight census over the last twelve months, twenty-four occupants.",
+      "source_doc": "Annual operating statistics (fictional)",
+      "page": 4
+    },
+    "staff_on_shift": {
+      "text": "Eleven staff on the overnight shift, the smallest staffing the roster runs.",
+      "source_doc": "Staffing roster, night shift (fictional)",
+      "page": 2
+    },
+    "power.generator": {
+      "text": "One 400 kW diesel generator serving the essential electrical system.",
+      "source_doc": "Emergency power annex (fictional)",
+      "page": 3
+    },
+    "power.fuel_hours": {
+      "text": "Day tank and bulk tank together hold seventy-two hours at full essential load.",
+      "source_doc": "Emergency power annex, fuel calculation (fictional)",
+      "page": 4
+    },
+    "power.switchgear_elevation_ft": {
+      "text": "Essential switchgear on the ground floor at six and a half feet above datum.",
+      "source_doc": "Elevation Certificate, Section C (fictional)",
+      "page": 2
+    },
+    "power.transfer_switch_elevation_ft": {
+      "text": "Automatic transfer switch in the same ground-floor room as the switchgear.",
+      "source_doc": "Elevation Certificate, Section C (fictional)",
+      "page": 2
+    },
+    "power.load_test_interval_days": {
+      "text": "Monthly load test recorded in the generator log.",
+      "source_doc": "Generator maintenance log (fictional)",
+      "page": null
+    },
+    "water.on_site_storage_hours": {
+      "text": "Potable storage covers eighteen hours at the plan's reduced consumption rate.",
+      "source_doc": "Water annex, storage calculation (fictional)",
+      "page": 2
+    },
+    "design_intensity.flood_elevation_ft": {
+      "text": "Base flood elevation for this building, nine and a half feet above datum.",
+      "source_doc": "Elevation Certificate, Section C, with the FIRM panel (fictional)",
+      "page": 2
+    },
+    "design_intensity.flood_elevation_source": {
+      "text": "The certificate the elevation was read from, held by the planner.",
+      "source_doc": "Elevation Certificate, Section C (fictional)",
+      "page": 2
+    },
+    "design_intensity.design_wind_mph": {
+      "text": "Design wind speed from the structural drawings.",
+      "source_doc": "Structural drawings, general notes (fictional)",
+      "page": null
+    },
+    "evacuation.trigger_written": {
+      "text": "The evacuation trigger is written into the plan rather than left to judgement.",
+      "source_doc": "Emergency operations plan, evacuation annex (fictional)",
+      "page": 11
+    },
+    "evacuation.trigger_text": {
+      "text": "The trigger as the annex words it.",
+      "source_doc": "Emergency operations plan, evacuation annex (fictional)",
+      "page": 11
+    },
+    "evacuation.authority": {
+      "text": "The administrator on call holds the authority to order an evacuation.",
+      "source_doc": "Emergency operations plan, evacuation annex (fictional)",
+      "page": 11
+    },
+    "evacuation.transport_lead_hours": {
+      "text": "The regional transport contract asks for eighteen hours of notice.",
+      "source_doc": "Ambulance transport agreement (fictional)",
+      "page": 1
+    },
+    "evacuation.priority_order_written": {
+      "text": "The annex names no occupant priority order; the gap report says so.",
+      "source_doc": "Emergency operations plan, evacuation annex (fictional)",
+      "page": 12
+    },
+    "transfer_agreements": {
+      "text": "Two receiving facilities, one signed and one still in draft, with the county, floodplain and grid feeder recorded for each.",
+      "source_doc": "Transfer agreements folder (fictional)",
+      "page": null
+    },
+    "co_located_operators": {
+      "text": "An independent dialysis operator leases part of the ground floor.",
+      "source_doc": "Lease schedule and occupancy list (fictional)",
+      "page": null
+    }
+  }
+}

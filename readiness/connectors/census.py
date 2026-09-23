@@ -35,6 +35,18 @@ class County:
     state: str         # 2-letter postal
     name: str
 
+    @property
+    def id(self) -> str:
+        """The region id, which for a county is its FIPS.
+
+        Every region universe the data plane can assemble exposes `.id` and
+        `.name` (`geoboundaries.Region` is the other), so nothing downstream
+        has to know which country it is in. `fips` stays, because it is what
+        every US-specific caller means and renaming it would move fingerprints
+        for no gain.
+        """
+        return self.fips
+
     def __str__(self) -> str:
         return f"{self.name} ({self.fips})"
 

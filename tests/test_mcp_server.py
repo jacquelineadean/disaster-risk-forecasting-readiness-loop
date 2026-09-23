@@ -181,7 +181,12 @@ class TestDataTools(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
-        mcp_server.configure(self.c)
+        # `readiness mcp` is the composition root that hands the server its
+        # model-registry description; `readiness/connectors` may not import
+        # the engine itself (tests/test_boundaries.py).
+        from readiness.engine import describe_registry
+
+        mcp_server.configure(self.c, describe_models=describe_registry)
         self.region = self.ds.panel.regions[0]
 
     def tearDown(self):
@@ -251,6 +256,13 @@ class TestDataTools(unittest.TestCase):
         text = self.call("list_models")
         self.assertIn("climatology-pooled", text)
         self.assertIn("leaky-oracle", text)
+
+    def test_an_unwired_server_says_so_rather_than_importing_the_engine(self):
+        # The data plane does not reach the models: the description is handed
+        # in by `readiness.cli`, and a server started any other way says what
+        # is missing instead of answering with something it made up.
+        mcp_server.configure(self.c)
+        self.assertIn("readiness mcp", self.call("list_models"))
 
 
 if __name__ == "__main__":

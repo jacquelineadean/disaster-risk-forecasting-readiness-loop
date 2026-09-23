@@ -11,9 +11,15 @@ every machine — the same property the real harness insists on.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import pathlib
 import random
 
+from readiness import contracts as contracts_mod
+from readiness.config import HAZARD_CATEGORIES
+from readiness.connectors import national_records
 from readiness.contracts import Contract
 from readiness.harness.labels import Panel, StormEvent
 
@@ -136,6 +142,7 @@ def make_signal_panel(
     *,
     intercept: float = -2.0,
     slope: float = 1.5,
+    region_id_of=None,
 ) -> Panel:
     """A dense panel whose labels follow the source's antecedent precipitation.
 
@@ -149,8 +156,12 @@ def make_signal_panel(
     from readiness.harness import features as F
 
     ppy = contract.periods_per_year
+    # `region_id_of` names the regions: US-style FIPS by default, geoBoundaries
+    # shapeIDs for a pilot. The panel's arithmetic does not care which, which
+    # is the property the pilot tests lean on.
+    region_id_of = region_id_of or region_id
     units = tuple(
-        (region_id(i), year, period)
+        (region_id_of(i), year, period)
         for i in range(n_regions)
         for year in contract.all_years()
         for period in range(1, ppy + 1)
@@ -175,3 +186,169 @@ def make_signal_panel(
         units, tuple(labels), hazard=contract.hazard, scope=contract.scope_key,
         period=contract.period,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: the same fixtures, somewhere that is not the United States
+# ---------------------------------------------------------------------------
+# `ZZ` and `ZY` are user-assigned ISO 3166-1 codes, so they can never collide
+# with a real country — the same trick as state FIPS 99 above. The harness must
+# work for any hazard anywhere, and a pilot fixture that quietly borrowed a real
+# country's boundaries would be testing that country, not the loop.
+
+PILOT_COUNTRY = "ZZ"
+
+#: The geoBoundaries release the pilot fixtures name. A literal: the point of
+#: the field is that a panel is only reproducible against a named release.
+PILOT_RELEASE = "gbOpen 6.0.0"
+
+#: Splits that start after the fixture record does (see `make_pilot_contract`).
+PILOT_SPLITS = {"train": [2005, 2014], "validate": [2015, 2019], "test": [2020, 2024]}
+
+
+def shape_id(i: int, country: str = PILOT_COUNTRY, admin_level: str = "ADM1") -> str:
+    """A geoBoundaries-shaped id: `ZZ-ADM1-003`."""
+    return f"{country.upper()}-{admin_level.upper()}-{i + 1:03d}"
+
+
+def shape_name(i: int) -> str:
+    return f"Region {i + 1}"
+
+
+def make_pilot_contract(
+    *,
+    name: str = "flood-zz",
+    hazard: str = "inland_flood",
+    country: str = PILOT_COUNTRY,
+    source: str = "national_records",
+    file: str = "zz_records.csv",
+    sha256: str = "0" * 64,
+    record_start_year: int = 2005,
+    admin_level: str = "ADM1",
+    release: str = PILOT_RELEASE,
+    **overrides,
+) -> Contract:
+    """A valid contract scored outside the US, with everything a pilot must declare.
+
+    `sha256` defaults to a placeholder because a records file cannot be hashed
+    before it is written: write it with `make_records_csv`, which returns the
+    hash, then build the contract again with it.
+    """
+    ground_truth, regions = contracts_mod.pilot_sources(
+        source=source,
+        file=file,
+        sha256=sha256,
+        record_start_year=record_start_year,
+        admin_level=admin_level,
+        release=release,
+    )
+    spec: dict = {
+        "name": name,
+        "version": "1.0.0",
+        "description": "synthetic pilot contract",
+        "hazard": hazard,
+        "scope": {"country": country, "states": []},
+        "period": "quarter",
+        "damaging": {"property_usd_min": 10_000.0, "count_casualties": True},
+        "splits": dict(PILOT_SPLITS),
+        "test_touch_budget": 1,
+        "reference_model": "climatology-pooled",
+        "thresholds": {
+            "min_brier_skill_score": 0.0,
+            "reliability_tolerance_pp": 0.05,
+            "reliability_min_bin_count": 30,
+            "min_auc": 0.70,
+            "n_reliability_bins": 10,
+        },
+        "ground_truth": ground_truth,
+        "regions": regions,
+    }
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(spec.get(key), dict):
+            spec[key] = {**spec[key], **value}
+        else:
+            spec[key] = value
+    return Contract.from_spec(spec)
+
+
+def make_geojson(
+    country: str = PILOT_COUNTRY, admin_level: str = "ADM1", n_regions: int = 4
+) -> bytes:
+    """A gbOpen-shaped FeatureCollection of `n_regions` unit squares.
+
+    Region *i* is the square with its south-west corner at
+    `(lon = i, lat = i)`, so its vertex-mean centroid is exactly
+    `(i + 0.5, i + 0.5)` and a test can assert the arithmetic rather than
+    approximate it. The ring closes on its first vertex, as GeoJSON requires,
+    which is the duplicate the centroid has to drop.
+    """
+    features = []
+    for i in range(n_regions):
+        lo = float(i)
+        ring = [
+            [lo, lo], [lo + 1.0, lo], [lo + 1.0, lo + 1.0], [lo, lo + 1.0], [lo, lo]
+        ]
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "shapeName": shape_name(i),
+                "shapeISO": "",
+                "shapeID": shape_id(i, country, admin_level),
+                "shapeGroup": country.upper(),
+                "shapeType": admin_level.upper(),
+            },
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
+        })
+    return json.dumps(
+        {"type": "FeatureCollection", "features": features}, indent=1
+    ).encode()
+
+
+def record_row(**over) -> dict:
+    """One partner-records row, every column present."""
+    row = {
+        "event_id": "E1",
+        "start_date": "2006-08-04",
+        "region_id": shape_id(0),
+        "hazard": "flood",
+        "deaths": "0",
+        "injured": "0",
+        "damage_usd": "0",
+        "source": "National Disaster Management Agency",
+    }
+    row.update({k: str(v) for k, v in over.items()})
+    return row
+
+
+def make_records_csv(
+    path, contract: Contract, *events: dict, record_start_year: int | None = None
+) -> str:
+    """Write a partner records CSV for `contract` and return its sha256.
+
+    The hash is what the contract pins, and it cannot be known before the file
+    exists — so the fixture returns it and the caller builds the contract it
+    actually means:
+
+        draft = make_pilot_contract()
+        sha = make_records_csv(path, draft, record_row(...))
+        contract = make_pilot_contract(sha256=sha)
+
+    Each event is a `record_row()`-shaped mapping; anything not given takes the
+    row default, including a `hazard` value this contract's hazard accepts.
+    """
+    path = pathlib.Path(path)
+    default_hazard = HAZARD_CATEGORIES[contract.hazard]["national_records"][0]
+    start = (
+        record_start_year
+        if record_start_year is not None
+        else contract.record_start_year
+    )
+    lines = [f"# record_start_year: {start}", ",".join(national_records.COLUMNS)]
+    for event in events or (record_row(),):
+        given = {k: str(v) for k, v in event.items()}
+        row = {**record_row(hazard=default_hazard), **given}
+        lines.append(",".join(row[c] for c in national_records.COLUMNS))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = ("\n".join(lines) + "\n").encode()
+    path.write_bytes(blob)
+    return hashlib.sha256(blob).hexdigest()

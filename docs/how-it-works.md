@@ -429,7 +429,225 @@ sub-county key. `make phase2` chains the fleet, the
 backtests, the exposure snapshot and spot-check, an issue per passing
 contract, the briefs for the spot-checked states, and this check.
 
-## 13. The research briefing
+## 13. Phase 3: the planning thought-partner
+
+Phase 2 answers "how likely, for this county." Phase 3 answers a narrower,
+harder question for one building: *does this facility's plan survive the
+region's own validated risk?* It runs a hazard-agnostic scenario against a
+facility record the planner supplies, and turns the answers into a cited
+document, reviewed blind by a practising emergency manager before it counts
+for anything. Full reference: [docs/plans.md](plans.md). No transcript of it
+exists yet, for the same reason as Phases 1 and 2: the risk numbers a real
+report cites need the real-data run, and its exit needs reviews a person has
+to give.
+
+**See what is registered.** The scenario library is committed at Phase 0, as
+a specification the rules are tested against.
+
+```bash
+readiness scenarios list
+readiness scenarios check [--case-studies DIR]    # runs every case study against its expected findings
+```
+
+`plans/scenarios/96h-isolation-acute-care.json` sits beside its markdown, and
+a test keeps the markdown the specification: the JSON's question ids and
+text must match the prose. `scenarios check` runs every committed case study
+— published, cited accounts of real events, mapped onto the scenario's
+injects — through the same rules a live facility goes through and compares
+the result to the file's own expected findings. None ships by default; the
+mechanism is proven on a synthetic case study in the test suite.
+
+**Build a gap report.** One facility, one period, one scenario.
+
+```bash
+readiness gap-report --facility PATH --period 2026-Q4 [--scenario 96h-isolation-acute-care] \
+    [--out DIR] [--drafter local|claude]
+```
+
+The facility record has no address or coordinate field — design intensity
+(the flood elevation, the design wind speed) comes from the planner's own
+elevation certificate or FIRM, cited as a facility document, never looked up
+from a location. Two scans keep it that way: the keys `facility.FORBIDDEN_KEYS`
+lists (`address`, `lat`, `zip`, `geometry`, `parcel` and the rest — the full
+set is quoted in [docs/plans.md](plans.md)) and, because a key list cannot
+cover a free-text note, any *string value* that reads as a street address, a
+ZIP+4 or a decimal-degree pair. A bare five-digit number is a county FIPS and
+is not flagged. Every record also carries a random `blind_id`
+(`python3 -c "import secrets; print(secrets.token_hex(16))"`), whose first
+twelve characters are the label a blinded report shows.
+
+Every scenario question is answered by a rule against the record and the
+county's issued risk layer, and every rule returns one of four statuses:
+`answered`, `unanswered`, `failed`, `cannot_run`. A missing design intensity —
+the elevation, or the document it was read from — is fail-closed: one
+`cannot_run` finding naming the elevation-certificate guidance, and no rule
+substitutes a county number for it. **No rule writes a name**: a sentence says
+`PARTNER-1`, `COUNTY-A` or `DOCUMENT-3`, and the name lives in the claim that
+sentence cites.
+
+The report is validated by the same `readiness.cite` rules the county brief
+passes, written only when the list of violations is empty, and rendered twice:
+the plain document under `<out>/<slug>/`, with a legend saying which building
+`PARTNER-1` is, and a blinded one under `<out>/blinded/<label>/` with no
+legend, no slug, no names, no county FIPS and no timestamp, for review by
+someone who is not told which building it is. Blinding is structural — the
+render drops the naming tail of each claim, rebuilds the title and footer from
+the labels, and re-keys the claim ids that carried a county — and it checks its
+own output, refusing to write anything if an identifying string survived. All
+three files are written atomically, so a failure part-way through leaves the
+tree as it was. `--period` is checked against `YYYY`, `YYYY-Qn` or `YYYY-Mnn`
+before anything is read or written, because it is both a path component and
+markup. Exit 1 with the violations on a citation failure, exit 2 if the
+facility file cannot be read or the period is not a period label. **Real
+facility files and real gap reports never enter git.**
+
+With `--drafter claude` the model rewords the local prose and never sees a
+name. A candidate that changes the citation set, adds a URL or introduces a
+digit the original did not have is **refused, not dropped**: the local sentence
+stays, so no model can delete a finding, and the provenance line reads "N of M
+drafted sentences were refused and kept their local wording".
+
+**Record a review.** A review is an attestation bound to one blinded
+report's hash, not a survey response.
+
+```bash
+readiness review record --report PATH.blind.html \
+    --rating {not useful,somewhat useful,useful,very useful} \
+    --role "practising emergency manager" --org-type hospital|county|state|ngo|other \
+    --years N [--comments TEXT] [--reviews DIR]
+```
+
+The record is written to
+`plans/reviews/<report sha256[:16]>-<attestation digest[:12]>.json`, and the
+sha in that name is the binding: it must match the file `--report` names, or
+the command refuses. The second half is a digest of the attestation with its
+timestamp removed, so two emergency managers reviewing one report get two
+files rather than the second overwriting the first, and recording the same
+attestation twice is idempotent. Change what a report *says* and every review
+of the version before it is orphaned, on purpose; re-run the command on an
+unchanged record and nothing moves, because the blinded page carries no
+timestamp.
+
+**Verify.** The Phase 3 check takes no contract:
+
+```bash
+readiness verify --phase 3 [--reports DIR] [--reviews DIR]
+```
+
+Four checks, in order: **reviews** — at least three reviews of distinct
+blinded facilities, rated useful or very useful, by a reviewer role
+containing "emergency manager"; **reports** — every document under the reports
+tree is re-rendered and keyed by the sha of its blinded render, a review counts
+only when its sha is one of those *and* the render's own tag names that
+review's label and period, and the check prints the label, the sha prefix and
+the counts but never a path under the reports tree; **case studies** — every
+committed one reproduces its expected findings; **no coordinates** — no
+committed JSON under `plans/` carries any key `facility.FORBIDDEN_KEYS` lists,
+or any string value that reads as a street address, a ZIP+4 or a
+decimal-degree pair, anywhere. `make scenarios-check` and `make gap-report
+FACILITY=<path> PERIOD=<label>` wrap the first two commands; `make verify
+PHASE=3` wraps the check.
+
+Not mechanisable: that the facilities are real and the reviewers are
+practising emergency managers. A review record is an attestation, and
+`verify --phase 3`'s first check is the honest extent of what a machine can
+confirm about it.
+
+## 14. Outside the US
+
+Phase 4's claim is architectural: *the architecture does not change, the
+connectors do* (plan §5). A **pilot** is a registered contract whose
+`country` is not `US`, and the same harness — the Phase 1 queue, the
+temporal firewall, the leakage canary, the ledger, the one atomic test
+touch, `readiness verify --phase 1` — runs against it unmodified. Full
+reference: [docs/global.md](global.md). No transcript of it exists yet, for
+the same reason as every phase above: nothing here has reached a real
+partner file, a real EM-DAT export or a real geoBoundaries release, and the
+demonstration is a synthetic pilot in [`tests/test_global.py`](../tests/test_global.py).
+
+**Register a pilot.** A contract's two source sections, `ground_truth` and
+`regions`, are elided from the digest at their US defaults, so every
+contract registered before this phase still hashes to what it did.
+
+```bash
+readiness register flood-zz --hazard inland_flood --country ZZ \
+    --ground-truth national_records --records /path/zz_records.csv \
+    --admin-level ADM2 --regions-release "gbOpen 6.0.0" --period year
+
+readiness register cyclone-zy --hazard tropical_cyclone --country ZY \
+    --ground-truth emdat --records /path/zy_emdat.xlsx --admin-level ADM1
+```
+
+Outside the US the contract must name `--ground-truth` (`national_records`
+or `emdat`; `storm_events` is a US archive and is refused) and `--records`
+PATH — the sha256 is computed now, at registration, and written into the
+contract as a criterion, and the file itself is never committed or copied.
+`readiness register` prints where the file has to be placed
+(`snapshots/records/<CC>/<basename>`, git-ignored) and, for `--ground-truth
+emdat`, that the admin-name crosswalk
+(`snapshots/records/<cc>_emdat_regions.csv`) has to be written first and that
+the export must cover one country.
+
+`--regions-sha256 HEX` optionally pins the boundary file's own bytes, so a
+mirror cannot serve a different universe under the same release name; omitted,
+the field is not written and the digest is what it would have been. A flag
+that does not apply is refused rather than ignored: `--admin-level`,
+`--regions-release` and `--regions-sha256` describe a geoBoundaries universe
+and are refused for a US contract, and `--event-type` names a NOAA Storm
+Events vocabulary and is refused for a pilot. `readiness hazards` prints which
+catalogue hazards can be registered outside the US at all.
+
+**The basename is published.** It is a criterion — in the committed contract,
+in the packed `contracts/*.json`, on the site and in every ledger card's
+inputs — because a panel cannot be reproduced without it. Name the file
+neutrally, not after the partner or the agreement ([DATA-LICENSES.md](../DATA-LICENSES.md)).
+What is *not* published, anywhere, is the labels: the site skips a pilot in
+`tapes.json` and publishes only digest, size and data version in
+`panels.json`.
+
+**What is US-only.** Terrain (the Census Gazetteer) and the National Risk
+Index read US-only sources and are refused by name for a pilot, so it runs
+the Phase 1 queue on the `era5-antecedent` feature set alone — the
+candidates that need terrain are skipped with a progress line and no card,
+because `data.pinned()` answers False for a US-only connector outside the US
+and `readiness loop`/`score`/`fleet` load only what is already pinned.
+A pilot's ground truth reaches the panel through the same code as Storm
+Events: `readiness.harness.labels.RecordEvent`, walked by the same
+`_walk_events` a `StormEvent` is, so every US panel stays bit-identical. A
+pilot also never counts toward Phase 2's national-contract total
+(`readiness.fleet.national()` excludes it explicitly).
+
+**Verify.** The Phase 4 check takes no contract:
+
+```bash
+readiness verify --phase 4
+```
+
+Four checks, in order: **`pilots`** — at least two registered contracts
+outside the US pass the Phase 1 checks; **`global inputs`** — every input
+on each passing pilot's test card resolves to a connector marked globally
+available, never one of `census`, `storm_events`, `nws_zones`, `nri`,
+`usa_structures` or `gazetteer`; **`ground truth pinned`** — each pilot's
+pinned record hashes to the sha256 its contract names, read from
+`snapshots/manifest.json` alone; **`us digests`** — the three US example
+contracts still hash to exactly what their blessed fingerprints record,
+proof that the new schema fields move nothing at their defaults. Nothing
+here opens a partner's file: partner ground-truth bytes are never
+committed, packed or published, and the check runs from committed ledgers
+and the pinned manifest alone.
+
+**What `readiness panel` adds for a pilot.** Two diagnostics lines, printed
+only when non-zero, so the US rendering is byte-for-byte what it was:
+`unplaced rows` (rows whose admin units the EM-DAT crosswalk could not place)
+and `regions dropped` (regions an event named that are outside the universe,
+on rows that still landed somewhere — the shape a crosswalk written against
+another geoBoundaries release takes).
+
+Not knowable offline: whether two real pilots pass. The geoBoundaries URL
+pattern and the EM-DAT column names are confirmed on the first real pull,
+not before.
+
+## 15. The research briefing
 
 The design the implementation follows is in [`report/index.html`](../report/index.html)
 (`make serve` to read it locally). Its second section is the argument for

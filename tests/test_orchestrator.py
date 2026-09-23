@@ -190,9 +190,12 @@ class TestLocalLoop(unittest.TestCase):
         steward = agents["data-steward"]["prompt"]
         self.assertIn("heat", steward)
         self.assertIn("snapshots/manifest.json", steward)
-        # The system prompt quotes describe(), whose zone line may say "county";
-        # the hand-written parts of the subagent prompts must not.
-        for prompt in (text, analyst, steward):
+        # The system prompt quotes describe(), whose zone line may say "county"
+        # and whose ground-truth line names the record this contract is judged
+        # against — which for a pilot is a partner archive or EM-DAT, not Storm
+        # Events (tests/test_global.py checks that case). The hand-written parts
+        # of the subagent prompts must stay place-agnostic either way.
+        for prompt in (analyst, steward):
             self.assertNotIn("Storm Events", prompt)
         for prompt in (analyst, steward):
             self.assertNotIn("county", prompt.lower())

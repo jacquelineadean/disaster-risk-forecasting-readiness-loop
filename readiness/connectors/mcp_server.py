@@ -36,13 +36,32 @@ from readiness.harness.ledger import Ledger
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "readiness-data", "version": __version__}
 
-_state: dict[str, Any] = {"contract": None, "dataset": None}
+_state: dict[str, Any] = {"contract": None, "dataset": None, "models": None}
 
 
-def configure(contract: Contract | None) -> None:
-    """Bind the server to a contract (or reset it, so the next call resolves anew)."""
+def _no_model_registry() -> str:
+    return (
+        "the model registry was not supplied to this server; start it with "
+        "`readiness mcp -c NAME`, which wires it in"
+    )
+
+
+def configure(
+    contract: Contract | None,
+    *,
+    describe_models: Callable[[], str] | None = None,
+) -> None:
+    """Bind the server to a contract (or reset it, so the next call resolves anew).
+
+    `describe_models` is how `list_models` answers. It is passed in rather than
+    imported because `readiness/connectors` must not import `readiness.engine`
+    (tests/test_boundaries.py): the data plane a model reads from does not get
+    to reach the models. `readiness.cli` is the composition root that sees both
+    and wires this.
+    """
     _state["contract"] = contract
     _state["dataset"] = None
+    _state["models"] = describe_models
 
 
 def _contract() -> Contract:
@@ -151,9 +170,8 @@ def tool_ledger(args: dict) -> str:
 
 
 def tool_models(_args: dict) -> str:
-    from readiness.engine import describe_registry
-
-    return describe_registry()
+    describe = _state["models"] or _no_model_registry
+    return describe()
 
 
 TOOLS: dict[str, tuple[dict, Callable[[dict], str]]] = {
@@ -342,10 +360,17 @@ def handle(message: object) -> dict | None:
     return _error(request_id, -32601, f"method not found: {method}")
 
 
-def serve(stdin=None, stdout=None, *, contract: Contract | None = None) -> None:
+def serve(
+    stdin=None,
+    stdout=None,
+    *,
+    contract: Contract | None = None,
+    describe_models: Callable[[], str] | None = None,
+) -> None:
     """Read newline-delimited JSON-RPC from stdin, write responses to stdout."""
-    if contract is not None:
-        configure(contract)
+    if contract is not None or describe_models is not None:
+        configure(contract if contract is not None else _state["contract"],
+                  describe_models=describe_models)
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:

@@ -24,11 +24,21 @@ from readiness import cite, cli, contracts, data as data_mod, verify
 from readiness import issue as issue_mod
 from readiness.agent import orchestrator
 from readiness.connectors import usa_structures
-from readiness.connectors.base import Manifest
+from readiness.connectors.base import Manifest, sha256_bytes
 from readiness.connectors.census import County
 from readiness.harness.contract import Check
 from readiness.harness.labels import diagnose
-from tests.fixtures import make_panel
+from readiness.plans import gap_report as gap_report_mod
+from readiness.plans import reviews as reviews_mod
+from tests import fixtures_plans
+from tests.fixtures import (
+    make_geojson,
+    make_panel,
+    make_pilot_contract,
+    make_records_csv,
+    record_row,
+    shape_id,
+)
 from tests.test_features import FakeStatic
 from tests.test_issue import CANDIDATE, with_regions
 from tests.test_orchestrator import quick, signal_dataset
@@ -1203,6 +1213,806 @@ class TestVerifyPhase2(Phase2Case):
         code, out = self.run_cli("verify", "--phase", "2")
         self.assertEqual(code, 1)
         self.assertIn("0/0 registered with scope 'every region'", out)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: scenarios, gap-report, review, verify --phase 3
+# ---------------------------------------------------------------------------
+
+
+class Phase3Case(CliCase):
+    """A temporary facility record, issued tree, reports tree and reviews tree."""
+
+    def setUp(self):
+        super().setUp()
+        self.issued_dir = self.dir / "issued"
+        self.reports_dir = self.dir / "reports"
+        self.reviews_dir = self.dir / "reviews"
+        fixtures_plans.make_issued().write(self.issued_dir)
+        self.facility = fixtures_plans.write_facility(self.dir / "facility.json")
+        self.env3 = mock.patch.dict(os.environ, {
+            issue_mod.ISSUED_DIR_ENV: str(self.issued_dir),
+            gap_report_mod.REPORTS_DIR_ENV: str(self.reports_dir),
+            reviews_mod.REVIEWS_DIR_ENV: str(self.reviews_dir),
+            data_mod.EXPERIMENTS_DIR_ENV: str(self.dir / "experiments"),
+        })
+        self.env3.start()
+
+    def tearDown(self):
+        self.env3.stop()
+        super().tearDown()
+
+    def gap_report(self, *extra, facility=None, period="2026-Q4"):
+        return self.run_cli(
+            "gap-report", "--facility", str(facility or self.facility),
+            "--period", period, *extra,
+        )
+
+
+class TestScenariosCommand(CliCase):
+    def test_list_prints_ids_titles_and_question_counts(self):
+        code, out = self.run_cli("scenarios", "list")
+        self.assertEqual(code, 0, out)
+        self.assertIn("96h-isolation-acute-care", out)
+        self.assertIn("6 question(s)", out)
+        self.assertIn("96-hour isolation of an acute-care facility", out)
+        self.assertIn("plans/scenarios/96h-isolation-acute-care.md", out)
+        for question_id in ("q1", "q2", "q3", "q4", "q5", "q6"):
+            self.assertIn(question_id, out)
+
+    def test_check_with_no_case_study_passes_and_says_why(self):
+        code, out = self.run_cli("scenarios", "check")
+        self.assertEqual(code, 0, out)
+        self.assertIn("none committed", out)
+        self.assertIn("published investigation", out)
+
+    def test_check_runs_a_directory_of_case_studies(self):
+        studies = self.dir / "case-studies"
+        fixtures_plans.write_case_study(studies / "synthetic.json")
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 0, out)
+        self.assertIn("synthetic-river-flood", out)
+        self.assertIn("1/1 case study/studies reproduce", out)
+
+    def test_check_exits_1_on_a_mismatch(self):
+        studies = self.dir / "case-studies"
+        study = fixtures_plans.synthetic_case_study()
+        study["expected_findings"]["q1"] = "answered"
+        fixtures_plans.write_case_study(studies / "synthetic.json", **study)
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1)
+        self.assertIn("[FAIL]", out)
+        self.assertIn("q1: expected 'answered', rules said 'failed'", out)
+
+    def test_a_scenario_that_cannot_be_read_is_exit_2_not_a_traceback(self):
+        from readiness.plans import scenarios as scenarios_mod
+
+        broken = self.dir / "scenarios"
+        broken.mkdir(parents=True, exist_ok=True)
+        (broken / "broken.json").write_text("null", encoding="utf-8")
+        with mock.patch.object(scenarios_mod, "SCENARIOS_DIR", broken):
+            code, out = self.run_cli("scenarios", "list")
+        self.assertEqual(code, 2, out)
+        self.assertIn("expected a JSON object", out)
+
+    def test_a_case_study_that_is_not_an_object_is_exit_1_not_a_traceback(self):
+        studies = self.dir / "case-studies"
+        studies.mkdir(parents=True, exist_ok=True)
+        (studies / "null.json").write_text("null", encoding="utf-8")
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1, out)
+        self.assertIn("expected a JSON object", out)
+
+    def test_check_exits_1_on_a_fact_without_a_source(self):
+        studies = self.dir / "case-studies"
+        fixtures_plans.write_case_study(
+            studies / "synthetic.json", event={"text": "something happened"}
+        )
+        code, out = self.run_cli("scenarios", "check", "--case-studies", str(studies))
+        self.assertEqual(code, 1)
+        self.assertIn("a fact without a source does not belong", out)
+
+
+class TestGapReportCommand(Phase3Case):
+    def blinded_path(self, slug="test-facility") -> pathlib.Path:
+        label = fixtures_plans.make_facility(slug=slug).blind_label
+        return self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+
+    def test_it_writes_three_files_and_prints_every_status(self):
+        code, out = self.gap_report()
+        self.assertEqual(code, 0, out)
+        directory = self.reports_dir / "test-facility"
+        for name in ("2026-Q4.html", "2026-Q4.json"):
+            self.assertTrue((directory / name).exists(), name)
+        self.assertTrue(self.blinded_path().exists())
+        self.assertFalse((directory / "2026-Q4.blind.html").exists())
+        for question_id in ("q1", "q2", "q3", "q4", "q5", "q6"):
+            self.assertIn(question_id, out)
+        self.assertIn("blinded sha256", out)
+        self.assertIn("A practising emergency manager reviews every finding", out)
+        self.assertIn("readiness review record --report", out)
+
+    def test_the_written_json_validates_and_names_nothing_below_a_county(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        path = self.reports_dir / "test-facility" / "2026-Q4.json"
+        doc = cite.from_json(path.read_text(encoding="utf-8"))
+        self.assertEqual(doc.kind, gap_report_mod.KIND)
+        self.assertEqual(gap_report_mod.forbidden_keys(cite.to_dict(doc)), [])
+        text = " ".join(cite.strip_markers(s.text) for s in doc.sentences)
+        self.assertIn(cite.NOT_A_WARNING_SENTENCE, text)
+
+    def test_the_blinded_render_names_neither_the_facility_nor_a_partner(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        path = self.blinded_path()
+        page = path.read_text()
+        self.assertNotIn("test-facility", page)
+        self.assertNotIn("Far Ridge Hospital", page)
+        self.assertNotIn(fixtures_plans.COUNTY, page)
+        self.assertIn("FACILITY-", page)
+        self.assertIn("PARTNER-1", page)
+        self.assertIn("COUNTY-A", page)
+        # Nothing under blinded/ carries the slug, in a path or anywhere else.
+        self.assertNotIn(
+            "test-facility", str(path.relative_to(self.reports_dir))
+        )
+
+    def test_a_period_that_is_not_a_period_is_refused_with_exit_2(self):
+        for period in ("../../case-studies/leaked", "not/a/period", "2026-q4"):
+            with self.subTest(period=period):
+                code, out = self.gap_report("--period", period)
+                self.assertEqual(code, 2, out)
+                self.assertIn("is not a period label", out)
+                self.assertFalse(self.reports_dir.exists())
+
+    def test_rerunning_the_command_does_not_move_the_blinded_sha(self):
+        # Finding 17: the sha covered `generated_at`, so re-running with
+        # identical inputs orphaned every review of the report.
+        self.assertEqual(self.gap_report()[0], 0)
+        first = reviews_mod.sha256_of(self.blinded_path())
+        self.assertEqual(self.gap_report()[0], 0)
+        self.assertEqual(reviews_mod.sha256_of(self.blinded_path()), first)
+
+    def test_gap_report_refuses_unknown_fields(self):
+        broken = self.dir / "broken.json"
+        raw = fixtures_plans.facility_dict()
+        raw["sprinklers"] = True
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("unknown field 'sprinklers'", out)
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_gap_report_refuses_an_address_with_the_reason(self):
+        broken = self.dir / "addressed.json"
+        raw = fixtures_plans.facility_dict()
+        raw["address"] = "1 Example Street"
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("'address' is refused", out)
+        self.assertIn("Elevation Certificate", out)
+
+    def test_gap_report_refuses_a_record_missing_evidence(self):
+        broken = self.dir / "unevidenced.json"
+        raw = fixtures_plans.facility_dict()
+        del raw["evidence"]["power.fuel_hours"]
+        broken.write_text(json.dumps(raw), encoding="utf-8")
+        code, out = self.gap_report(facility=broken)
+        self.assertEqual(code, 2)
+        self.assertIn("no evidence entry names it", out)
+
+    def test_gap_report_refuses_an_unknown_scenario(self):
+        code, out = self.gap_report("--scenario", "no-such-scenario")
+        self.assertEqual(code, 2)
+        self.assertIn("no-such-scenario", out)
+
+    def test_a_missing_intensity_reports_cannot_run_naming_the_document(self):
+        path = fixtures_plans.write_facility(
+            self.dir / "no-elevation.json", slug="no-elevation",
+            **{"design_intensity.flood_elevation_ft": None},
+        )
+        code, out = self.gap_report(facility=path)
+        self.assertEqual(code, 0, out)
+        self.assertIn("q1  cannot_run", out)
+        doc = cite.from_json(
+            (self.reports_dir / "no-elevation" / "2026-Q4.json").read_text()
+        )
+        text = " ".join(cite.strip_markers(s.text) for s in doc.sentences)
+        self.assertIn("cannot be run for the electrical equipment", text)
+        guidance = {c.source.ref for c in doc.claims if c.source.kind == "guidance"}
+        self.assertIn("fema-elevation-certificate", guidance)
+
+    def test_out_writes_elsewhere(self):
+        elsewhere = self.dir / "elsewhere"
+        code, out = self.gap_report("--out", str(elsewhere))
+        self.assertEqual(code, 0, out)
+        self.assertTrue((elsewhere / "test-facility" / "2026-Q4.json").exists())
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_a_document_with_a_violation_exits_1_and_prints_every_one(self):
+        # The local drafter cannot produce a violating document — that is the
+        # point of it — so the refusal is injected to check what the command
+        # does with one: exit 1, print the rules broken, write nothing.
+        violations = [
+            cite.Violation(cite.UNCITED, 3, "no claim cited: 'Evacuate now.'"),
+            cite.Violation(cite.NUMBER_WITHOUT_CLAIM, 4, "'44' is not a cited value"),
+        ]
+        refusal = gap_report_mod.GapReportRefused(violations, "refusing to write")
+        with mock.patch.object(gap_report_mod, "write", side_effect=refusal):
+            code, out = self.gap_report()
+        self.assertEqual(code, 1)
+        self.assertIn("not written", out)
+        self.assertIn(cite.UNCITED, out)
+        self.assertIn(cite.NUMBER_WITHOUT_CLAIM, out)
+        self.assertFalse(self.reports_dir.exists())
+
+    def test_the_drafter_choices_are_local_and_claude(self):
+        parser = cli.build_parser()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["gap-report", "--facility", "f", "--period", "2026-Q4",
+                               "--drafter", "gpt"])
+        args = parser.parse_args(["gap-report", "--facility", "f", "--period",
+                                  "2026-Q4", "--drafter", "claude"])
+        self.assertEqual(args.drafter, "claude")
+
+
+class TestReviewCommand(Phase3Case):
+    def blind_path(self) -> pathlib.Path:
+        self.assertEqual(self.gap_report()[0], 0)
+        label = fixtures_plans.make_facility(slug="test-facility").blind_label
+        return self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+
+    def test_it_records_a_rating_against_the_report_sha(self):
+        blind = self.blind_path()
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind), "--rating", "very useful",
+            "--role", "practising emergency manager", "--org-type", "county",
+            "--years", "12", "--comments", "found the seam finding useful",
+        )
+        self.assertEqual(code, 0, out)
+        sha = reviews_mod.sha256_of(blind)
+        written = sorted(self.reviews_dir.glob("*.json"))
+        self.assertEqual(len(written), 1)
+        path = written[0]
+        self.assertTrue(path.name.startswith(sha[:16] + "-"))
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["report_sha256"], sha)
+        self.assertEqual(record["rating"], "very useful")
+        self.assertTrue(record["blinded"])
+        self.assertRegex(record["facility_label"], r"^FACILITY-[0-9a-f]{12}$")
+        self.assertNotIn("test-facility", json.dumps(record))
+        self.assertIn("attestation", out)
+
+    def test_a_directory_passed_as_the_report_is_a_refusal_not_a_traceback(self):
+        blind = self.blind_path()
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind.parent), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "hospital",
+            "--years", "5",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be read", out)
+
+    def test_it_refuses_a_page_that_is_not_a_blinded_render(self):
+        self.assertEqual(self.gap_report()[0], 0)
+        named = self.reports_dir / "test-facility" / "2026-Q4.html"
+        code, out = self.run_cli(
+            "review", "record", "--report", str(named), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "hospital",
+            "--years", "5",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("not a blinded render", out)
+        self.assertFalse(self.reviews_dir.exists())
+
+    def test_the_rating_and_org_vocabularies_are_closed_in_the_parser(self):
+        parser = cli.build_parser()
+        base = ["review", "record", "--report", "r", "--role", "x",
+                "--org-type", "hospital", "--years", "1"]
+        parser.parse_args(base + ["--rating", "not useful"])
+        for bad in (["--rating", "brilliant"],
+                    ["--rating", "useful", "--org-type", "consultancy"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                parser.parse_args(base + bad)
+
+    def test_reviews_writes_elsewhere(self):
+        blind = self.blind_path()
+        elsewhere = self.dir / "elsewhere"
+        code, out = self.run_cli(
+            "review", "record", "--report", str(blind), "--rating", "useful",
+            "--role", "practising emergency manager", "--org-type", "ngo",
+            "--years", "7", "--reviews", str(elsewhere),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertEqual(len(list(elsewhere.glob("*.json"))), 1)
+        self.assertFalse(self.reviews_dir.exists())
+
+
+class TestVerifyPhase3(Phase3Case):
+    def test_verify_phase3_takes_no_contract_and_reports_every_check(self):
+        code, out = self.run_cli("verify", "--phase", "3")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 3 exit criteria  (the gap reports and their reviews)", out)
+        for name in ("reviews", "reports", "case studies", "no coordinates"):
+            self.assertIn(name, out)
+        self.assertIn("attestation", out)
+
+    def test_verify_phase3_refuses_a_contract_rather_than_ignoring_it(self):
+        code, out = self.run_cli("verify", "-c", "flood-zz", "--phase", "3")
+        self.assertEqual(code, 2)
+        self.assertIn("takes no contract", out)
+
+    def test_verify_phase3_reads_the_directories_it_is_given(self):
+        for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
+            path = fixtures_plans.write_facility(self.dir / f"{slug}.json", slug=slug)
+            self.assertEqual(self.gap_report(facility=path)[0], 0)
+            label = fixtures_plans.make_facility(slug=slug).blind_label
+            blind = self.reports_dir / "blinded" / label / "2026-Q4.blind.html"
+            self.assertEqual(self.run_cli(
+                "review", "record", "--report", str(blind), "--rating", "useful",
+                "--role", "practising emergency manager", "--org-type", "county",
+                "--years", "9",
+            )[0], 0)
+        code, out = self.run_cli(
+            "verify", "--phase", "3", "--reports", str(self.reports_dir),
+            "--reviews", str(self.reviews_dir),
+        )
+        self.assertEqual(code, 0, out)
+        self.assertTrue(out.rstrip().endswith("Phase 3 exit criteria met."))
+        self.assertIn("3/3 distinct facility", out)
+        # The output is pasted into pull requests: it may not pair a blinded
+        # label with the slug of the building it belongs to.
+        for slug in ("alpha-ridge", "bravo-ridge", "charlie-ridge"):
+            self.assertNotIn(slug, out.split("reports", 1)[1])
+
+    def test_the_phase_flag_accepts_zero_to_four(self):
+        parser = cli.build_parser()
+        for phase in (0, 1, 2, 3, 4):
+            self.assertEqual(parser.parse_args(
+                ["verify", "--phase", str(phase)]).phase, phase)
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["verify", "--phase", "5"])
+
+
+class TestNoCommittedPlansJsonHasAddressOrLatLon(unittest.TestCase):
+    """The tripwire, over the committed tree, in the suite rather than in review."""
+
+    def test_no_committed_plans_json_has_address_or_latlon(self):
+        root = pathlib.Path(cli.data_mod.REPO_ROOT) / "plans"
+        scanned = 0
+        for path in sorted(root.rglob("*.json")):
+            scanned += 1
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            with self.subTest(path=str(path)):
+                self.assertEqual(gap_report_mod.forbidden_keys(payload), [])
+        self.assertGreaterEqual(scanned, 3)
+
+    def test_the_scan_catches_a_place_in_a_value_as_well_as_a_key(self):
+        # Otherwise the tripwire above is vacuous over a tree whose keys
+        # nothing constrains: a case study is committed, and its free text is
+        # where an address actually ends up.
+        for payload, where in (
+            ({"event": {"text": "A flood at 412 Riverside Drive."}}, "a street address"),
+            ({"sources": [{"note": "27834-1234"}]}, "a ZIP+4"),
+            ({"event": "35.6127, -77.3664"}, "a coordinate pair"),
+            ({"note": "ZIP 27834"}, "the token ZIP"),
+            ({"Lat": "35.9"}, "a case-variant key"),
+        ):
+            with self.subTest(where=where):
+                self.assertTrue(gap_report_mod.forbidden_keys(payload), where)
+        # A bare five-digit number is a county FIPS.
+        self.assertEqual(
+            gap_report_mod.forbidden_keys({"event": {"text": "county 27834"}}), []
+        )
+
+    def test_the_only_committed_facility_is_the_fictional_example(self):
+        # git, not a glob: a glob over the working tree both misses what would
+        # be committed (a subdirectory, a .JSON) and trips over the planner's
+        # own, correctly ignored, records.
+        from tests.test_facility import tracked
+
+        self.assertEqual(
+            tracked("plans/facilities"),
+            ["plans/facilities/README.md",
+             "plans/facilities/example-rural-hospital.json"],
+        )
+
+    def test_no_report_or_review_is_committed(self):
+        from tests.test_facility import ignored, tracked
+
+        self.assertEqual(tracked("plans/reports"), ["plans/reports/README.md"])
+        self.assertEqual(tracked("plans/reviews"), ["plans/reviews/README.md"])
+        for path in ("plans/reports/slug/2026-Q4.html",
+                     "plans/reports/blinded/FACILITY-abc/2026-Q4.blind.html",
+                     "plans/reports/notes.md",
+                     "plans/reviews/2026/deadbeef.json",
+                     "plans/reviews/review.JSON"):
+            with self.subTest(path=path):
+                self.assertTrue(ignored(path), f"{path} would be committed")
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 4
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterOutsideTheUs(CliCase):
+    """`readiness register --country ZZ`, and the sha it computes at registration."""
+
+    def setUp(self):
+        super().setUp()
+        self.records = self.dir / "partner" / "zz_records.csv"
+        self.sha = make_records_csv(
+            self.records, make_pilot_contract(), record_row(damage_usd=50_000)
+        )
+
+    def register(self, *extra, name="flood-zz"):
+        return self.run_cli(
+            "register", name, "--hazard", "inland_flood", "--country", "zz",
+            "--ground-truth", "national_records", "--records", str(self.records),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+            *extra,
+        )
+
+    def test_register_writes_the_records_sha_into_the_contract(self):
+        code, out = self.register()
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.country, "ZZ")
+        self.assertEqual(c.ground_truth["source"], "national_records")
+        self.assertEqual(c.ground_truth["sha256"], self.sha)
+        self.assertEqual(c.ground_truth["file"], "zz_records.csv")
+        # ...read from the file's own `# record_start_year:` header.
+        self.assertEqual(c.ground_truth["record_start_year"], 2005)
+        self.assertEqual(c.regions["source"], "geoboundaries")
+        self.assertEqual(c.regions["admin_level"], "ADM1")
+        self.assertEqual(c.regions["release"], contracts.GEOBOUNDARIES_RELEASE)
+        self.assertIn("partner national records", out)
+        # Country-namespaced on disk, exactly as the manifest key is.
+        self.assertIn("snapshots/records/ZZ/zz_records.csv", out)
+        # ...and the note says plainly that the basename is published, so an
+        # operator cannot read the packer's redaction as a promise it is not.
+        self.assertIn("basename (zz_records.csv) is a criterion", out)
+        self.assertIn("Name the file neutrally", out)
+
+    def test_the_contract_file_round_trips(self):
+        self.register()
+        spec = json.loads((self.dir / "flood-zz.json").read_text())
+        self.assertEqual(
+            contracts.Contract.from_spec(spec).digest(),
+            contracts.load("flood-zz", self.dir).digest(),
+        )
+        # The records file itself was never copied into the registry.
+        self.assertEqual(
+            sorted(p.name for p in self.dir.glob("*")), ["flood-zz.json", "partner"]
+        )
+
+    def test_admin_level_release_and_period_are_settable(self):
+        code, _out = self.register(
+            "--admin-level", "ADM2", "--regions-release", "gbOpen 5.0.0",
+            "--period", "year",
+        )
+        self.assertEqual(code, 0)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual((c.admin_level, c.period), ("ADM2", "year"))
+        self.assertEqual(c.regions["release"], "gbOpen 5.0.0")
+
+    def test_an_emdat_contract_takes_the_sources_floor_and_says_so(self):
+        export = self.dir / "partner" / "zz_emdat.xlsx"
+        export.write_bytes(b"PK\x03\x04 not really a zip, but it hashes")
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "emdat", "--records", str(export),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.ground_truth["record_start_year"], 2000)
+        self.assertEqual(c.ground_truth["sha256"], sha256_bytes(export.read_bytes()))
+        self.assertIn("zz_emdat_regions.csv", out)
+
+    def test_a_country_outside_the_us_must_name_its_ground_truth(self):
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("Storm Events is a US archive", out)
+
+    def test_records_without_a_country_is_refused(self):
+        code, out = self.run_cli(
+            "register", "flood-us", "--hazard", "inland_flood",
+            "--ground-truth", "emdat", "--records", str(self.records),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--country", out)
+
+    def test_a_missing_records_file_is_named(self):
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(self.dir / "gone.csv"),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("no records file", out)
+
+    def test_a_file_without_a_start_year_header_needs_the_flag(self):
+        bare = self.dir / "partner" / "bare.csv"
+        bare.write_bytes(b"event_id,start_date,region_id,hazard,deaths,injured,"
+                         b"damage_usd,source\n")
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(bare),
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--record-start-year", out)
+        code, _ = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(bare),
+            "--record-start-year", "2010",
+            "--train", "2010-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            contracts.load("flood-zz", self.dir).record_start_year, 2010
+        )
+
+    def test_a_hazard_with_no_global_mapping_is_refused(self):
+        code, out = self.register("--hazard", "dust_storm", name="dust-zz")
+        self.assertEqual(code, 2)
+        self.assertIn("no global mapping", out)
+
+    def test_a_us_registration_is_unchanged(self):
+        code, out = self.run_cli(
+            "register", "tornado-zz", "--hazard", "tornado", "--state", "zz"
+        )
+        self.assertEqual(code, 0, out)
+        spec = json.loads((self.dir / "tornado-zz.json").read_text())
+        self.assertNotIn("ground_truth", spec)
+        self.assertNotIn("regions", spec)
+
+
+class TestRegisterRefusesFlagsThatDoNotApply(CliCase):
+    """A flag that does not apply is refused, not ignored.
+
+    `--ground-truth`/`--records` were already refused for a US contract, which
+    shows the intent; `--admin-level`, `--regions-release` and
+    `--regions-sha256` describe a geoBoundaries universe and were silently
+    dropped, and `--event-type` names a NOAA vocabulary and was silently
+    hashed into a pilot's digest — so two pilots with identical panels carried
+    different digests and their ledgers were marked incomparable for nothing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.records = self.dir / "partner" / "zz_records.csv"
+        self.sha = make_records_csv(
+            self.records, make_pilot_contract(), record_row(damage_usd=50_000)
+        )
+
+    def pilot(self, *extra):
+        return self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(self.records),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+            *extra,
+        )
+
+    def test_a_us_contract_may_not_name_a_geoboundaries_universe(self):
+        for flag, value in (("--admin-level", "ADM2"),
+                            ("--regions-release", "gbOpen 5.0.0"),
+                            ("--regions-sha256", "b" * 64)):
+            with self.subTest(flag=flag):
+                code, out = self.run_cli(
+                    "register", "tornado-us", "--hazard", "tornado", flag, value
+                )
+                self.assertEqual(code, 2, out)
+                self.assertIn(flag, out)
+                self.assertIn("--country", out)
+
+    def test_a_us_contract_registers_as_before_when_it_names_none_of_them(self):
+        code, out = self.run_cli("register", "tornado-us", "--hazard", "tornado")
+        self.assertEqual(code, 0, out)
+        spec = json.loads((self.dir / "tornado-us.json").read_text())
+        self.assertNotIn("regions", spec)
+
+    def test_event_type_is_refused_outside_the_us(self):
+        code, out = self.pilot("--event-type", "Flood")
+        self.assertEqual(code, 2, out)
+        self.assertIn("--event-type", out)
+        self.assertIn("US", out)
+
+    def test_a_pilot_registered_twice_the_same_way_has_the_same_digest(self):
+        code, _ = self.pilot()
+        self.assertEqual(code, 0)
+        first = contracts.load("flood-zz", self.dir).digest()
+        (self.dir / "flood-zz.json").unlink()
+        code, _ = self.pilot()
+        self.assertEqual(code, 0)
+        self.assertEqual(contracts.load("flood-zz", self.dir).digest(), first)
+
+    def test_the_regions_sha_is_written_when_given(self):
+        code, out = self.pilot("--regions-sha256", "b" * 64)
+        self.assertEqual(code, 0, out)
+        c = contracts.load("flood-zz", self.dir)
+        self.assertEqual(c.regions["sha256"], "b" * 64)
+        # ...and it is a criterion, so it moves the digest.
+        (self.dir / "flood-zz.json").unlink()
+        self.pilot()
+        self.assertNotEqual(contracts.load("flood-zz", self.dir).regions.get("sha256"), "b" * 64)
+
+    def test_a_malformed_regions_sha_is_refused(self):
+        code, out = self.pilot("--regions-sha256", "nope")
+        self.assertEqual(code, 2, out)
+        self.assertIn("regions.sha256", out)
+
+
+class TestHazardsMarksWhatIsRegistrableGlobally(CliCase):
+    def test_the_catalogue_says_which_hazards_have_a_global_mapping(self):
+        from readiness import config
+
+        code, out = self.run_cli("hazards")
+        self.assertEqual(code, 0, out)
+        self.assertIn("Registrable outside the US", out)
+        for hazard in config.global_hazards():
+            self.assertIn(hazard, out)
+        # dust_storm and lightning have no EM-DAT or partner mapping.
+        self.assertIn("not mapped, so US-only", out)
+        self.assertIn("dust_storm", out)
+
+
+class TestPilotThroughTheCliWithNoFeatureFlag(CliCase):
+    """A pinned pilot, driven the way an operator drives it: no `--features`.
+
+    The documented behaviour is that a pilot runs on `era5-antecedent` alone
+    and the terrain candidates are skipped with a progress line and no card.
+    `cli._features()` loads every connector whose data is already pinned, and
+    `pinned()` used to answer True for `terrain` outside the US — its file
+    list was empty, so the loop that would have said no had nothing to iterate
+    — so `terrain` was auto-selected and `build` refused the whole run with a
+    `ValueError`. By default a pilot was unusable the moment it was pinned.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from readiness.connectors import geoboundaries
+        from readiness.connectors.base import SourceRecord, utc_now
+
+        self.snapshots = self.dir / "snapshots"
+        source = self.dir / "partner" / "zz_records.csv"
+        draft = make_pilot_contract()
+        make_records_csv(
+            source, draft,
+            *[
+                record_row(
+                    event_id=f"E{i}",
+                    start_date=f"{year}-{1 + 3 * (i % 4):02d}-12",
+                    region_id=shape_id(i % 3),
+                    damage_usd=50_000,
+                )
+                for i, year in enumerate(range(2005, 2025))
+            ],
+        )
+        code, out = self.run_cli(
+            "register", "flood-zz", "--hazard", "inland_flood", "--country", "ZZ",
+            "--ground-truth", "national_records", "--records", str(source),
+            "--train", "2005-2014", "--validate", "2015-2019", "--test", "2020-2024",
+        )
+        self.assertEqual(code, 0, out)
+        self.contract = contracts.load("flood-zz", self.dir)
+
+        record_path = data_mod.records_path(self.contract, self.snapshots)
+        record_path.parent.mkdir(parents=True)
+        record_path.write_bytes(source.read_bytes())
+        geojson = make_geojson(n_regions=3)
+        cache = geoboundaries.cache_path(self.snapshots, "ZZ", "ADM1")
+        cache.parent.mkdir(parents=True)
+        cache.write_bytes(geojson)
+        manifest = Manifest(path=self.snapshots / "manifest.json")
+        for key, blob in (
+            (data_mod.regions_key(self.contract), geojson),
+            (data_mod.records_key(self.contract), record_path.read_bytes()),
+        ):
+            manifest.add(key, SourceRecord(
+                source="synthetic", url="", sha256=sha256_bytes(blob),
+                bytes=len(blob), fetched_at=utc_now(), license="test",
+            ))
+        manifest.save()
+
+        def no_fetch(url):
+            raise AssertionError(f"went to the network for {url}")
+
+        real_pinned, real_build = data_mod.pinned, data_mod.build
+
+        def pinned_here(contract, snapshot_dir=None, features=()):
+            return real_pinned(contract, self.snapshots, features)
+
+        def build_here(contract, **kw):
+            return real_build(contract, **{**kw, "snapshot_dir": self.snapshots})
+
+        self._pinned_here, self._build_here = pinned_here, build_here
+
+        self.patches = [
+            mock.patch.dict(
+                os.environ, {data_mod.EXPERIMENTS_DIR_ENV: str(self.dir / "experiments")}
+            ),
+            # Forced, not defaulted: `orchestrator.run_local` passes
+            # `snapshot_dir=` explicitly, and a call keyword overrides a
+            # partial's.
+            mock.patch.object(data_mod, "pinned", self._pinned_here),
+            mock.patch.object(data_mod, "build", self._build_here),
+            mock.patch.object(geoboundaries, "fetch", no_fetch),
+        ]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        super().tearDown()
+
+    def test_no_us_only_connector_is_auto_selected_for_a_pilot(self):
+        args = cli.build_parser().parse_args(["panel", "-c", "flood-zz"])
+        self.assertEqual(cli._features(args, self.contract), [])
+        # ...while the base data really is pinned, which is the condition that
+        # used to make the auto-selection fire.
+        self.assertTrue(data_mod.pinned(self.contract))
+
+    def test_panel_runs_against_the_pinned_pilot(self):
+        code, out = self.run_cli("panel", "-c", "flood-zz", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertIn("regions: 3", out)
+
+    def test_loop_runs_with_no_features_flag_rather_than_crashing(self):
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--queue", "baseline",
+                                 "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("US-only", out)
+        self.assertTrue(data_mod.paths(self.contract).ledger.exists())
+
+    def test_fleet_runs_with_no_features_flag_rather_than_crashing(self):
+        code, out = self.run_cli("fleet", "--contracts", "flood-zz",
+                                 "--queue", "baseline", "--quiet")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("US-only", out)
+
+    def test_an_explicit_us_only_feature_is_still_refused_by_name(self):
+        # The graceful skip is for the default; asking for it outright still
+        # gets the refusal that names the connector.
+        code, out = self.run_cli("loop", "-c", "flood-zz", "--features", "terrain",
+                                 "--queue", "baseline", "--quiet")
+        self.assertEqual(code, 2, out)
+        self.assertIn("US-only", out)
+        self.assertIn("terrain", out)
+
+
+class TestVerifyPhase4(CliCase):
+    def test_phase4_takes_no_contract(self):
+        code, out = self.run_cli("verify", "--phase", "4", "-c", "flood-zz")
+        self.assertEqual(code, 2)
+        self.assertIn("takes no contract", out)
+
+    def test_phase4_reports_every_check_and_exits_one_when_unmet(self):
+        code, out = self.run_cli("verify", "--phase", "4")
+        self.assertEqual(code, 1)
+        self.assertIn("Phase 4 exit criteria  (the registry)", out)
+        for name in ("pilots", "global inputs", "ground truth pinned", "us digests"):
+            self.assertIn(name, out)
+        self.assertIn("Phase 4 NOT met", out)
+
+    def test_the_us_digest_check_passes_against_the_committed_repository(self):
+        # It reads the committed contracts and fingerprints rather than this
+        # temporary registry, because it is a fact about the repository.
+        _code, out = self.run_cli("verify", "--phase", "4")
+        self.assertIn("[ok]   us digests", out)
+
+    def test_the_parser_offers_phase_4(self):
+        args = cli.build_parser().parse_args(["verify", "--phase", "4"])
+        self.assertEqual(args.phase, 4)
+        # The phases stop at 4: there is no fifth exit criterion to check.
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                cli.build_parser().parse_args(["verify", "--phase", "5"])
 
 
 if __name__ == "__main__":

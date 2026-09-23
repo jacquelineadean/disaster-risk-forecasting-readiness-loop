@@ -1,0 +1,10 @@
+# Synthetic partner record for the fictional country ZZ. A real one is never
+# committed: this is the agreed schema, with fictional places and figures, so
+# the parser has something to be tested against.
+# record_start_year: 2005
+event_id,start_date,region_id,hazard,deaths,injured,damage_usd,source
+ZZ-2006-0001,2006-03-14,ZZ-ADM1-001,flood,2,11,450000,National Disaster Management Agency
+ZZ-2006-0002,2006-03-15,ZZ-ADM1-002,Flash Flood,0,0,12500,National Disaster Management Agency
+ZZ-2006-0003,2006-07-02,ZZ-ADM1-002,tropical_cyclone,4,30,2000000,National Disaster Management Agency
+ZZ-2007-0004,2007-11-20,ZZ-ADM1-003,riverine flood,0,1,0,Provincial Office
+ZZ-2008-0005,2008-01-09,ZZ-ADM1-001,drought,0,0,750000,National Disaster Management Agency
