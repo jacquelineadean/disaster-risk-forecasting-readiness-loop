@@ -70,6 +70,13 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      # The cache is keyed on the manifest as checked out, taken here once:
+      # the pulls below rewrite the manifest, and a save keyed on the
+      # rewritten one would never be found by the next run, which restores by
+      # the committed manifest's hash.
+      - name: Key the cache on the committed manifest
+        id: cache-key
+        run: echo "base=snapshot-${{ hashFiles('snapshots/manifest.json') }}" >> "$GITHUB_OUTPUT"
       # Restore, and save under a key of this run's own, rather than one
       # `actions/cache` step: a cache step skips its save on an exact key hit,
       # and the site build already saves under the manifest's hash, so every
@@ -89,9 +96,9 @@ jobs:
             snapshots/fema
             snapshots/climada
             snapshots/usa_structures
-          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}-${{ github.run_id }}
+          key: ${{ steps.cache-key.outputs.base }}-${{ github.run_id }}
           restore-keys: |
-            snapshot-${{ hashFiles('snapshots/manifest.json') }}
+            ${{ steps.cache-key.outputs.base }}
             snapshot-
       - name: Pull and pin the contract's data
         timeout-minutes: 300
@@ -197,7 +204,7 @@ jobs:
             snapshots/fema
             snapshots/climada
             snapshots/usa_structures
-          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}-${{ github.run_id }}
+          key: ${{ steps.cache-key.outputs.base }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
