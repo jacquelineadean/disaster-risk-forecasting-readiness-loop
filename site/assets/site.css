@@ -136,8 +136,6 @@ a.card h3{color:var(--ink)}
 .brand{font-weight:500;font-size:19px;color:var(--ink);text-decoration:none;letter-spacing:-.012em;
   display:inline-flex;align-items:center;gap:10px;white-space:nowrap}
 .brand:hover{color:var(--ink)}
-.brand__tag{font:600 10.5px/1 var(--sans);letter-spacing:.08em;text-transform:uppercase;color:var(--accent);
-  background:var(--accent-wash);padding:5px 8px;border-radius:var(--r-pill)}
 .top__nav{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap}
 .top__nav a{font:500 15px/1 var(--sans);color:var(--muted);text-decoration:none;padding:9px 11px;
   border-radius:var(--r-pill);letter-spacing:.005em;transition:background-color .2s,color .2s}
