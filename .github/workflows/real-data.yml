@@ -5,6 +5,14 @@
 # artifact. A person reviews it and commits what the run produced (an updated
 # snapshots/manifest.json, a new or refreshed harness_expected/<contract>.json,
 # ledger cards) themselves, the same as any other change to those files.
+#
+# Phases 1 and 2 run in two steps (plan §7). A rehearsal (`promote` off, the
+# default) pulls the data and writes validate cards only; it spends nothing.
+# The promote run spends each contract's one test touch. Its artifact is
+# uploaded whatever the verdict, including when `verify` fails, because a
+# touch spent in the runner and not committed is the one outcome the protocol
+# cannot recover from: a second dispatch starts from a clean checkout with an
+# unspent touch.
 
 name: real-data
 
@@ -31,6 +39,11 @@ on:
         description: "Phase 2 only: states to pin USA Structures counts for, comma-separated; empty pulls every state"
         required: false
         default: ""
+      promote:
+        description: "Phases 1 and 2: spend the test touch. Off is a rehearsal that writes validate cards only"
+        type: boolean
+        required: false
+        default: false
       extra_args:
         description: "Extra arguments appended to `readiness verify`"
         required: false
@@ -39,16 +52,32 @@ on:
 permissions:
   contents: read
 
+# One run at a time, queued rather than cancelled: every run writes the same
+# manifest and the same cache, and a cancelled promote run is a spent touch
+# with no artifact.
+concurrency:
+  group: real-data
+  cancel-in-progress: false
+
 jobs:
   snapshot-and-verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PROMOTE_FLAG: ${{ inputs.promote && '--promote' || '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Restore, and save under a key of this run's own, rather than one
+      # `actions/cache` step: a cache step skips its save on an exact key hit,
+      # and the site build already saves under the manifest's hash, so every
+      # feature pull made here would be thrown away and an interrupted national
+      # pull could never resume. The newest cache for this manifest wins, then
+      # the newest of any; the pulls re-pin (or refuse) what they find.
       - name: Restore the pinned data
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             snapshots/open_meteo
@@ -58,8 +87,12 @@ jobs:
             snapshots/fema
             snapshots/climada
             snapshots/usa_structures
-          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}
+          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}-${{ github.run_id }}
+          restore-keys: |
+            snapshot-${{ hashFiles('snapshots/manifest.json') }}
+            snapshot-
       - name: Pull and pin the contract's data
+        timeout-minutes: 300
         run: >
           python -m readiness.cli snapshot -c ${{ inputs.contract }}
           --features "${{ inputs.features }}"
@@ -68,11 +101,11 @@ jobs:
         run: >
           python -m readiness.cli features -c ${{ inputs.contract }}
           --features "${{ inputs.features }}"
-      - name: Run the Phase 1 queue and promote the first validate pass
+      - name: Run the Phase 1 queue (promote the first non-baseline validate pass)
         if: ${{ inputs.phase == '1' }}
         run: >
           python -m readiness.cli loop -c ${{ inputs.contract }}
-          --features "${{ inputs.features }}" --queue phase1 --promote
+          --features "${{ inputs.features }}" --queue phase1 $PROMOTE_FLAG
       - name: Write the backtest report
         if: ${{ inputs.phase == '1' }}
         run: python -m readiness.cli backtest -c ${{ inputs.contract }}
@@ -85,7 +118,7 @@ jobs:
         if: ${{ inputs.phase == '2' }}
         continue-on-error: true
         run: >
-          python -m readiness.cli fleet --national --queue phase2 --promote
+          python -m readiness.cli fleet --national --queue phase2 $PROMOTE_FLAG
           --features "${{ inputs.features }}"
       - name: Write every contract's backtest report
         if: ${{ inputs.phase == '2' }}
@@ -106,15 +139,26 @@ jobs:
         continue-on-error: true
         run: python -m readiness.cli exposure spot-check
       - name: Issue the promoted model for every passing contract
-        if: ${{ inputs.phase == '2' && inputs.period != '' }}
+        if: ${{ inputs.phase == '2' && inputs.promote && inputs.period != '' }}
         run: >
           make issue-all PERIOD="${{ inputs.period }}"
           FEATURES="${{ inputs.features }}"
       - name: Write a brief per county of every spot-checked state
-        if: ${{ inputs.phase == '2' && inputs.period != '' }}
+        if: ${{ inputs.phase == '2' && inputs.promote && inputs.period != '' }}
         run: make brief-all PERIOD="${{ inputs.period }}"
+      # A rehearsal cannot meet Phases 1 or 2 (it writes no test card), so it
+      # prints where things stand instead of failing on a verdict nobody asked
+      # for.
+      - name: Show where the rehearsal left the ledgers
+        if: ${{ !inputs.promote && (inputs.phase == '1' || inputs.phase == '2') }}
+        run: |
+          if [ "${{ inputs.phase }}" = "1" ]; then
+            python -m readiness.cli ledger -c "${{ inputs.contract }}"
+          fi
+          python -m readiness.cli fleet --status
       # Phase 2 takes no contract: its criteria are about the whole registry.
       - name: Verify the exit criteria
+        if: ${{ inputs.phase == '0' || inputs.promote }}
         run: |
           if [ "${{ inputs.phase }}" = "2" ]; then
             python -m readiness.cli verify --phase 2 ${{ inputs.extra_args }}
@@ -122,11 +166,43 @@ jobs:
             python -m readiness.cli verify -c "${{ inputs.contract }}" \
               --phase "${{ inputs.phase }}" ${{ inputs.extra_args }}
           fi
-      - uses: actions/upload-artifact@v4
+      # Everything below runs whatever happened above (short of a cancel), so
+      # a failing test card, a refused promotion or a pull that ran out of
+      # time still leaves its evidence and its partial data behind.
+      - name: Trim a torn last line from an interrupted ERA5 pull
+        if: ${{ !cancelled() }}
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          for path in pathlib.Path("snapshots/open_meteo").glob("*.jsonl"):
+              lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+              if lines and lines[-1].strip():
+                  try:
+                      json.loads(lines[-1])
+                  except ValueError:
+                      path.write_text("".join(lines[:-1]), encoding="utf-8")
+                      print(f"trimmed a torn last line from {path}")
+          PY
+      - name: Save the pinned data for the next run
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
         with:
-          name: real-data-${{ inputs.contract }}
+          path: |
+            snapshots/open_meteo
+            snapshots/census
+            snapshots/nws
+            snapshots/storm_events
+            snapshots/fema
+            snapshots/climada
+            snapshots/usa_structures
+          key: snapshot-${{ hashFiles('snapshots/manifest.json') }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: real-data-phase${{ inputs.phase }}-${{ inputs.phase == '2' && 'national' || inputs.contract }}-${{ inputs.promote && 'promote' || 'rehearsal' }}-${{ github.run_id }}
           path: |
             experiments
             issued
             briefs
+            harness_expected
             snapshots/manifest.json
