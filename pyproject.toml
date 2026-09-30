@@ -23,9 +23,14 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-agent = ["claude-agent-sdk>=0.1.0"]
+agent = ["claude-agent-sdk>=0.2.150"]
 # Only for regenerating the walkthrough's screenshots (tools/demo/capture.py).
-docs = ["playwright>=1.40", "pillow>=10"]
+# pillow floor is a security minimum: versions before 12.2.0 are vulnerable to
+# CVE-2026-42311 (PSD RCE), CVE-2026-42309 (buffer overflow) and CVE-2026-42310
+# (PDF-parsing DoS) -- see GHSA-r73j-pqj5-w3x7 and related advisories.
+# playwright floor is a security minimum: versions before 1.55.1 are vulnerable
+# to CVE-2025-59288 (browser download skips TLS certificate verification).
+docs = ["playwright>=1.63.0", "pillow>=12.3.0"]
 
 [project.scripts]
 readiness = "readiness.cli:main"

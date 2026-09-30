@@ -66,8 +66,8 @@ jobs:
     env:
       PROMOTE_FLAG: ${{ inputs.promote && '--promote' || '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # Restore, and save under a key of this run's own, rather than one
@@ -75,15 +75,17 @@ jobs:
       # and the site build already saves under the manifest's hash, so every
       # feature pull made here would be thrown away and an interrupted national
       # pull could never resume. The newest cache for this manifest wins, then
-      # the newest of any; the pulls re-pin (or refuse) what they find.
+      # the newest of any; the pulls re-pin (or refuse) what they find. The
+      # path list must stay in the same order as site.yml's: the cache
+      # version is a hash of it, and a different order never restores.
       - name: Restore the pinned data
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
-            snapshots/open_meteo
             snapshots/census
             snapshots/nws
             snapshots/storm_events
+            snapshots/open_meteo
             snapshots/fema
             snapshots/climada
             snapshots/usa_structures
@@ -185,18 +187,18 @@ jobs:
           PY
       - name: Save the pinned data for the next run
         if: ${{ !cancelled() }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
-            snapshots/open_meteo
             snapshots/census
             snapshots/nws
             snapshots/storm_events
+            snapshots/open_meteo
             snapshots/fema
             snapshots/climada
             snapshots/usa_structures
           key: snapshot-${{ hashFiles('snapshots/manifest.json') }}-${{ github.run_id }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
         with:
           name: real-data-phase${{ inputs.phase }}-${{ inputs.phase == '2' && 'national' || inputs.contract }}-${{ inputs.promote && 'promote' || 'rehearsal' }}-${{ github.run_id }}
