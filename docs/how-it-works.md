@@ -288,8 +288,9 @@ readiness ledger -c tornado-ok
 
 **Promote: the one test touch.** When a validate card has PASSED with a
 clear canary, and only then, the same model with the same arguments may be
-scored on the test years — once. `promote` refuses without that card,
-refuses if any test card already exists in the ledger (under any contract
+scored on the test years — once. `promote` refuses a baseline outright
+(the yardstick is what a promoted model is measured against, not a candidate
+for the touch), refuses without that card, refuses if any test card already exists in the ledger (under any contract
 digest: a new contract name, not a second touch, is the next move), refuses
 when the validate pass was produced on a different data or feature version
 or when the candidate's feature sources are not loaded, builds and audits the
@@ -304,7 +305,10 @@ readiness promote logistic -c tornado-ok --features era5,terrain --spend-test-to
 ```
 
 (`readiness loop --queue phase1 --promote` does the same for the first
-candidate in queue order whose validate card passed.)
+non-baseline candidate in queue order whose validate card passed. A baseline
+that passes on validate — the seasonal climatology does on
+`tropical-cyclone-gulf` — is printed and passed over, so the touch is never
+spent showing that climatology beats climatology.)
 
 **Publish and verify.** The backtest report is rendered from committed files
 only ([backtest.md](backtest.md)); the Phase 1 check is ledger-only.
@@ -350,7 +354,7 @@ Phase 1: every step below a passing test card needs the real-data run. The
 commands, in the order `make phase2` runs them:
 
 **Run the fleet.** The same loop, over every national contract in turn,
-promoting the first validate pass of each. Sequential on purpose: the
+promoting the first non-baseline validate pass of each. Sequential on purpose: the
 manifest the data plane writes after each pull is not safe to share between
 two runs, and one unpulled extract must not cost the other five their
 ledgers, so a contract whose data is missing is reported and skipped.

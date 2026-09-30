@@ -1579,8 +1579,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="phase1 runs the baselines and then the Phase 1 candidates; "
                          "phase2 the baselines and the capped national candidates")
     sp.add_argument("--promote", action="store_true",
-                    help="after the queue, spend the test touch on the first validate "
-                         "pass in queue order")
+                    help="after the queue, spend the test touch on the first "
+                         "non-baseline validate pass in queue order")
     sp.add_argument("--no-canary", action="store_true",
                     help="skip the leaked-model demonstration")
     sp.add_argument("--quiet", action="store_true", help="suppress data-plane chatter")
@@ -1598,7 +1598,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--queue", default="phase2", choices=queue_names,
                     help="the queue each contract runs (default phase2)")
     sp.add_argument("--promote", action="store_true",
-                    help="per contract, spend the test touch on the first validate pass")
+                    help="per contract, spend the test touch on the first "
+                         "non-baseline validate pass")
     sp.add_argument("--status", action="store_true",
                     help="print the status table from the ledgers and exit; run nothing")
     sp.add_argument("--quiet", action="store_true", help="suppress the loops' chatter")
