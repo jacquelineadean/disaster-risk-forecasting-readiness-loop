@@ -7,7 +7,7 @@ records what was decided, what was built, and what each phase still owes.
 | phase | scope | status |
 |---|---|---|
 | R | refactor from the audit findings; reproducibility guard; CI | **done** (see §1.9) |
-| 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | in progress (see §2.1) |
+| 1 | the loop on one hazard: feature channel, real models, promote-to-test, backtest report | built; exit needs the data run (see §2.1, the runs §7) |
 | 2 | multi-hazard, national, with exposure: fleet, exposure join, issuance, cited brief | built; exit needs the data run (see §3.1) |
 | 3 | the planning thought-partner: facility record, scenario rules, gap report, reviews | built; exit needs three real facilities and their blinded reviews (see §4.1, review §4.2) |
 | 4 | global scale-out: non-US ground truth and regions, global connectors, pilots | built; exit needs the pilots' data run (see §5.1, review §5.2) |
@@ -819,3 +819,96 @@ the same commits from the Phase 4 branch to `main`; the tree at `f7b66d0` is
 identical to the Phase 4 head (`b31700c`), so nothing was rewritten or
 re-reviewed. For the next stack: retarget each pull request to `main` as soon
 as the one below it merges, and merge one at a time.
+
+## 7. The data runs
+
+Every phase exit from 1 on depends on a run against real data, and each
+contract has one test touch that cannot be un-spent. This section fixes how
+the runs are done before the first one, and records each one after it.
+
+### 7.1. Rules, fixed before any run
+
+- **Baselines cannot be promoted.** `--promote` (on `loop` and `fleet`) spends
+  the touch on the first *non-baseline* candidate, in queue order, whose
+  validate card passed with a clear canary. A baseline that passes is printed
+  and passed over, and `readiness promote` refuses one outright
+  (`orchestrator.BASELINE_MODELS`). A baseline passing on validate is a finding
+  about the contract's difficulty; it does not show that a model beats
+  climatology, and so it does not count toward a phase exit. This matters
+  today: `climatology-seasonal` already passes on validate for
+  `tropical-cyclone-gulf`, and under the old rule a Phase 1 dispatch there
+  would have spent the touch on it.
+- **Rehearse, then promote.** `real-data.yml` takes a `promote` input, off by
+  default. A rehearsal pulls and pins the data and writes validate cards only.
+  The promote run is dispatched only after the rehearsal's results are
+  committed and read. Seeing validate results first gives no choice about what
+  is promoted, since the rule above is in code.
+- **Commit whatever the verdict.** The workflow uploads its artifact even when
+  `verify` fails or a promotion is refused, and the promote run's ledger, touch
+  file, backtest and manifest are committed exactly as produced. A failing test
+  card is a published result. A contract is never dispatched with `promote`
+  twice: a second dispatch starts from a clean checkout with an unspent touch,
+  which is precisely what the one-touch rule forbids.
+- **One run at a time.** The workflow queues rather than overlaps
+  (`concurrency: real-data`), and no dispatch is made while an earlier run's
+  pull request is unmerged, so every run starts from the ledger the last one
+  left.
+- **Pinned code.** Runs dispatch from `main` at or after tag `v0.2.1`; each
+  card's harness digest and the run's commit tie the result to a code state.
+
+### 7.2. The loop, per contract
+
+Order for Phase 1: `tornado-ok` (strongest validate signal; its baselines fail
+the contract, so the touch goes to a feature model), then `inland-flood-la`,
+then optionally `tropical-cyclone-gulf`.
+
+```
+rehearse -> commit -> read validate -> (iterate on validate)* -> promote -> commit -> done
+```
+
+```bash
+gh workflow run real-data.yml --ref main -f contract=tornado-ok -f phase=1 -f features=era5,terrain -f promote=false
+gh run download <run id> -D <scratch dir>
+```
+
+Before committing an artifact: `readiness ledger -c NAME` verifies the chain;
+the new ledger begins with `main`'s ledger byte for byte; the manifest only
+adds records. The pull request carries the run URL, the commit it ran from and
+the inputs.
+
+| what the run shows | next move | touch |
+|---|---|---|
+| a pull failed, or candidates were skipped for missing sources | fix the pipeline in a code PR, rehearse again | unspent |
+| no non-baseline candidate passes validate | add candidates to the queue, each with its `changed` and `hypothesis`, in a PR; rehearse again. After two rounds without a pass, stop and record the negative finding | unspent |
+| a non-baseline candidate passes validate | dispatch with `promote=true`, after the owner agrees | about to be spent |
+| test card PASS, `verify --phase 1` met | merge; update the status table | spent |
+| test card FAIL | merge exactly as produced; the contract is finished | spent |
+| a touch file but no test card | commit the touch file as it is; the contract is spent | spent |
+
+A contract that failed is not re-run. A successor is a new contract name with
+a written reason, registered before it runs, and this register notes that its
+test years were already seen once.
+
+### 7.3. Phase 2, before the fleet spends anything
+
+`verify --phase 2` counts issued files for the *same* period label across at
+least four passing national contracts. `heat-us` and `winter-storm-us` are
+monthly, so their labels (`2026-M11`) never match a quarterly one (`2026-Q4`).
+As registered, the issued criterion can only be met if all four quarterly
+contracts (`hail-us`, `inland-flood-us`, `severe-wind-us`, `tornado-us`) pass.
+The fleet rehearsal (`phase=2`, `promote=false`) comes first; if its validate
+results do not show all four quarterly contracts with a passing non-baseline
+candidate, the criterion is revisited in a reviewed PR *before* any national
+touch is spent, never after.
+
+The national ERA5 pull is about 3,100 sequential Open-Meteo requests. The
+workflow saves its snapshot cache under a per-run key even when a step fails,
+so a pull stopped by the job limit or the API's quota resumes on the next
+dispatch rather than starting over.
+
+### 7.4. Register
+
+One row per dispatch, including rehearsals and failures.
+
+| # | date | contract | phase | kind | run | commit | outcome |
+|---|---|---|---|---|---|---|---|
