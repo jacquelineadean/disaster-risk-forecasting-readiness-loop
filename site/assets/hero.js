@@ -11,7 +11,15 @@
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
   const ctx = canvas.getContext("2d");
   const FRAME_MS = 210, DECAY = 0.76;
-  const BASE = "#e6eaef", TINT = "#c3d1ea", LIT = "#2b5aa8";
+  // Colours come from the theme tokens (site.css) and are read again whenever
+  // the theme changes, so the replay is redrawn in the reader's palette.
+  let BASE, TINT, LIT, GROUND, MUTED, INK;
+  function readPalette() {
+    BASE = RL.cssVar("--tile-base"); TINT = RL.cssVar("--tile-tint"); LIT = RL.cssVar("--tile-lit");
+    GROUND = RL.cssVar("--surface"); MUTED = RL.cssVar("--muted"); INK = RL.cssVar("--ink");
+  }
+  readPalette();
+  document.addEventListener("rl:themechange", () => { readPalette(); draw(); });
   const SPLIT_INK = { train: "rgba(43,90,168,.30)", validate: "rgba(199,150,32,.38)", test: "rgba(176,58,46,.34)" };
   const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -102,7 +110,7 @@
   function draw() {
     if (!tape || !L) return;
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#f4f6f8"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = GROUND; ctx.fillRect(0, 0, W, H);
     const maxFreq = Math.max(1, ...tape.freq);
     const side = Math.max(1, L.cell - L.gap), rad = Math.min(4, side * 0.22);
     for (let r = 0; r < tape.n_regions; r++) {
@@ -125,14 +133,14 @@
     for (let p = 0; p < n; p++) {
       const h = Math.max(0, (tape.counts[p] / maxCount) * spark);
       if (!h) continue;
-      ctx.fillStyle = p === frame ? LIT : "rgba(43,90,168,.28)";
+      ctx.fillStyle = p === frame ? LIT : RL.mix(GROUND, LIT, 0.28);
       ctx.fillRect(px(p), bar.y - 4 - h, Math.max(1, bar.w / n - 0.6), h);
     }
     // split labels: the first left-aligned, the last right-aligned, the middle
     // centred; a label that would collide with a neighbour is shortened, then
     // dropped, so a narrow band never overprints
     ctx.font = "500 12px " + getComputedStyle(document.body).fontFamily;
-    ctx.fillStyle = "#6b7079"; ctx.textBaseline = "top"; ctx.textAlign = "left";
+    ctx.fillStyle = MUTED; ctx.textBaseline = "top"; ctx.textAlign = "left";
     const names = ["train", "validate", "test"].filter((k) => tape.splits[k]);
     const boxes = [];
     names.forEach((name, i) => {
@@ -152,7 +160,7 @@
     });
     if (playing || reduced.matches === false) {
       const x = px(frame);
-      ctx.fillStyle = "#15171b";
+      ctx.fillStyle = INK;
       ctx.fillRect(x - 0.5, bar.y - 6 - spark, 1.5, spark + bar.h + 8);
       ctx.font = "500 13px " + getComputedStyle(document.body).fontFamily;
       ctx.textAlign = x > bar.x + bar.w * 0.8 ? "right" : "left";

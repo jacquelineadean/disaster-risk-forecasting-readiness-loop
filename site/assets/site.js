@@ -20,6 +20,56 @@
     return _cache.get(name);
   };
 
+  // --- the colour theme: System / Light / Dark -------------------------------
+  // The choice lives in localStorage ("rl-theme": "light" or "dark"; absent
+  // means follow the system) and on <html data-theme>, which each page's head
+  // script restores before first paint. Everything else is CSS tokens; code
+  // that draws with colours listens for "rl:themechange" and reads them again.
+  const THEME_KEY = "rl-theme";
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  let themeChoice = document.documentElement.dataset.theme || "system";
+  const themeChanged = () => document.dispatchEvent(new CustomEvent("rl:themechange"));
+  RL.cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  RL.isDark = () => (themeChoice === "system" ? darkQuery.matches : themeChoice === "dark");
+  RL.setTheme = function (choice) {
+    themeChoice = choice === "light" || choice === "dark" ? choice : "system";
+    const root = document.documentElement;
+    if (themeChoice === "system") delete root.dataset.theme;
+    else root.dataset.theme = themeChoice;
+    try {
+      if (themeChoice === "system") localStorage.removeItem(THEME_KEY);
+      else localStorage.setItem(THEME_KEY, themeChoice);
+    } catch (e) { /* storage blocked: the choice lasts for this page only */ }
+    syncThemeControls();
+    themeChanged();
+  };
+  darkQuery.addEventListener("change", () => { if (themeChoice === "system") themeChanged(); });
+  function syncThemeControls() {
+    document.querySelectorAll(".theme [data-theme-choice]").forEach((b) => {
+      const on = b.dataset.themeChoice === themeChoice;
+      b.setAttribute("aria-checked", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+  }
+  function wireThemeControls() {
+    document.querySelectorAll(".theme").forEach((group) => {
+      const buttons = Array.from(group.querySelectorAll("[data-theme-choice]"));
+      buttons.forEach((b, i) => {
+        b.addEventListener("click", () => RL.setTheme(b.dataset.themeChoice));
+        // a radio group: the arrow keys move and select, Tab leaves the group
+        b.addEventListener("keydown", (e) => {
+          const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+          if (!step) return;
+          e.preventDefault();
+          const next = buttons[(i + step + buttons.length) % buttons.length];
+          RL.setTheme(next.dataset.themeChoice);
+          next.focus();
+        });
+      });
+    });
+    syncThemeControls();
+  }
+
   RL.esc = (s) =>
     String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -214,7 +264,7 @@
     const rects = tape.freq.map((f, i) => {
       const [x, y] = L.at(i);
       const name = tape.regions[i] ? tape.regions[i].name : String(i);
-      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${side.toFixed(1)}" height="${side.toFixed(1)}" rx="${r.toFixed(1)}" fill="${RL.mix("#e9edf2", "#2b5aa8", Math.sqrt(f / max))}"><title>${RL.esc(name)}: ${f} of ${tape.n_periods} ${unit}</title></rect>`;
+      return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${side.toFixed(1)}" height="${side.toFixed(1)}" rx="${r.toFixed(1)}" style="fill:color-mix(in srgb,var(--tile-lit) ${(100 * Math.sqrt(f / max)).toFixed(1)}%,var(--surface-2))"><title>${RL.esc(name)}: ${f} of ${tape.n_periods} ${unit}</title></rect>`;
     });
     return `<svg class="tape" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${RL.esc(tape.contract)}: one tile per region, shaded by how often it recorded a damaging event">${rects.join("")}</svg>`;
   };
@@ -226,6 +276,7 @@
 
   // --- page boot: active nav, build stamp ------------------------------------
   document.addEventListener("DOMContentLoaded", () => {
+    wireThemeControls();
     const page = document.body.dataset.page;
     document.querySelectorAll(".top__nav a[data-page]").forEach((a) => {
       if (a.dataset.page === page) a.classList.add("active");
