@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its results, please cite the tagged release you
+  used. A forecast's evidence is its experiment ledger, which is tied to the
+  code state that produced it.
+title: "The Readiness Loop"
+abstract: >-
+  An open-source agentic loop that forecasts disaster risk from public data
+  and validates its own probabilities against history.
+type: software
+authors:
+  - family-names: Dean
+    given-names: Jacqueline
+repository-code: "https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop"
+url: "https://jacquelineadean.github.io/disaster-risk-forecasting-readiness-loop/"
+license: Apache-2.0
+version: 0.2.1
+keywords:
+  - disaster-risk
+  - forecasting
+  - calibration
+  - emergency-management
