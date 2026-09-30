@@ -402,8 +402,10 @@ class TestPhase1Queue(unittest.TestCase):
         self.assertIsNone(result.promoted)
         self.assertFalse(data_mod.paths(self.contract, experiments_dir=self.dir)
                          .touch_budget.exists())
-        self.assertIn("promote      nothing to promote: no candidate passed on validate",
-                      self.lines)
+        self.assertIn(
+            "promote      nothing to promote: no non-baseline candidate passed on validate",
+            self.lines,
+        )
 
 
 class TestPhase2Queue(unittest.TestCase):
@@ -512,6 +514,58 @@ class TestPromote(unittest.TestCase):
         self.assertEqual(cards[-1].card_hash, promoted.card_hash)
         self.assertTrue(ledger.verify().valid)
         self.assertIn("promoted to test", result.format())
+
+    def test_promote_refuses_a_baseline_before_anything_else(self):
+        for model in sorted(orchestrator.BASELINE_MODELS):
+            with self.subTest(model=model):
+                with self.assertRaises(orchestrator.PromotionRefused) as ctx:
+                    self.promote(model, {})
+                self.assertIn("it is a baseline", str(ctx.exception))
+                self.assertFalse(self.where.touch_budget.exists())
+                self.assertFalse(self.where.ledger.exists())
+
+    def test_baseline_models_are_the_baseline_queue(self):
+        self.assertEqual(orchestrator.BASELINE_MODELS,
+                         {c.model for c in orchestrator.BASELINE_QUEUE})
+        self.assertNotIn(orchestrator.CANARY_CANDIDATE.model, orchestrator.BASELINE_MODELS)
+        for name, queue in orchestrator.QUEUES.items():
+            with self.subTest(queue=name):
+                later = queue[len(orchestrator.BASELINE_QUEUE):]
+                self.assertFalse({c.model for c in later} & orchestrator.BASELINE_MODELS)
+
+    def test_a_passing_baseline_is_passed_over_for_the_first_model_after_it(self):
+        def card(status, split="validate"):
+            return mock.Mock(status=status, split=split)
+
+        baseline = orchestrator.BASELINE_QUEUE[1]  # climatology-seasonal
+        failing, passing, later = self.queue[0], self.queue[1], self.queue[2]
+        ran = [
+            (orchestrator.BASELINE_QUEUE[0], card("FAIL")),
+            (baseline, card("PASS")),
+            (failing, card("FAIL")),
+            (passing, card("PASS")),
+            (later, card("PASS")),
+        ]
+        lines = []
+        with mock.patch.object(orchestrator, "promote", return_value="the test card") as p:
+            got = orchestrator._promote_first_pass(
+                ran, self.dataset, experiments_dir=self.dir, progress=lines.append
+            )
+        self.assertEqual(got, "the test card")
+        p.assert_called_once()
+        self.assertEqual(p.call_args.args[1:3], (passing.model, passing.kwargs))
+        self.assertTrue(any(baseline.label in line and "is a baseline" in line
+                            for line in lines), lines)
+
+    def test_only_a_passing_baseline_promotes_nobody(self):
+        ran = [(c, mock.Mock(status="PASS", split="validate"))
+               for c in orchestrator.BASELINE_QUEUE]
+        with mock.patch.object(orchestrator, "promote") as p:
+            got = orchestrator._promote_first_pass(
+                ran, self.dataset, experiments_dir=self.dir, progress=lambda _m: None
+            )
+        self.assertIsNone(got)
+        p.assert_not_called()
 
     def test_promote_refuses_without_validate_pass(self):
         with self.assertRaises(orchestrator.PromotionRefused) as ctx:

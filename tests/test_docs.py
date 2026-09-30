@@ -700,3 +700,28 @@ class TestExperimentCardSkillMatchesTheCard(unittest.TestCase):
         self.assertIn("no reproducibility fingerprint contains it", text)
         self.assertNotIn("Nothing hashes or judges it", text)
         self.assertNotIn("is the same experiment", text)
+
+
+class TestLicenceAndCitationMatchThePackage(unittest.TestCase):
+    """The licence the metadata declares is present, and the citation names this version.
+
+    `readiness.__version__` is the one source of the version (plan §1, R7);
+    CITATION.cff is the one copy that cannot read it, so it is checked here.
+    """
+
+    def test_the_apache_licence_text_is_present(self):
+        text = (REPO_ROOT / "LICENSE").read_text(encoding="utf-8")
+        self.assertIn("Apache License", text)
+        self.assertIn("Version 2.0, January 2004", text)
+        self.assertIn("END OF TERMS AND CONDITIONS", text)
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('license = { text = "Apache-2.0" }', pyproject)
+
+    def test_citation_version_and_licence_match(self):
+        import readiness
+
+        cff = (REPO_ROOT / "CITATION.cff").read_text(encoding="utf-8")
+        version = re.search(r"^version:\s*(\S+)\s*$", cff, re.M)
+        self.assertIsNotNone(version, "CITATION.cff has no version line")
+        self.assertEqual(version.group(1).strip("'\""), readiness.__version__)
+        self.assertRegex(cff, r"(?m)^license:\s*Apache-2\.0\s*$")

@@ -140,6 +140,13 @@ BASELINE_QUEUE: tuple[Candidate, ...] = (
     ),
 )
 
+#: The baseline models, by registry name. They are the yardstick, not a
+#: forecast anyone would issue: a baseline passing on validate is a finding
+#: about the contract's difficulty, and spending the one test touch on it
+#: would say nothing about whether a model beats climatology. So neither
+#: `--promote` nor `readiness promote` will spend the touch on one (plan §7).
+BASELINE_MODELS: frozenset[str] = frozenset(c.model for c in BASELINE_QUEUE)
+
 CANARY_CANDIDATE = Candidate(
     model="leaky-oracle",
     changed=(
@@ -627,17 +634,31 @@ def _promote_first_pass(
     experiments_dir: pathlib.Path | None,
     progress: Progress,
 ) -> ExperimentCard | None:
-    """Promote the first candidate whose validate card is a PASS, or nobody."""
+    """Promote the first non-baseline candidate whose validate card is a PASS, or nobody.
+
+    A baseline that passed is reported and passed over: the touch is kept for
+    a model that could beat it.
+    """
     for candidate, card in ran:
-        if card.status == "PASS" and card.split == "validate":
+        if card.status != "PASS" or card.split != "validate":
+            continue
+        if candidate.model in BASELINE_MODELS:
             progress(
-                f"promote      [{candidate.label}] first validate pass in queue order"
+                f"promote      [{candidate.label}] passed on validate but is a baseline; "
+                "not eligible for the test touch"
             )
-            return promote(
-                dataset.contract, candidate.model, candidate.kwargs, dataset,
-                experiments_dir=experiments_dir, progress=progress,
-            )
-    progress("promote      nothing to promote: no candidate passed on validate")
+            continue
+        progress(
+            f"promote      [{candidate.label}] first non-baseline validate pass "
+            "in queue order"
+        )
+        return promote(
+            dataset.contract, candidate.model, candidate.kwargs, dataset,
+            experiments_dir=experiments_dir, progress=progress,
+        )
+    progress(
+        "promote      nothing to promote: no non-baseline candidate passed on validate"
+    )
     return None
 
 
@@ -694,7 +715,8 @@ def promote(
     than the registry's defaults. Given explicitly, they must still match a
     validate card exactly.
 
-    Refused, in order, when: the dataset has not loaded a source the candidate
+    Refused, in order, when: the model is a baseline (the yardstick is not
+    what the touch is for); the dataset has not loaded a source the candidate
     needs (a touch spent on a run that cannot build its features is a touch
     spent on nothing); the ledger already holds *any* test card; no validate
     card for exactly this model, version and arguments passed with a clear
@@ -707,6 +729,14 @@ def promote(
     digest = contract.digest()
     identity = build_model(model)
     name, version = identity.name, identity.version
+
+    if name in BASELINE_MODELS:
+        raise PromotionRefused(
+            f"refusing to promote {name}@{version}: it is a baseline, the yardstick a "
+            "promoted model is measured against. The test touch is kept for a model "
+            "that could beat it; a baseline passing on validate is recorded on its "
+            "validate card and goes no further."
+        )
 
     if kwargs is None:
         adopted = _latest_validated(ledger, name, version, digest)
