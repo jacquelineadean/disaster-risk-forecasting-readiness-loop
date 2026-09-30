@@ -877,7 +877,7 @@ def _state_fips_of(name: str) -> str:
     text = str(name).strip().upper()
     if text.isdigit() and len(text) == 2:
         return text
-    fips_of = data_mod.state_fips()
+    fips_of = data_mod.state_fips(data_mod.SNAPSHOT_DIR)
     if not fips_of:
         raise UsageError(
             "no pinned Census county file, so state codes cannot be resolved; run "
@@ -891,7 +891,7 @@ def _state_fips_of(name: str) -> str:
 def _exposure_states(args) -> list[str]:
     """The state FIPS an exposure command works over, in a stable order."""
     if getattr(args, "all_states", False):
-        fips_of = data_mod.state_fips()
+        fips_of = data_mod.state_fips(data_mod.SNAPSHOT_DIR)
         if not fips_of:
             raise UsageError(
                 "--all-states needs the pinned Census county file; run "
