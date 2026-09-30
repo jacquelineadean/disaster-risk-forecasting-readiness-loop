@@ -45,6 +45,7 @@ from readiness.connectors import (
 from readiness.connectors.base import (
     CONNECT_TIMEOUT,
     ConnectorError,
+    HTTPStatusError,
     Manifest,
     Session,
     SourceRecord,
@@ -870,6 +871,26 @@ class FakeSession:
         return self.payload
 
 
+class LimitSession(FakeSession):
+    """429s with Open-Meteo's JSON reason: `limits` in order, then the payload."""
+
+    def __init__(self, payload: bytes, limits):
+        super().__init__(payload)
+        self.limits = list(limits)
+
+    def get(self, url: str) -> bytes:
+        self.urls.append(url)
+        if self.limits:
+            kind = self.limits.pop(0)
+            body = json.dumps({
+                "error": True,
+                "reason": f"{kind.capitalize()} API request limit exceeded. "
+                          "Please try again later.",
+            }).encode()
+            raise HTTPStatusError(429, url, body)
+        return self.payload
+
+
 class RangeSession:
     """Serves a synthetic daily payload covering exactly the range the URL asks for.
 
@@ -1074,6 +1095,71 @@ class TestOpenMeteoSnapshot(unittest.TestCase):
         self.snapshot()
         self.assertEqual(self.sleeps, [10.0, 20.0])
         self.assertEqual(len(self.session.urls), 4)
+
+    def test_a_minutely_limit_waits_a_minute_and_retries(self):
+        self.session = LimitSession(self.payload, ["minutely", "minutely"])
+        self.snapshot()
+        self.assertEqual(self.sleeps, [open_meteo.MINUTE_WAIT_S] * 2)
+        self.assertIn("open-meteo/era5/99", self.manifest.records)
+
+    def test_an_hourly_limit_waits_for_the_next_hour(self):
+        self.session = LimitSession(self.payload, ["hourly"])
+        with mock.patch.object(open_meteo.time, "time", return_value=7200.0 + 600.0):
+            self.snapshot()
+        # Ten minutes past the hour: fifty minutes to go, plus the margin.
+        self.assertEqual(self.sleeps, [3000.0 + open_meteo.HOUR_MARGIN_S])
+        self.assertIn("open-meteo/era5/99", self.manifest.records)
+
+    def test_hourly_waits_are_budgeted_across_the_whole_pull(self):
+        limits = ["hourly"] * (open_meteo.HOURLY_WAITS + 1)
+        self.session = LimitSession(self.payload, limits)
+        with self.assertRaises(open_meteo.RateLimited) as ctx:
+            self.snapshot()
+        self.assertEqual(len(self.sleeps), open_meteo.HOURLY_WAITS)
+        self.assertIn("hourly request limit", str(ctx.exception))
+
+    def test_a_daily_limit_stops_at_once_and_the_pull_resumes_later(self):
+        class DailyAfterOne(RangeSession):
+            def get(inner, url):
+                if inner.urls:
+                    inner.urls.append(url)
+                    raise HTTPStatusError(429, url, json.dumps(
+                        {"error": True, "reason": "Daily API request limit exceeded."}
+                    ).encode())
+                return super().get(url)
+
+        with self.assertRaises(open_meteo.RateLimited) as ctx:
+            self.snapshot(session=DailyAfterOne())
+        self.assertEqual(self.sleeps, [])
+        message = str(ctx.exception)
+        self.assertIn("daily request limit", message)
+        self.assertIn("1/2 counties of 99", message)
+        # The county that landed is on disk, unpinned; the next pull fetches
+        # only the other one and pins the whole extract.
+        self.assertNotIn("open-meteo/era5/99", self.manifest.records)
+        self.session = RangeSession()
+        self.snapshot()
+        self.assertEqual(len(self.session.urls), 1)
+        self.assertIn("open-meteo/era5/99", self.manifest.records)
+
+    def test_a_429_without_a_reason_keeps_the_backoff(self):
+        for body in (b"", b"not json", b'{"reason": "slow down"}'):
+            with self.subTest(body=body):
+                self.assertIsNone(
+                    open_meteo.limit_hit(HTTPStatusError(429, "https://x", body))
+                )
+        self.assertIsNone(open_meteo.limit_hit(ConnectorError("HTTP 429 for x")))
+
+    def test_the_session_keeps_the_status_and_body_of_a_refusal(self):
+        session = Session()
+        with mock.patch.object(session, "_request",
+                               return_value=(429, {}, b'{"reason": "Hourly"}')):
+            with self.assertRaises(HTTPStatusError) as ctx:
+                session.get("https://example.invalid/x")
+        self.assertEqual(ctx.exception.status, 429)
+        self.assertEqual(ctx.exception.body, b'{"reason": "Hourly"}')
+        self.assertEqual(str(ctx.exception), "HTTP 429 for https://example.invalid/x")
+        self.assertIsInstance(ctx.exception, ConnectorError)
 
     def test_a_non_429_error_is_not_retried(self):
         class Broken(FakeSession):

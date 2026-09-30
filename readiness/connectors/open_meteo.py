@@ -16,8 +16,16 @@ checksums (over the payload with `generationtime_ms` removed, which is timing
 noise, not data) are written into the record's notes.
 
 One request per county covers the whole year range, and the pull is
-sequential on one keep-alive session: the archive API rate-limits by the
-minute, so parallel workers only earn 429s. A 429 is slept through and retried.
+sequential on one keep-alive session: parallel workers only earn 429s. The
+archive API weighs a request by its span (about one call per two weeks of
+data per location), so one county's 32 years cost roughly 835 calls against
+a free allowance of 5,000 an hour and 10,000 a day: a state takes hours to
+days and the quota, not the network, sets the pace. A 429 says in its body
+which limit it hit, and each gets its own answer: a per-minute limit is
+waited out, an hourly one is waited out up to `HOURLY_WAITS` times per pull,
+and a daily or monthly one stops the pull with `RateLimited` straight away,
+since no run can wait that long. A 429 that names no limit is retried with
+backoff, as before.
 The extract is resumable: a county already written is not fetched again unless
 `refresh` is set or its line no longer covers the requested years. What is
 never done is re-pinning an extract whose bytes have stopped matching the
@@ -42,6 +50,7 @@ from typing import Callable, Mapping, NamedTuple, Sequence
 from readiness.connectors.base import (
     DEFAULT_SESSION,
     ConnectorError,
+    HTTPStatusError,
     Manifest,
     Session,
     SourceRecord,
@@ -61,9 +70,40 @@ VARIABLES = ("precip_mm", "tmean_c")
 _DAILY = {"precip_mm": "precipitation_sum", "tmean_c": "temperature_2m_mean"}
 _LINE_KEYS = ("id", "elevation_m", "month0", "precip_mm", "tmean_c")
 
-#: How a 429 is waited out: the archive API's limits are per minute.
+#: How a 429 that names no limit is waited out: exponential backoff.
 RATE_LIMIT_RETRIES = 6
 RATE_LIMIT_BACKOFF_S = 10.0
+#: A per-minute limit: wait a little over a minute, this many times in a row.
+MINUTE_WAIT_S = 65.0
+MINUTE_WAITS = 10
+#: An hourly limit: wait for the next clock hour (plus a margin), at most this
+#: many times in one pull. Four hours of waiting fits the workflow's
+#: five-hour pull step with room to write and pin what was fetched.
+HOURLY_WAITS = 4
+HOUR_MARGIN_S = 30.0
+
+
+class RateLimited(ConnectorError):
+    """A quota this pull cannot wait out. The extract so far is kept and resumes."""
+
+
+def limit_hit(exc: Exception) -> str | None:
+    """Which Open-Meteo limit a 429 names — minutely, hourly, daily, monthly — or None.
+
+    Open-Meteo answers a 429 with JSON whose `reason` says which allowance was
+    exceeded ("Hourly API request limit exceeded. ..."). Anything else — no
+    body, not JSON, no recognisable word — is None and gets the plain backoff.
+    """
+    body = getattr(exc, "body", b"") or b""
+    try:
+        reason = str(json.loads(body).get("reason", ""))
+    except (ValueError, AttributeError):
+        return None
+    reason = reason.lower()
+    for kind in ("minutely", "hourly", "daily", "monthly"):
+        if kind in reason:
+            return kind
+    return None
 
 Point = tuple[float, float]
 
@@ -215,23 +255,60 @@ def read_extract(path: pathlib.Path) -> dict[str, dict]:
     return out
 
 
-def _get_json(session: Session, url: str, sleep: Callable[[float], None]) -> dict:
-    """One request; a 429 from the session is slept through and retried."""
-    for attempt in range(RATE_LIMIT_RETRIES):
+class _Waits:
+    """How much of the pull's waiting allowance is spent."""
+
+    def __init__(self) -> None:
+        self.minutes = 0  # consecutive per-minute waits; reset by a success
+        self.hours = 0    # hourly waits in this pull
+
+
+def _get_json(
+    session: Session,
+    url: str,
+    sleep: Callable[[float], None],
+    *,
+    waits: _Waits | None = None,
+    now: Callable[[], float] | None = None,
+) -> dict:
+    """One request; a 429 is answered according to the limit it names."""
+    waits = waits or _Waits()
+    now = now or time.time  # looked up per call, so a patched clock is seen
+    backoffs = 0
+    while True:
         try:
             body = session.get(url)
         except ConnectorError as exc:
-            if "HTTP 429" in str(exc) and attempt < RATE_LIMIT_RETRIES - 1:
-                sleep(RATE_LIMIT_BACKOFF_S * 2**attempt)
+            if "HTTP 429" not in str(exc):
+                raise
+            kind = limit_hit(exc)
+            if kind == "minutely" and waits.minutes < MINUTE_WAITS:
+                waits.minutes += 1
+                sleep(MINUTE_WAIT_S)
+                continue
+            if kind == "hourly" and waits.hours < HOURLY_WAITS:
+                waits.hours += 1
+                sleep(3600.0 - now() % 3600.0 + HOUR_MARGIN_S)
+                continue
+            if kind is not None:
+                spent = {"minutely": f"{waits.minutes} one-minute wait(s)",
+                         "hourly": f"{waits.hours} hourly wait(s)"}.get(kind)
+                raise RateLimited(
+                    f"Open-Meteo's {kind} request limit is reached"
+                    + (f" after {spent}" if spent else "")
+                ) from None
+            if backoffs < RATE_LIMIT_RETRIES - 1:
+                sleep(RATE_LIMIT_BACKOFF_S * 2**backoffs)
+                backoffs += 1
                 continue
             raise
+        waits.minutes = 0
         try:
             return json.loads(body)
         except ValueError as exc:
             raise ConnectorError(
                 f"Open-Meteo returned non-JSON for {url}: {exc}"
             ) from None
-    raise ConnectorError(f"rate-limited {RATE_LIMIT_RETRIES} times fetching {url}")
 
 
 def _keep_raw(raw_dir: pathlib.Path, fips: str, payload: dict) -> str:
@@ -288,6 +365,7 @@ def snapshot(
     years = sorted(set(years))
     first_year, last_year = years[0] - 2, years[-1]
     session = session or DEFAULT_SESSION
+    waits = _Waits()
     paths: list[pathlib.Path] = []
     for part, regions in parts_for(centroids, scope).items():
         path, key = extract_path(snapshot_dir, part), manifest_key(part)
@@ -326,7 +404,16 @@ def snapshot(
             for i, fips in enumerate(todo, start=1):
                 lat, lon = regions[fips]
                 url = request_url(lat, lon, first_year, last_year)
-                payload = _get_json(session, url, sleep)
+                try:
+                    payload = _get_json(session, url, sleep, waits=waits)
+                except RateLimited as exc:
+                    # Every county fetched so far is already on disk; the
+                    # extract stays unpinned and the next pull resumes it.
+                    raise RateLimited(
+                        f"{exc}. {len(lines)}/{len(regions)} counties of {part} are "
+                        f"in {path}; pull again once the quota resets and it "
+                        "resumes from there."
+                    ) from None
                 lines[fips] = _line(fips, parse_daily_to_monthly(payload))
                 fh.write(_dumps(lines[fips]))
                 fh.flush()

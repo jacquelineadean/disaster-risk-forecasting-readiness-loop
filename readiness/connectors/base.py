@@ -36,6 +36,22 @@ class ConnectorError(RuntimeError):
     pass
 
 
+class HTTPStatusError(ConnectorError):
+    """A non-200 answer, with the status and the body the server sent.
+
+    The message is the one every caller already matches on (`HTTP 429 for
+    <url>`); the body is kept because some servers say *why* in it — Open-Meteo
+    names which of its per-minute, hourly or daily limits a 429 hit, and the
+    right response to each is different.
+    """
+
+    def __init__(self, status: int, url: str, body: bytes = b"") -> None:
+        super().__init__(f"HTTP {status} for {url}")
+        self.status = status
+        self.url = url
+        self.body = body
+
+
 @dataclass
 class SourceRecord:
     """One pinned file: where it came from, what it hashed to, when."""
@@ -395,7 +411,7 @@ class Session:
                     urllib.parse.urljoin(url, location), _redirects=_redirects + 1
                 )
             if status != 200:
-                raise ConnectorError(f"HTTP {status} for {url}")
+                raise HTTPStatusError(status, url, body)
             return body
         raise ConnectorError(
             f"failed to fetch {url} after {self.retries} attempt(s): {last}\n"
