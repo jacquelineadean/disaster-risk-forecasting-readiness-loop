@@ -17,10 +17,11 @@ noise, not data) are written into the record's notes.
 
 One request per county covers the whole year range, and the pull is
 sequential on one keep-alive session: parallel workers only earn 429s. The
-archive API weighs a request by its span (about one call per two weeks of
-data per location), so one county's 32 years cost roughly 835 calls against
-a free allowance of 5,000 an hour and 10,000 a day: a state takes hours to
-days and the quota, not the network, sets the pace. A 429 says in its body
+archive API weighs a request by its span, and one county's 32 years of daily
+data is a heavy request against a free allowance of 5,000 calls an hour and
+10,000 a day. Measured from a GitHub runner, that is about 60 counties a day
+(docs/plan.md §7.3): a state takes a day or two, and the quota, not the
+network, sets the pace. A 429 says in its body
 which limit it hit, and each gets its own answer: a per-minute limit is
 waited out, an hourly one is waited out up to `HOURLY_WAITS` times per pull,
 and a daily or monthly one stops the pull with `RateLimited` straight away,
