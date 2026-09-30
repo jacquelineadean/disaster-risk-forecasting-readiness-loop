@@ -789,7 +789,7 @@ first real pull.
 After each phase: the suite green on the working tree, this file's status
 table updated, one commit per coherent change.
 
-Delivery is a stack of pull requests, each reviewable on its own and each
+Delivery was a stack of pull requests, each reviewable on its own and each
 based on the one below it:
 
 | PR | branch | contains | base |
@@ -799,4 +799,23 @@ based on the one below it:
 | #13 | `…-phase3` | Phase 3: facility record, scenarios, rules, gap report, blinded reviews, case studies | #12 |
 | #14 | `…-phase4` | Phase 4: contract schema, global connectors, pilots | #13 |
 
-A fix to a lower PR is made there and the branches above it are rebased.
+A fix to a lower PR was made there and the branches above it were rebased.
+
+### 6.1. Where the stack landed
+
+| PR | merged | into | what reached `main` |
+|---|---|---|---|
+| #11 | 2026-09-18 | `main` (`f9de118`) | the guard, this plan, Phase R and Phase 1 |
+| #12 | 2026-09-21 | `main` (`f018a4e`) | Phase 2 |
+| #13 | 2026-09-21 | the Phase 2 branch | nothing, at that point |
+| #14 | 2026-09-21 | the Phase 3 branch | nothing, at that point |
+| #15 | 2026-09-23 | `main` (`f7b66d0`) | Phases 3 and 4: the ten commits of #13 and #14, unchanged |
+
+#12, #13 and #14 were merged within forty seconds of each other. GitHub
+merges a stacked pull request into whatever its base is at that moment, and
+#13 still had the Phase 2 branch as its base and #14 the Phase 3 branch, so
+both merged sideways before either could be retargeted to `main`. #15 carried
+the same commits from the Phase 4 branch to `main`; the tree at `f7b66d0` is
+identical to the Phase 4 head (`b31700c`), so nothing was rewritten or
+re-reviewed. For the next stack: retarget each pull request to `main` as soon
+as the one below it merges, and merge one at a time.
