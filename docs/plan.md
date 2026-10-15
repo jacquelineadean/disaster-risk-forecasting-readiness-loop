@@ -904,6 +904,10 @@ touch is spent, never after.
 The workflow saves its snapshot cache under a per-run key even when a step
 fails, so a pull stopped by the job limit or the API's quota resumes on the
 next dispatch rather than starting over.
+Two GitHub rules bound that: a run restores only caches saved on its own
+branch or on `main`, and GitHub evicts a cache nobody restores for 7 days.
+So rehearsals dispatch from `main`, and a stopped pull resumes only if the
+next dispatch comes within the week.
 
 **The ERA5 quota sets the pace, and it rules out a free national pull.**
 Open-Meteo's free allowance is 5,000 calls an hour, 10,000 a day and 300,000
@@ -937,3 +941,4 @@ One row per dispatch, including rehearsals and failures.
 |---|---|---|---|---|---|---|---|
 | 1 | 2026-09-30 | tornado-ok | 1 | rehearsal (PR #18 branch, workflow test) | [36658860381](https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/actions/runs/36658860381) | `2978305` | pull stopped: Open-Meteo 429 after 25/77 counties. No cards written, nothing committed. The failure path worked: the artifact was uploaded and the cache saved. Led to the rate-limit handling and the cache-key fix in #18 |
 | 2 | 2026-09-30 | tornado-ok | 1 | rehearsal (PR #18 branch, after the fixes) | [36660180708](https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/actions/runs/36660180708) | `d2d4aca` | pull stopped cleanly on Open-Meteo's daily limit after 60/77 counties, having waited out the hourly limits over 90 minutes. No cards written, nothing committed. The partial extract is saved in the cache under the committed manifest's key, so the next dispatch fetches only the last 17 counties |
+| 3 | 2026-10-01 | tornado-ok | 1 | rehearsal (`main`, before the fixes merged) | [36934227257](https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/actions/runs/36934227257) | `e070527` | pull stopped: Open-Meteo 429 after 25 to 49 of 77 counties (the last progress line read 25/77), exit code 2 after 12 minutes. `main` had neither the rate-limit handling nor the cache-key fix, and it started from 0/77: run #2's cache was saved on the PR #18 branch, which a run on `main` cannot restore. No cards written, nothing committed. The artifact was uploaded and the cache saved. Row added on 2026-10-15, two weeks after the dispatch |
