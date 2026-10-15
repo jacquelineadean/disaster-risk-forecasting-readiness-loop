@@ -901,10 +901,33 @@ results do not show all four quarterly contracts with a passing non-baseline
 candidate, the criterion is revisited in a reviewed PR *before* any national
 touch is spent, never after.
 
-The national ERA5 pull is about 3,100 sequential Open-Meteo requests. The
-workflow saves its snapshot cache under a per-run key even when a step fails,
-so a pull stopped by the job limit or the API's quota resumes on the next
-dispatch rather than starting over.
+The workflow saves its snapshot cache under a per-run key even when a step
+fails, so a pull stopped by the job limit or the API's quota resumes on the
+next dispatch rather than starting over.
+
+**The ERA5 quota sets the pace, and it rules out a free national pull.**
+Open-Meteo's free allowance is 5,000 calls an hour, 10,000 a day and 300,000
+a month. A request is weighed by its span, and each county asks for a
+1994–2025 daily series, so a county costs many calls. A GitHub runner also
+shares its address with other users. The published weighting rule, applied
+literally, gives about 835 calls per county; the measured rate is better:
+- The first rehearsal (register #1) fetched 25 of Oklahoma's 77 counties
+  before a 429 its backoff could not clear.
+- With the pull now waiting out per-minute and hourly limits and stopping
+  cleanly on a daily one (`open_meteo.RateLimited`), the second (register #2)
+  fetched **60 counties in one day** before the daily limit.
+
+So a state contract completes in one or two daily dispatches. The national
+pull is about 3,100 counties: roughly **50 days** of daily dispatches at the
+measured rate. That is too slow to plan around. Phase 2 therefore needs one
+of:
+- a paid Open-Meteo plan with an API key (the historical API is on the
+  Professional tier);
+- a different ERA5 source for the national contracts (Copernicus's monthly
+  means, one gridded download);
+- the national contracts run without ERA5 features (`features=terrain`).
+
+That choice is made before the Phase 2 rehearsal.
 
 ### 7.4. Register
 
@@ -912,3 +935,5 @@ One row per dispatch, including rehearsals and failures.
 
 | # | date | contract | phase | kind | run | commit | outcome |
 |---|---|---|---|---|---|---|---|
+| 1 | 2026-09-30 | tornado-ok | 1 | rehearsal (PR #18 branch, workflow test) | [36658860381](https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/actions/runs/36658860381) | `2978305` | pull stopped: Open-Meteo 429 after 25/77 counties. No cards written, nothing committed. The failure path worked: the artifact was uploaded and the cache saved. Led to the rate-limit handling and the cache-key fix in #18 |
+| 2 | 2026-09-30 | tornado-ok | 1 | rehearsal (PR #18 branch, after the fixes) | [36660180708](https://github.com/jacquelineadean/disaster-risk-forecasting-readiness-loop/actions/runs/36660180708) | `d2d4aca` | pull stopped cleanly on Open-Meteo's daily limit after 60/77 counties, having waited out the hourly limits over 90 minutes. No cards written, nothing committed. The partial extract is saved in the cache under the committed manifest's key, so the next dispatch fetches only the last 17 counties |
