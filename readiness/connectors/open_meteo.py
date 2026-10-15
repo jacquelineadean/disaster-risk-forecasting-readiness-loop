@@ -51,7 +51,6 @@ from typing import Callable, Mapping, NamedTuple, Sequence
 from readiness.connectors.base import (
     DEFAULT_SESSION,
     ConnectorError,
-    HTTPStatusError,
     Manifest,
     Session,
     SourceRecord,
