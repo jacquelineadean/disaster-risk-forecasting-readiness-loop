@@ -1170,6 +1170,35 @@ class TestOpenMeteoSnapshot(unittest.TestCase):
             self.snapshot(session=Broken(self.payload))
         self.assertEqual(self.sleeps, [])
 
+    def test_a_body_that_is_not_json_is_retried_with_backoff(self):
+        class EmptyOnce(FakeSession):
+            def get(self, url):
+                body = super().get(url)
+                return b"" if len(self.urls) == 1 else body
+
+        self.session = EmptyOnce(self.payload)
+        self.snapshot()
+        self.assertEqual(self.sleeps, [open_meteo.RATE_LIMIT_BACKOFF_S])
+        self.assertEqual(len(self.session.urls), 3)  # two counties, one retry
+        self.assertIn("open-meteo/era5/99", self.manifest.records)
+
+    def test_a_body_that_stays_non_json_stops_the_pull(self):
+        class Html(FakeSession):
+            def get(self, url):
+                super().get(url)
+                return b"<html>502</html>"
+
+        with self.assertRaises(ConnectorError) as ctx:
+            self.snapshot(session=Html(self.payload))
+        self.assertIn("non-JSON", str(ctx.exception))
+        self.assertIn(f"{open_meteo.BAD_BODY_RETRIES} time(s)", str(ctx.exception))
+        self.assertEqual(
+            self.sleeps,
+            [open_meteo.RATE_LIMIT_BACKOFF_S * 2**i
+             for i in range(open_meteo.BAD_BODY_RETRIES - 1)],
+        )
+        self.assertNotIn("open-meteo/era5/99", self.manifest.records)
+
     def test_keep_raw_writes_the_response_and_notes_its_checksum(self):
         self.snapshot(keep_raw=True)
         raw = self.dir / "open_meteo_raw" / "99001.json"

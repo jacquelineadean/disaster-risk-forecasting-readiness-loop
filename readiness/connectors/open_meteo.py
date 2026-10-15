@@ -26,7 +26,10 @@ which limit it hit, and each gets its own answer: a per-minute limit is
 waited out, an hourly one is waited out up to `HOURLY_WAITS` times per pull,
 and a daily or monthly one stops the pull with `RateLimited` straight away,
 since no run can wait that long. A 429 that names no limit is retried with
-backoff, as before.
+backoff, as before. A 2xx whose body is not JSON (one empty answer in 77
+requests on 15 October, plan §7.4 row 5) is retried the same way,
+`BAD_BODY_RETRIES` attempts in all, before the pull stops with every county
+fetched so far on disk.
 The extract is resumable: a county already written is not fetched again unless
 `refresh` is set or its line no longer covers the requested years. What is
 never done is re-pinning an extract whose bytes have stopped matching the
@@ -73,6 +76,9 @@ _LINE_KEYS = ("id", "elevation_m", "month0", "precip_mm", "tmean_c")
 #: How a 429 that names no limit is waited out: exponential backoff.
 RATE_LIMIT_RETRIES = 6
 RATE_LIMIT_BACKOFF_S = 10.0
+#: A 2xx whose body is not JSON is retried with the same backoff, this many
+#: attempts in all, before the pull stops.
+BAD_BODY_RETRIES = 3
 #: A per-minute limit: wait a little over a minute, this many times in a row.
 MINUTE_WAIT_S = 65.0
 MINUTE_WAITS = 10
@@ -275,6 +281,7 @@ def _get_json(
     waits = waits or _Waits()
     now = now or time.time  # looked up per call, so a patched clock is seen
     backoffs = 0
+    bad_bodies = 0
     while True:
         try:
             body = session.get(url)
@@ -306,8 +313,17 @@ def _get_json(
         try:
             return json.loads(body)
         except ValueError as exc:
+            # A 2xx whose body does not parse: an empty or cut-off answer
+            # under load, not a refusal. Retried with the same backoff as an
+            # unexplained 429, a few times only, because a county that keeps
+            # answering this way is a finding rather than a wait.
+            if bad_bodies < BAD_BODY_RETRIES - 1:
+                sleep(RATE_LIMIT_BACKOFF_S * 2**bad_bodies)
+                bad_bodies += 1
+                continue
             raise ConnectorError(
-                f"Open-Meteo returned non-JSON for {url}: {exc}"
+                f"Open-Meteo returned non-JSON for {url} "
+                f"{BAD_BODY_RETRIES} time(s): {exc}"
             ) from None
 
 
