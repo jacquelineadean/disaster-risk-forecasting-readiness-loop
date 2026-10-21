@@ -81,10 +81,15 @@ jobs:
       # `actions/cache` step: a cache step skips its save on an exact key hit,
       # and the site build already saves under the manifest's hash, so every
       # feature pull made here would be thrown away and an interrupted national
-      # pull could never resume. The newest cache for this manifest wins, then
-      # the newest of any; the pulls re-pin (or refuse) what they find. The
-      # path list must stay in the same order as site.yml's: the cache
-      # version is a hash of it, and a different order never restores.
+      # pull could never resume. The newest per-run cache for this manifest
+      # wins, then the site build's, then the newest of any; the pulls re-pin
+      # (or refuse) what they find. The first restore key ends in a hyphen on
+      # purpose: GitHub takes an exact match on a restore key before a newer
+      # prefix match, and the site build's key is exactly the base, so without
+      # the hyphen every dispatch restored that cache, which holds no ERA5
+      # extract, and never a per-run one (plan §7.4, rows 5 and 6). The path
+      # list must stay in the same order as site.yml's: the cache version is
+      # a hash of it, and a different order never restores.
       - name: Restore the pinned data
         uses: actions/cache/restore@v6
         with:
@@ -98,6 +103,7 @@ jobs:
             snapshots/usa_structures
           key: ${{ steps.cache-key.outputs.base }}-${{ github.run_id }}
           restore-keys: |
+            ${{ steps.cache-key.outputs.base }}-
             ${{ steps.cache-key.outputs.base }}
             snapshot-
       - name: Pull and pin the contract's data
