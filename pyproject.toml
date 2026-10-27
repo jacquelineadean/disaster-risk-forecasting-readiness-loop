@@ -25,12 +25,16 @@ dependencies = []
 [project.optional-dependencies]
 agent = ["claude-agent-sdk>=0.2.150"]
 # Only for regenerating the walkthrough's screenshots (tools/demo/capture.py).
-# pillow floor is a security minimum: versions before 12.2.0 are vulnerable to
-# CVE-2026-42311 (PSD RCE), CVE-2026-42309 (buffer overflow) and CVE-2026-42310
-# (PDF-parsing DoS) -- see GHSA-r73j-pqj5-w3x7 and related advisories.
+# pillow floor is a security minimum: versions before 13.0.0 are vulnerable to
+# CVE-2026-96639 (stale native image storage reused after mode transitions,
+# GHSA-v9pv-5gc8-w2m6) and CVE-2026-112398 (FlashPix/JPEG decoder heap
+# overflow), among other advisories fixed only in 13.0.0. Note 13.0.0 requires
+# Python >=3.11, so this extra is no longer installable under the 3.10 leg of
+# the test matrix -- harmless today since no CI job installs it, but relevant
+# if that changes.
 # playwright floor is a security minimum: versions before 1.55.1 are vulnerable
 # to CVE-2025-59288 (browser download skips TLS certificate verification).
-docs = ["playwright>=1.63.0", "pillow>=12.3.0"]
+docs = ["playwright>=1.63.0", "pillow>=13.0.0"]
 
 [project.scripts]
 readiness = "readiness.cli:main"
