@@ -51,6 +51,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # to list the caches GitHub holds, below
 
 # One run at a time, queued rather than cancelled: every run writes the same
 # manifest and the same cache, and a cancelled promote run is a spent touch
@@ -82,14 +83,28 @@ jobs:
       # and the site build already saves under the manifest's hash, so every
       # feature pull made here would be thrown away and an interrupted national
       # pull could never resume. The newest per-run cache for this manifest
-      # wins, then the site build's, then the newest of any; the pulls re-pin
-      # (or refuse) what they find. The first restore key ends in a hyphen on
-      # purpose: GitHub takes an exact match on a restore key before a newer
-      # prefix match, and the site build's key is exactly the base, so without
-      # the hyphen every dispatch restored that cache, which holds no ERA5
-      # extract, and never a per-run one (plan §7.4, rows 5 and 6). The path
-      # list must stay in the same order as site.yml's: the cache version is
-      # a hash of it, and a different order never restores.
+      # wins, then the newest of any; the pulls re-pin (or refuse) what they
+      # find. The committed manifest's bare key, which is the site build's
+      # cache key, is deliberately not a restore key: GitHub takes an exact
+      # match on any restore key before a prefix match on an earlier one, so
+      # with it listed every dispatch restored the site build's cache, which
+      # holds no ERA5 extract, and never a per-run one, whether the bare key
+      # came first (plan §7.4, rows 5 and 6) or second, behind the hyphenated
+      # prefix (rows 7 and 8). The site build's cache is still reached through
+      # the `snapshot-` prefix when no per-run cache exists. The path list
+      # must stay in the same order as site.yml's: the cache version is a
+      # hash of it, and a different order never restores.
+      #
+      # First, what GitHub holds under the prefix, for the register: which
+      # caches exist, on which ref, and when each was made and last restored.
+      # Read-only, and never fails the run.
+      - name: List the snapshot caches GitHub holds
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh api "repos/${{ github.repository }}/actions/caches?key=snapshot-&sort=created_at&direction=desc&per_page=50"
+          --jq '.actions_caches[] | "\(.key)  ref=\(.ref)  created=\(.created_at)  last_used=\(.last_accessed_at)  bytes=\(.size_in_bytes)"'
       - name: Restore the pinned data
         uses: actions/cache/restore@v6
         with:
@@ -104,7 +119,6 @@ jobs:
           key: ${{ steps.cache-key.outputs.base }}-${{ github.run_id }}
           restore-keys: |
             ${{ steps.cache-key.outputs.base }}-
-            ${{ steps.cache-key.outputs.base }}
             snapshot-
       - name: Pull and pin the contract's data
         timeout-minutes: 300
